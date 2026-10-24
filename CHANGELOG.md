@@ -27,7 +27,7 @@ All notable changes to this project are documented in this file.
 
 ### Performance on Apple M4 Max
 
-Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`). Chrome results and all 1080p/1440p rows retain the earlier measurements against optimization commit `738e869`, before input/output sanitizing. The 720p native and OIDN columns were remeasured together; native uses `e768242`, which includes sanitizing.
+Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`); the current revision is `fd0d816`. All cells come from one run of the Mac benchmark suite, except the Large 720p row: in that run every column, including OIDN Metal, was 8–17% slower than in neighbouring measurements, so the row was measured again in a separate run.
 
 Each cell shows **median milliseconds per image**, from 5 warmups and 21 measured executions. Parentheses show the **latency reduction relative to 0.5.0**, calculated as `(0.5.0 time - measured time) / 0.5.0 time x 100%`. Every execution processes one whole image and synchronizes before the next. Inputs and outputs stay in GPU-resident RGBA32F buffers. Timings include HDR preprocessing, network execution, output conversion and host synchronization; they exclude device creation, model preparation, uploads and output readback. These are wall latencies, not GPU timestamp measurements.
 
@@ -41,23 +41,19 @@ All oidn-web paths use FP16 weights and activations with their default accumulat
 
 | Model | Input | oidn-web 0.5.0 (Chrome) | oidn-web (Chrome) | oidn-web (Chrome subgroup matrix) | oidn-web(native wgpu) | OIDN Metal |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Small | 720p | 15.50 ms | 13.40 ms (↓13.5%) | 11.80 ms (↓23.9%) | 8.52 ms (↓45.0%) | 8.65 ms (↓44.2%) |
-| Small | 1080p | 34.60 ms | 30.30 ms (↓12.4%) | 26.30 ms (↓24.0%) | 19.25 ms (↓44.4%) | 19.15 ms (↓44.7%) |
-| Small | 1440p | 61.00 ms | 53.00 ms (↓13.1%) | 45.80 ms (↓24.9%) | 33.71 ms (↓44.7%) | 33.10 ms (↓45.7%) |
-| Base | 720p | 27.80 ms | 22.60 ms (↓18.7%) | 20.00 ms (↓28.1%) | 14.50 ms (↓47.9%) | 15.71 ms (↓43.5%) |
-| Base | 1080p | 64.10 ms | 53.60 ms (↓16.4%) | 47.00 ms (↓26.7%) | 38.13 ms (↓40.5%) | 38.40 ms (↓40.1%) |
-| Base | 1440p | 123.80 ms | 102.30 ms (↓17.4%) | 90.50 ms (↓26.9%) | 72.31 ms (↓41.6%) | 73.39 ms (↓40.7%) |
-| Large | 720p | 63.30 ms | 53.70 ms (↓15.2%) | 50.00 ms (↓21.0%) | 37.69 ms (↓40.5%) | 34.58 ms (↓45.4%) |
-| Large | 1080p | 170.70 ms | 145.00 ms (↓15.1%) | 134.50 ms (↓21.2%) | 111.10 ms (↓34.9%) | 96.04 ms (↓43.7%) |
-| Large | 1440p | 335.00 ms | 307.00 ms (↓8.4%) | 262.70 ms (↓21.6%) | 216.71 ms (↓35.3%) | 212.30 ms (↓36.6%) |
+| Small | 720p | 15.60 ms | 13.60 ms (↓12.8%) | 11.90 ms (↓23.7%) | 8.51 ms (↓45.4%) | 8.78 ms (↓43.7%) |
+| Small | 1080p | 35.00 ms | 30.40 ms (↓13.1%) | 26.50 ms (↓24.3%) | 18.48 ms (↓47.2%) | 19.19 ms (↓45.2%) |
+| Small | 1440p | 61.60 ms | 53.50 ms (↓13.1%) | 46.40 ms (↓24.7%) | 32.26 ms (↓47.6%) | 33.48 ms (↓45.7%) |
+| Base | 720p | 28.20 ms | 22.90 ms (↓18.8%) | 20.20 ms (↓28.4%) | 14.55 ms (↓48.4%) | 15.91 ms (↓43.6%) |
+| Base | 1080p | 62.90 ms | 51.20 ms (↓18.6%) | 45.00 ms (↓28.5%) | 32.09 ms (↓49.0%) | 35.12 ms (↓44.2%) |
+| Base | 1440p | 123.60 ms | 103.70 ms (↓16.1%) | 81.90 ms (↓33.7%) | 58.59 ms (↓52.6%) | 65.42 ms (↓47.1%) |
+| Large | 720p | 64.90 ms | 54.20 ms (↓16.5%) | 50.50 ms (↓22.2%) | 36.29 ms (↓44.1%) | 34.85 ms (↓46.3%) |
+| Large | 1080p | 161.20 ms | 143.00 ms (↓11.3%) | 127.10 ms (↓21.2%) | 93.94 ms (↓41.7%) | 89.79 ms (↓44.3%) |
+| Large | 1440p | 295.10 ms | 259.30 ms (↓12.1%) | 224.70 ms (↓23.9%) | 171.30 ms (↓42.0%) | 159.14 ms (↓46.1%) |
 
-Against `0878cca`, which already includes sanitizing, Large native 720p latency decreased from 39.65 to 37.69 ms (4.9%). It remains 9.0% slower than OIDN Metal in this comparison.
+Native latency was 3.1–3.7% lower than OIDN Metal for Small and 8.5–10.4% lower for Base. For Large it was 4.1–7.6% higher.
 
-A later Large native 720p optimization reduced latency from 37.68 to 37.21 ms (1.2%) and temporary GPU memory from 322.6 to 280.2 MB (13.1%), using the same device and timing protocol. The table above shows the earlier measurements.
-
-Running the final RGB convolution on cooperative matrices then reduced native 720p latency from 8.59 to 8.47 ms for Small (1.5%), 14.68 to 14.55 ms for Base (0.9%) and 37.68 to 36.33 ms for Large (3.6%), with the same protocol and baseline and current runs alternated.
-
-Input sizes: `720p` = 1280 x 720, `1080p` = 1920 x 1080, `1440p` = 2560 x 1440. No outlier samples are removed; the Large 1440p case had substantial variation (for example, 296.20–384.50 ms for the 0.5.0 baseline). These local timings depend on GPU load, power state, browser, model and image size. They do not measure image quality, first-use latency or interactive tiled execution.
+Input sizes: `720p` = 1280 x 720, `1080p` = 1920 x 1080, `1440p` = 2560 x 1440. No outlier samples are removed; the Large 1440p case had substantial variation (for example, 239.40–303.00 ms for ordinary Chrome). These local timings depend on GPU load, power state, browser, model and image size. They do not measure image quality, first-use latency or interactive tiled execution.
 
 The [Mac benchmark suite](docs/development.md#benchmarks-and-gpu-checks) can reproduce these cases and retains every timing sample, P95, model hash, source revision, selected kernel and resource count in its local JSON report.
 

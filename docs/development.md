@@ -118,19 +118,14 @@ Default inputs are `720p` (1280x720), `1080p` (1920x1080) and `1440p` (2560x1440
 
 The suite writes raw samples, model and binary hashes, source revisions, selected kernels, resource sizes and a Markdown report to `benchmarks/results/mac-performance.{json,md}`. Its metric is synchronized latency for one GPU-resident RGBA32F HDR image with albedo and normal. It includes preprocessing, network execution and output conversion, and excludes uploads, readback, device creation and preparation. Default protocol: 3 warmups, 7 measured images, whole-image processing, `inputScale=1`. Native runtime checks are disabled to match the C API default. Official OIDN loads the same TZA weights; Small uses fast quality, Base uses high, and Large uses high with clean auxiliary images. This is a timing comparison, not an image-quality comparison.
 
-The changelog combines separate runs. Repeat the earlier Chrome and 1080p/1440p comparison with OIDN 2.5.1 and:
+Repeat the changelog's Apple M4 Max comparison with OIDN 2.5.1 and:
 
 ```bash
 OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-performance.mjs \
-  --current-ref 738e869 --warmup 5 --runs 21
+  --current-ref fd0d816 --warmup 5 --runs 21
 ```
 
-For a new 720p comparison at the native optimization revision (including fresh Chrome measurements), use:
-
-```bash
-OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-performance.mjs \
-  --current-ref e768242 --models small,base,large --sizes 720p --warmup 5 --runs 21
-```
+When one case is slower in every column, OIDN Metal included, remeasure only that case, for example `--models large --sizes 720p`.
 
 ### Native Metal profiling
 
