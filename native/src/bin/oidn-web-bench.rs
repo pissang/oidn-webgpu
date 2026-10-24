@@ -4,7 +4,8 @@
 //!     [--kernel implicit-gemm|direct|auto] [--precision fp16|fp32]
 //!     [--batch 50] [--rounds 5]
 //!     [--input tensor.f32] [--output denoised.f32] [--unchecked]
-//!     [--backend vulkan|metal|dx12]
+//!     [--backend vulkan|metal|dx12] [--no-double-buffer|--double-buffer]
+//!     [--f16-accumulation] [--no-sub-pixel]
 //!
 //! `--input` holds interleaved f32 pixels with the model's input channels in
 //! the network's transfer space (as for the browser `executeCPU`); `--output`
@@ -75,7 +76,21 @@ fn main() -> Result<(), String> {
         device.features() & wanted
     );
 
-    let config = NetworkConfig { width, height, precision, kernel };
+    let flag = |name: &str| args.iter().any(|arg| arg == name);
+    let config = NetworkConfig {
+        precision,
+        kernel,
+        double_buffer: if flag("--double-buffer") {
+            Some(true)
+        } else if flag("--no-double-buffer") {
+            Some(false)
+        } else {
+            None
+        },
+        f16_accumulation: flag("--f16-accumulation"),
+        sub_pixel: !flag("--no-sub-pixel"),
+        ..NetworkConfig::new(width, height)
+    };
     let created = Instant::now();
     let network = if args.iter().any(|arg| arg == "--unchecked") {
         // SAFETY: benchmarking the generated kernels without runtime checks.

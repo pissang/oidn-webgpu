@@ -21,7 +21,9 @@ import { RecordingDevice, type RecordedBuffer } from './recordingDevice.js';
  *   8 maxComputeWorkgroupSizeX, 9 maxComputeWorkgroupSizeY,
  *   10 maxComputeWorkgroupsPerDimension, 11 subgroupMinSize, 12 subgroupMaxSize,
  *   13 matrix configuration count, then per configuration:
- *      component type (0 f32, 1 f16), result type, M, N, K.
+ *      component type (0 f32, 1 f16), result type, M, N, K,
+ *   then subgroup-matrix options: double buffering (0 default, 1 off, 2 on),
+ *   accumulation (0 f32, 1 f16), sub-pixel decoders (0 on, 1 off).
  *
  * Program (little-endian u32 words, strings and byte blobs padded to 4 bytes):
  *   magic 0x4e44494f ("OIDN"), version 1,
@@ -65,6 +67,7 @@ export function recordNetwork(tza: Uint8Array, config: Uint8Array): Uint8Array {
       K: words[base + 4]
     });
   }
+  const options = 14 + words[13] * 5;
   const device = new RecordingDevice({
     features,
     limits: {
@@ -85,9 +88,15 @@ export function recordNetwork(tza: Uint8Array, config: Uint8Array): Uint8Array {
     tza.buffer.slice(tza.byteOffset, tza.byteOffset + tza.byteLength) as ArrayBuffer
   );
   const model = validateUNetModel(tensors, detectUNetModelSpec(tensors));
+  const doubleBuffer = words[options] === 0 ? undefined : words[options] === 2;
   const executor = new NativeUNetCore(device, model, {
     precision: precisions[words[3]],
-    kernel: kernels[words[4]]
+    kernel: kernels[words[4]],
+    subgroupMatrix: {
+      ...(doubleBuffer === undefined ? {} : { doubleBuffer }),
+      accumulation: words[options + 1] === 1 ? 'f16' : 'f32',
+      subPixel: words[options + 2] !== 1
+    }
   });
   const inputs: RecordedBuffer[] = [];
   for (let index = 0; index < model.inputChannels / 3; index++) {

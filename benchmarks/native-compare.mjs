@@ -47,7 +47,8 @@ try {
     '--weights', path.join(root, 'weights', weights),
     '--width', String(size), '--height', String(size), '--kernel', kernel,
     '--batch', '2', '--rounds', '1', '--input', inputPath, '--output', outputPath,
-    ...(args.includes('--unchecked') ? ['--unchecked'] : [])
+    ...['--unchecked', '--double-buffer', '--no-double-buffer', '--f16-accumulation', '--no-sub-pixel']
+      .filter((flag) => args.includes(flag))
   ], { stdio: 'inherit' });
   const native = new Float32Array((await readFile(outputPath)).buffer.slice(0));
 
@@ -89,17 +90,21 @@ try {
   }
 
   let sum = 0;
+  let relative = 0;
   let max = 0;
   let maxReference = 0;
   for (let index = 0; index < native.length; index++) {
     const error = Math.abs(native[index] - browserOutput[index]);
     sum += error;
+    // Open Image Denoise's oidnDenoise -r metric (here in the network's transfer space).
+    relative += error / (Math.abs(browserOutput[index]) + Math.abs(native[index]) + 0.01);
     max = Math.max(max, error);
     maxReference = Math.max(maxReference, Math.abs(browserOutput[index]));
   }
   const identical = native.every((value, index) => Object.is(value, Math.fround(browserOutput[index])));
   console.log(`${weights} ${size}x${size} native ${kernel} vs browser ${browserKernel}/${browserPrecision}: MAE ${(sum / native.length).toExponential(3)}, ` +
-    `max ${max.toExponential(3)} (output max ${maxReference.toFixed(3)}), bit-identical ${identical}`);
+    `max ${max.toExponential(3)} (output max ${maxReference.toFixed(3)}), ` +
+    `avgerror ${(relative / native.length).toExponential(3)}, bit-identical ${identical}`);
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }

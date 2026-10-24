@@ -48,6 +48,26 @@ pub struct NetworkConfig {
     pub height: u32,
     pub precision: Precision,
     pub kernel: Kernel,
+    /// Double-buffered subgroup-matrix staging; `None` uses the core's default (off).
+    pub double_buffer: Option<bool>,
+    /// Subgroup-matrix accumulation in f16 instead of f32.
+    pub f16_accumulation: bool,
+    /// Sub-pixel decomposition of the subgroup-matrix decoders.
+    pub sub_pixel: bool,
+}
+
+impl NetworkConfig {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            precision: Precision::Auto,
+            kernel: Kernel::Auto,
+            double_buffer: None,
+            f16_accumulation: false,
+            sub_pixel: true,
+        }
+    }
 }
 
 /// The scriptc runtime keeps process-global state; one recording at a time.
@@ -353,6 +373,13 @@ impl Network {
     ) -> Result<Self> {
         let mut words = vec![1, config.width, config.height, config.precision as u32, config.kernel as u32];
         words.extend(capability_words(device, adapter));
+        words.push(match config.double_buffer {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        });
+        words.push(config.f16_accumulation as u32);
+        words.push(!config.sub_pixel as u32);
         let started = std::time::Instant::now();
         let program = Program::parse(&record(tza, &words)?)?;
         let planning_ms = started.elapsed().as_secs_f64() * 1e3;
