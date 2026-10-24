@@ -1,0 +1,11 @@
+[package]
+name = "oidn-web-native"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Experimental native wgpu runtime for oidn-web, driven by its scriptc-compiled TypeScript core"
+publish = false
+
+[dependencies]
+wgpu = { version = "=30.0.1" }
+pollster = "0.4"

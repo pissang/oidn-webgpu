@@ -1,0 +1,22 @@
+{
+  "profile_format": 1,
+  "name": "oidn_web_core",
+  "entry": "program.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "oidn_core_",
+    "init_symbol": "oidn_core_init",
+    "sink_register_symbol": "oidn_core_sink",
+    "collect_symbol": "oidn_core_collect",
+    "result_reset_symbol": "oidn_core_reset",
+    "localize_runtime": true
+  },
+  "exports": [
+    {
+      "export": "recordNetworkPacket",
+      "symbol": "oidn_core_record_network",
+      "params": ["bytes", "bytes"],
+      "returns": "bytes"
+    }
+  ]
+}

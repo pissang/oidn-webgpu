@@ -61,14 +61,15 @@ function buildConsumers(spec: UNetModelSpec) {
   return consumers;
 }
 
-function onlyConsumer<T extends ModelNodeSpec['op']>(
+// Callers narrow on `op`; node ids are unique, so they compare consumers by id.
+function onlyConsumer(
   consumers: ReadonlyMap<string, ModelNodeSpec[]>,
   value: string,
-  op: T
-): Extract<ModelNodeSpec, { op: T }> | undefined {
+  op: ModelNodeSpec['op']
+): ModelNodeSpec | undefined {
   const list = consumers.get(value);
-  if (list?.length !== 1 || list[0].op !== op) return undefined;
-  return list[0] as Extract<ModelNodeSpec, { op: T }>;
+  if (list === undefined || list.length !== 1 || list[0].op !== op) return undefined;
+  return list[0];
 }
 
 /**
@@ -91,7 +92,7 @@ export function optimizeModelGraph(
     for (const node of spec.nodes) {
       if (node.op !== 'conv2d' || node.activation !== 'relu') continue;
       const pool = onlyConsumer(consumers, node.id, 'maxPool2d');
-      if (!pool || pool.size !== 2 || pool.stride !== 2) continue;
+      if (!pool || pool.op !== 'maxPool2d' || pool.size !== 2 || pool.stride !== 2) continue;
 
       eliminated.add(node.id);
       fusedAt.set(pool.id, {
@@ -110,7 +111,7 @@ export function optimizeModelGraph(
       if (node.op !== 'conv2d') continue;
       const concat = nodesById.get(node.input);
       if (concat?.op !== 'concat' || concat.inputs.length !== 2) continue;
-      if (onlyConsumer(consumers, concat.id, 'conv2d') !== node) continue;
+      if (onlyConsumer(consumers, concat.id, 'conv2d')?.id !== node.id) continue;
       // The native blocked layout can remove concat only when the source
       // boundary is also a vec4 boundary. Other graphs keep the generic ops.
       const firstInputChannels = validated.channelsByValue.get(concat.inputs[0]);
@@ -124,7 +125,7 @@ export function optimizeModelGraph(
           candidate?.op === 'upsample2d' &&
           candidate.scale === 2 &&
           candidate.mode === 'nearest' &&
-          onlyConsumer(consumers, candidate.id, 'concat') === concat
+          onlyConsumer(consumers, candidate.id, 'concat')?.id === concat.id
         ) {
           return { value: candidate.input, upsample: candidate };
         }
