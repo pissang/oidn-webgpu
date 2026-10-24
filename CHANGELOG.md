@@ -116,5 +116,6 @@ oidn-web 0.4.0 replaces the TensorFlow.js inference stack with a purpose-built, 
 - When supplying an existing `GPUDevice`, request `shader-f16` before creating the device if FP16 inference is desired.
 - Set `dynamicTile: false` to restore fixed-size tiling.
 
-[0.5.0]: https://github.com/pissang/oidn-web/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/pissang/oidn-web/compare/v0.3.5...v0.4.0
+[Unreleased]: https://github.com/pissang/oidn-webgpu/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/pissang/oidn-webgpu/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/pissang/oidn-webgpu/compare/v0.3.5...v0.4.0

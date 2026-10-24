@@ -9,7 +9,7 @@ It's used in the [Vector to 3D](https://www.figma.com/community/plugin/126460021
 
 |                                           2000 Samples                                           |                                     3 Samples                                      |                                   3 Samples + Denoised                                   |
 | :----------------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------: |
-| ![](https://github.com/pissang/oidn-web/blob/main/examples/test/ground-truth.png 'Ground Truth') | ![](https://github.com/pissang/oidn-web/blob/main/examples/test/noisy.png 'Noisy') | ![](https://github.com/pissang/oidn-web/blob/main/examples/test/denoised.png 'Denoised') |
+| ![](https://github.com/pissang/oidn-webgpu/blob/main/examples/test/ground-truth.png 'Ground Truth') | ![](https://github.com/pissang/oidn-webgpu/blob/main/examples/test/noisy.png 'Noisy') | ![](https://github.com/pissang/oidn-webgpu/blob/main/examples/test/denoised.png 'Denoised') |
 
 ## How it works
 
