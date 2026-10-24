@@ -1,7 +1,7 @@
 //! Full-image GPU-buffer latency; preprocessing and output conversion included.
 //! Upload/download and preparation are outside the measured executions.
 //! --weights PATH --width 512 --height 512 [--warmup 3] [--runs 7]
-//! [--kernel auto|implicit-gemm] [--runtime-checks]
+//! [--kernel auto|implicit-gemm] [--runtime-checks] [--output image.rgba.f32]
 use oidn_webgpu::{DenoiseBuffers, DenoiseParams, Denoiser, DenoiserOptions, Model};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(1..=16384).contains(&width) || !(1..=16384).contains(&height) || runs == 0 {
         return Err("dimensions must be in 1..=16384 and runs must be positive".into());
     }
+    let output = if args.iter().any(|arg| arg == "--output") {
+        Some(option("--output", "")?)
+    } else {
+        None
+    };
     let kernel = option("--kernel", "auto")?;
     if !["auto", "implicit-gemm"].contains(&kernel.as_str()) {
         return Err("unsupported kernel".into());
@@ -149,6 +154,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             return Err("non-finite output".into());
         }
+    }
+    if let Some(path) = output {
+        // Save all RGBA32F pixels after verification, outside the timed region.
+        std::fs::write(path, &mapped[..])?;
     }
     let info = prepared.info();
     println!(

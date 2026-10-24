@@ -17,7 +17,7 @@ All notable changes to this project are documented in this file.
 
 - Default FP16 GEMM denoising is faster on the tested Apple M4 Max, with increased first-time initialization cost. Outputs differ slightly from the previous FP16 path; `gemm: { decoderSubPixel: false }` restores its decoder calculation. FP32 defaults are unchanged.
 - Native denoising uses less temporary GPU memory. Native FP16 GEMM also runs faster with shader runtime checks enabled on the tested Apple M4 Max.
-- Native cooperative-matrix denoising has lower execution latency on the tested Apple M4 Max, with unchanged GPU workspace in the measured cases. Shader compilation may take longer.
+- Native cooperative-matrix denoising has lower execution latency on the tested Apple M4 Max. Large also uses less temporary GPU memory. Shader compilation may take longer.
 - GPU profiles now sum network time across all tiles of a completed image, rather than reporting only its first tile. Image preprocessing and output conversion are excluded.
 
 ### Fixed
@@ -51,6 +51,8 @@ All oidn-web paths use FP16 weights and activations with their default accumulat
 | Large | 2k | 335.00 ms | 307.00 ms (↓8.4%) | 262.70 ms (↓21.6%) | 216.71 ms (↓35.3%) | 212.30 ms (↓36.6%) |
 
 Against `2ca3fbf`, which already includes sanitizing, Large native 720p latency decreased from 39.65 to 37.69 ms (4.9%). It remains 9.0% slower than OIDN Metal in this comparison.
+
+A later Large native 720p optimization reduced latency from 37.68 to 37.21 ms (1.2%) and temporary GPU memory from 322.6 to 280.2 MB (13.1%), using the same device and timing protocol. The table above shows the earlier measurements.
 
 Input sizes: `720p` = 1280 x 720, `1080p` = 1920 x 1080, `2k` = 2560 x 1440. No outlier samples are removed; the Large 2k case had substantial variation (for example, 296.20–384.50 ms for the 0.5.0 baseline). These local timings depend on GPU load, power state, browser, model and image size. They do not measure image quality, first-use latency or interactive tiled execution.
 

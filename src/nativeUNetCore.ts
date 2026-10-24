@@ -139,7 +139,6 @@ export interface NativePipelineSpec {
 interface ActivationSlot {
   buffer: OIDNGPUBuffer;
   capacity: number;
-  activeValue?: string;
 }
 
 export interface CachedExecution {
@@ -2075,7 +2074,8 @@ function createSubgroupMatrixConvShader(
   config: NativeSubgroupMatrixConfig,
   outputFragments: number,
   doubleBuffer: boolean,
-  decoder?: { sourceBlocks: readonly number[]; upsampledSource: 0 | 1 }
+  decoder?: { sourceBlocks: readonly number[]; upsampledSource: 0 | 1 },
+  pool = false
 ) {
   const size = config.size;
   const component = config.componentType;
@@ -2123,9 +2123,41 @@ function createSubgroupMatrixConvShader(
       ${multiplies.join('\n      ')}`;
   const taps = subgroupMatrixTapLoop(config, tapBody);
   const epilogues: string[] = [];
-  for (let row = 0; row < 2; row++) {
+  if (pool) {
+    // Bias, ReLU and FP16 conversion are monotone, so pooling before them
+    // preserves the separate conv -> FP16 -> max-pool result for finite values.
     for (let fragment = 0; fragment < outputFragments; fragment++) {
       epilogues.push(`{
+    var pooled = vec4<f32>(-3.402823e38);
+    let pixel = lane / ${chunkBlocks}u;
+    let outputBlock = blockBase + ${fragment * chunkBlocks}u + lane % ${chunkBlocks}u;
+    ${Array.from({ length: 2 }, (_, row) => `
+    ${Array.from({ length: pixelFragments }, (_, pixel) =>
+      store('resultTile', `resultBase + ${pixel * size * size}u`, `acc${row}_${pixel}_${fragment}`, `${size}u`)
+    ).join('\n    ')}
+    workgroupBarrier();
+    {
+      let base = resultBase + pixel * ${size * 2}u + (lane % ${chunkBlocks}u) * 4u;
+      let first = vec4<f32>(resultTile[base], resultTile[base + 1u], resultTile[base + 2u], resultTile[base + 3u]);
+      let second = vec4<f32>(resultTile[base + ${size}u], resultTile[base + ${size + 1}u], resultTile[base + ${size + 2}u], resultTile[base + ${size + 3}u]);
+      if (tileY + rowBase + ${row}u < params.inputHeight) {
+        pooled = max(pooled, first);
+        if (tileX + pixel * 2u + 1u < params.inputWidth) { pooled = max(pooled, second); }
+      }
+    }
+    workgroupBarrier();`).join('\n    ')}
+    let outputX = tileX / 2u + pixel;
+    let outputY = (tileY + rowBase) / 2u;
+    if (outputX < params.outputWidth && outputY < params.outputHeight && outputBlock < ${outputBlocks}u) {
+      let acc = pooled + bias[outputBlock];
+      outputData[(outputY * params.outputWidth + outputX) * ${outputBlocks}u + outputBlock] = ${storeExpression(activationExpression('acc', activation), outputPrecision)};
+    }
+  }`);
+    }
+  } else {
+    for (let row = 0; row < 2; row++) {
+      for (let fragment = 0; fragment < outputFragments; fragment++) {
+        epilogues.push(`{
     ${Array.from({ length: pixelFragments }, (_, pixel) =>
       store('resultTile', `resultBase + ${pixel * size * size}u`, `acc${row}_${pixel}_${fragment}`, `${size}u`)
     ).join('\n    ')}
@@ -2144,6 +2176,7 @@ function createSubgroupMatrixConvShader(
     }
     workgroupBarrier();
   }`);
+      }
     }
   }
   const sourceRead = decoder
@@ -2726,7 +2759,7 @@ export class NativeUNetCore {
     };
     const subPixelDecoders = new Map<string, { sourceBlocks: number[]; upsampledSource: 0 | 1 }>();
     for (const node of optimizeModelGraph(this._model, {
-      fuseConvPool: false
+      fuseConvPool: this._matrixPool()
     }).nodes) {
       if (node.op === 'fusedUpsampleConcatConv2d') {
         const decoder = this._subPixelDecoder(node);
@@ -2910,6 +2943,12 @@ export class NativeUNetCore {
       const outputBlocks = blocksForChannels(
         this._model.convChannels.get(node.conv.id)!.outputChannels
       );
+      if (this._matrixPool()) {
+        return this._subgroupMatrixSpec(
+          `conv-pool/${node.conv.activation}/in${inputBlocks}/out${outputBlocks}`,
+          this.precision, node.conv.activation, inputBlocks, outputBlocks, fragments, undefined, true
+        );
+      }
       const key =
         `conv-pool/${this.precision}/${node.conv.activation}/` +
         `in${inputBlocks}/out${outputBlocks}`;
@@ -3052,7 +3091,8 @@ export class NativeUNetCore {
     inputBlocks: number,
     outputBlocks: number,
     fragments: number,
-    decoder?: { sourceBlocks: readonly number[]; upsampledSource: 0 | 1 }
+    decoder?: { sourceBlocks: readonly number[]; upsampledSource: 0 | 1 },
+    pool = false
   ): NativePipelineSpec {
     const config = this.subgroupMatrix!;
     return {
@@ -3069,7 +3109,8 @@ export class NativeUNetCore {
         config,
         fragments,
         this.subgroupMatrixDoubleBuffer,
-        decoder
+        decoder,
+        pool
       )
     };
   }
@@ -3113,6 +3154,15 @@ export class NativeUNetCore {
     return selected;
   }
 
+  // Keep fusion on the Large native 8x8 mixed-precision configuration measured
+  // on Metal. Other matrix shapes and browser kernels retain separate pooling.
+  private _matrixPool() {
+    const config = this.subgroupMatrix;
+    return this._model.spec.family === 'oidn-unet-large' && this.precision === 'fp16' &&
+      config?.dialect === 'naga' && config.size === 8 && config.subgroupSize === 32 &&
+      config.componentType === 'f16' && config.resultType === 'f32';
+  }
+
   private _coalescedPool() {
     return this.gemm.poolLayout === 'channels' &&
       (this.kernelSetting === 'auto' || this.kernelSetting === 'implicit-gemm' ||
@@ -3150,11 +3200,11 @@ export class NativeUNetCore {
   }
 
   private _createExecution(width: number, height: number): CachedExecution {
-    const plan = planModelExecution(this._model, width, height, {
-      fuseConvPool: false
-    });
+    const fuseConvPool = this._matrixPool();
+    const plan = planModelExecution(this._model, width, height, { fuseConvPool });
     const valueBuffers = new Map<string, OIDNGPUBuffer>();
     const slots: ActivationSlot[] = [];
+    const plannedSlots: { capacity: number; lastUse: number; values: string[] }[] = [];
     const lastUses = new Map<string, number>();
     plan.nodes.forEach((node, index) => {
       for (const input of executableInputs(node)) lastUses.set(input, index);
@@ -3173,49 +3223,48 @@ export class NativeUNetCore {
         bytesPerScalar: number,
         index: number
       ) => {
-      for (const slot of slots) {
-        if (
-          slot.activeValue &&
-          (lastUses.get(slot.activeValue) ?? -1) < index
-        ) {
-          slot.activeValue = undefined;
+        const requiredSize = activationByteSize(shape, bytesPerScalar);
+        const free = plannedSlots.filter((slot) => slot.lastUse < index);
+        let slot = free
+          .filter((candidate) => candidate.capacity >= requiredSize)
+          .sort((a, b) => a.capacity - b.capacity)[0];
+        // Plan lifetimes before creating GPU buffers. A retired small slot can
+        // grow for the decoder after encoder pool fusion. Other paths keep
+        // their previous slot selection.
+        if (!slot && fuseConvPool) slot = free.sort((a, b) => b.capacity - a.capacity)[0];
+        if (!slot) {
+          slot = { capacity: 0, lastUse: -2, values: [] };
+          plannedSlots.push(slot);
         }
-      }
-      const requiredSize = activationByteSize(shape, bytesPerScalar);
-      let slot = slots
-        .filter((candidate) => !candidate.activeValue && candidate.capacity >= requiredSize)
-        .sort((a, b) => a.capacity - b.capacity)[0];
-      if (!slot) {
-        const buffer = own(this._device.createBuffer({
-          label: `oidn/activation/${width}x${height}/${slots.length}`,
-          size: roundUp(requiredSize, 4),
-          usage:
-            BufferUsage.STORAGE |
-            BufferUsage.COPY_SRC |
-            BufferUsage.COPY_DST
-        }));
-        slot = { buffer, capacity: requiredSize };
-        slots.push(slot);
-      }
-      slot.activeValue = value;
-      valueBuffers.set(value, slot.buffer);
+        slot.capacity = Math.max(slot.capacity, requiredSize);
+        slot.lastUse = lastUses.get(value) ?? -1;
+        slot.values.push(value);
       };
 
-    allocate(
-      plan.spec.input,
-      plan.inputShape,
-      this.precision === 'fp16' ? 2 : 4,
-      -1
-    );
-    plan.plannedNodes.forEach(({ node, outputShape }, index) => {
-      const isFinal = node.id === plan.spec.output;
       allocate(
-        node.id,
-        outputShape,
-        isFinal || this.precision === 'fp32' ? 4 : 2,
-        index
+        plan.spec.input,
+        plan.inputShape,
+        this.precision === 'fp16' ? 2 : 4,
+        -1
       );
-    });
+      plan.plannedNodes.forEach(({ node, outputShape }, index) => {
+        const isFinal = node.id === plan.spec.output;
+        allocate(
+          node.id,
+          outputShape,
+          isFinal || this.precision === 'fp32' ? 4 : 2,
+          index
+        );
+      });
+      plannedSlots.forEach((slot, index) => {
+        const buffer = own(this._device.createBuffer({
+          label: `oidn/activation/${width}x${height}/${index}`,
+          size: roundUp(slot.capacity, 4),
+          usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST
+        }));
+        slots.push({ buffer, capacity: slot.capacity });
+        for (const value of slot.values) valueBuffers.set(value, buffer);
+      });
 
     const inputSourceCount = this._model.inputChannels / 3;
     const inputKey = `pack/${this.precision}/${inputSourceCount}`;
@@ -3552,8 +3601,8 @@ export class NativeUNetCore {
         );
       } else if (execution.nodeKernels[index] === 'subgroup-matrix') {
         pass.dispatchWorkgroups(
-          Math.ceil(outputShape.width / SUBGROUP_MATRIX_TILE_WIDTH),
-          Math.ceil(outputShape.height / SUBGROUP_MATRIX_TILE_HEIGHT),
+          Math.ceil(outputShape.width * (node.op === 'fusedConvReluMaxPool2d' ? 2 : 1) / SUBGROUP_MATRIX_TILE_WIDTH),
+          Math.ceil(outputShape.height * (node.op === 'fusedConvReluMaxPool2d' ? 2 : 1) / SUBGROUP_MATRIX_TILE_HEIGHT),
           Math.ceil(
             blocksForChannels(outputShape.channels) /
               (execution.nodeFragments[index] * this.subgroupMatrix!.size / 4)

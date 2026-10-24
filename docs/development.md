@@ -107,7 +107,7 @@ Browser scripts drive headless Chrome through `playwright-core`. All of them hon
 | `benchmarks/oidn-sdk/oidn_bench.c` | Official OIDN GPU timing for comparison; usage in the file header. |
 | `oidn-webgpu-bench --weights W --width N --height N` | Native network timing and output dumps (`cargo run --release --manifest-path native/Cargo.toml --bin oidn-webgpu-bench -- ...`). |
 | `node benchmarks/mac-performance.mjs --oidn-library /path/to/libOpenImageDenoise.dylib` | Pinned 0.5.0/current Chrome, Chrome subgroup matrix, `oidn-web(native wgpu)` and official OIDN Metal; Small/Base/Large at 720p, 1080p and 2560x1440. Builds both revisions and native benchmark automatically. |
-| `cargo run --release --manifest-path native/Cargo.toml --bin oidn-webgpu-denoise-bench -- --weights W --width N --height N` | Native full-image GPU-buffer latency, including preprocessing and output conversion. Runtime checks off by default; `--runtime-checks` enables them. |
+| `cargo run --release --manifest-path native/Cargo.toml --bin oidn-webgpu-denoise-bench -- --weights W --width N --height N` | Native full-image GPU-buffer latency, including preprocessing and output conversion. Runtime checks off by default; `--runtime-checks` enables them. `--output PATH` saves packed RGBA32F output after timing. |
 | `node scripts/*GpuCheck.mjs` | Correctness checks in Chrome: kernels against CPU references, and input/output sanitizing (`sanitizeGpuCheck.mjs`). |
 
 Each script's header comment lists its options.
