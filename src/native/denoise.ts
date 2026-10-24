@@ -5,6 +5,7 @@ import {
   type OIDNGPUDevice
 } from '../gpuTypes.js';
 import { hdrForwardWGSL, hdrInverseWGSL, type HDRTransfer } from '../hdrTransfer.js';
+import { sanitizeWGSL } from '../sanitize.js';
 import type { ValidatedUNetModel } from '../modelSpec.js';
 import type { NativeUNetCore, NativeUNetPrecision } from '../nativeUNetCore.js';
 import { OIDN_TILE_ALIGNMENT, planTileGrid } from '../tileScheduler.js';
@@ -38,14 +39,14 @@ function inputShader(sourceCount: number, hdr: boolean, transfer: HDRTransfer, p
 @group(0) @binding(${index}) var<storage, read> in_${name}: array<vec4f>;`).join('');
   // Like OIDN, callers pass signed [-1, 1] normals; the network reads n * 0.5 + 0.5.
   const copies = names.slice(1).map((name) => name === 'normal'
-    ? 'let normal = clamp(in_normal[inIdx].rgb, vec3f(-1.0), vec3f(1.0)) * 0.5 + 0.5;'
-    : `let ${name} = in_${name}[inIdx].rgb;`).join('\n  ');
+    ? 'let normal = sanitize(in_normal[inIdx].rgb, -1.0, 1.0) * 0.5 + 0.5;'
+    : `let ${name} = sanitize(in_${name}[inIdx].rgb, 0.0, 1.0);`).join('\n  ');
   const channels = names.flatMap((name) => ['r', 'g', 'b'].map((channel) => `${name}.${channel}`));
   const blocks = Math.ceil(channels.length / 4);
   const type = precision === 'fp16' ? 'vec4<f16>' : 'vec4<f32>';
   const stores = Array.from({ length: blocks }, (_, block) =>
     `packed[outIdx * ${blocks} + ${block}] = ${type}(vec4f(${[0, 1, 2, 3].map((lane) => channels[block * 4 + lane] ?? '0.0').join(', ')}));`).join('\n  ');
-  return /* wgsl */ `${precision === 'fp16' ? 'enable f16;\n' : ''}${hdrForwardWGSL(transfer)}
+  return /* wgsl */ `${precision === 'fp16' ? 'enable f16;\n' : ''}${hdrForwardWGSL(transfer)}${sanitizeWGSL}
 struct Params {
   imageSize: vec2i,
   tileSize: vec2i,
@@ -68,8 +69,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3u) {
   let outIdx = position.y * params.tileSize.x + position.x;
   let col = in_color[inIdx];
   ${hdr
-    ? 'let color = vec3f(HDRForward(col.r * frame.inputScale), HDRForward(col.g * frame.inputScale), HDRForward(col.b * frame.inputScale));'
-    : 'let color = col.rgb;'}
+    ? `let scaled = sanitize(col.rgb * frame.inputScale, 0.0, FLT_MAX);
+  let color = vec3f(HDRForward(scaled.r), HDRForward(scaled.g), HDRForward(scaled.b));`
+    : 'let color = sanitize(col.rgb, 0.0, 1.0);'}
   ${copies}
   ${stores}
 }
@@ -82,7 +84,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3u) {
  * alpha. Matches the browser runtime's GPU output pass.
  */
 function outputShader(hdr: boolean, transfer: HDRTransfer) {
-  return /* wgsl */ `${hdrInverseWGSL(transfer)}
+  return /* wgsl */ `${hdrInverseWGSL(transfer)}${sanitizeWGSL}
 struct Params {
   imageWidth: i32,
   tileWidth: i32,
@@ -109,9 +111,11 @@ fn main(@builtin(global_invocation_id) globalId: vec3u) {
   let outIdx = (y + params.outputOffset.y) * params.imageWidth + x + params.outputOffset.x;
   let col = in_color[inIdx];
   let raw = in_raw[outIdx];
+  // The network output may contain negative values or NaNs.
+  let denoised = sanitize(col.rgb, 0.0, ${hdr ? 'FLT_MAX' : '1.0'});
   ${hdr
-    ? 'out_color[outIdx] = vec4f(vec3f(HDRInverse(col.r), HDRInverse(col.g), HDRInverse(col.b)) / frame.inputScale, raw.a);'
-    : 'out_color[outIdx] = vec4f(col.rgb, raw.a);'}
+    ? 'out_color[outIdx] = vec4f(vec3f(HDRInverse(denoised.r), HDRInverse(denoised.g), HDRInverse(denoised.b)) / frame.inputScale, raw.a);'
+    : 'out_color[outIdx] = vec4f(denoised, raw.a);'}
 }
 `;
 }

@@ -19,6 +19,10 @@ All notable changes to this project are documented in this file.
 - Native denoising uses less temporary GPU memory. Native FP16 GEMM also runs faster with shader runtime checks enabled on the tested Apple M4 Max.
 - GPU profiles now sum network time across all tiles of a completed image, rather than reporting only its first tile. Image preprocessing and output conversion are excluded.
 
+### Fixed
+
+- Inputs and network outputs are sanitized like OIDN: NaN becomes 0, and color, albedo and normals are clamped to their valid ranges. Previously NaN or out-of-range input could spread across the denoised image, and network outputs were not clamped, so HDR results could be negative and GPU LDR results could exceed 1.
+
 ### Performance on Apple M4 Max
 
 Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`); current oidn-web results use optimization commit `cd1ff2f`, before the input/output sanitizing changes.

@@ -6,7 +6,8 @@ import {
   hdrTransferFuncInverseCPU,
   type HDRTransfer
 } from './hdrTransfer';
-export { hdrTransferFuncCPU, hdrTransferFuncInverseCPU } from './hdrTransfer';
+import { sanitizeWGSL } from './sanitize';
+export { avgLogLum, hdrTransferFuncCPU, hdrTransferFuncInverseCPU } from './hdrTransfer';
 export type { HDRTransfer } from './hdrTransfer';
 
 export class Tile {
@@ -16,34 +17,6 @@ export class Tile {
     public width: number,
     public height: number
   ) {}
-}
-
-// TODO put in gpu
-export function avgLogLum({
-  data,
-  channels
-}: {
-  data: Float32Array;
-  channels: number;
-}) {
-  let totalLuminance = 0;
-
-  for (let i = 0; i < data.length; i += channels) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const lum = 0.212671 * r + 0.71516 * g + 0.072169 * b;
-
-    // TODO performance
-    // https://github.com/RenderKit/oidn/blob/713ec7838ba650f99e0a896549c0dca5eeb3652d/devices/cpu/cpu_autoexposure.cpp#L43
-    totalLuminance += Math.log2(lum + 0.0001);
-  }
-  const numPixels = data.length / channels;
-  const averageLuminance = totalLuminance / numPixels;
-  const key = 0.18;
-
-  // https://github.com/RenderKit/oidn/blob/713ec7838ba650f99e0a896549c0dca5eeb3652d/training/color.py#L173
-  return key / Math.pow(2, averageLuminance);
 }
 
 export class GPUDataProcess {
@@ -172,7 +145,7 @@ out_color[outIdx] = textureLoad(in_color, globalId.xy, 0);
 
     this._isInputTexture = isInputTexture;
     const isHDR = this._isHDR;
-    const commonCSDefine = hdrForwardWGSL(this._hdrTransfer);
+    const commonCSDefine = hdrForwardWGSL(this._hdrTransfer) + sanitizeWGSL;
     function readInputCode(inputName: string) {
       return isInputTexture
         ? `textureLoad(in_${inputName}, vec2u(inputPosition), 0)`
@@ -193,13 +166,14 @@ let outIdx = y * outputSize.x + x;
 
 if (${denoiseAlpha}) {
   // Denoise the inversed alpha. Or the anti aliased edge will be too dark after denoised
-  out_color[outIdx] = vec3f(1.0 - col.a);
+  out_color[outIdx] = sanitize(vec3f(1.0 - col.a), 0.0, 1.0);
 }
 else if (${isHDR}) {
-  out_color[outIdx] = vec3f(HDRForward(col.r * inputScale), HDRForward(col.g * inputScale), HDRForward(col.b * inputScale));
+  let scaled = sanitize(col.rgb * inputScale, 0.0, FLT_MAX);
+  out_color[outIdx] = vec3f(HDRForward(scaled.r), HDRForward(scaled.g), HDRForward(scaled.b));
 }
 else {
-  out_color[outIdx] = col.rgb;
+  out_color[outIdx] = sanitize(col.rgb, 0.0, 1.0);
 }
 `;
     this._inputPassAux.setCSCode({
@@ -208,8 +182,9 @@ else {
 ${commonCSMain}
 let alb = ${readInputCode('albedo')};
 let nor = ${readInputCode('normal')};
-out_normal[outIdx] = nor.rgb;
-out_albedo[outIdx] = alb.rgb;
+// Normals arrive [0, 1]-encoded, so OIDN's [-1, 1] clamp becomes [0, 1].
+out_normal[outIdx] = sanitize(nor.rgb, 0.0, 1.0);
+out_albedo[outIdx] = sanitize(alb.rgb, 0.0, 1.0);
   `
     });
 
@@ -220,7 +195,7 @@ ${commonCSMain}
 `
     });
     this._outputPass.setCSCode({
-      csDefine: hdrInverseWGSL(this._hdrTransfer),
+      csDefine: hdrInverseWGSL(this._hdrTransfer) + sanitizeWGSL,
       csMain: /* wgsl */ `
 let x = i32(globalId.x);
 let y = i32(globalId.y);
@@ -236,18 +211,20 @@ let raw = ${
           : 'in_raw[outIdx]'
       };
 
+// The network output may contain negative values or NaNs.
+let denoised = sanitize(col.rgb, 0.0, ${isHDR && !denoiseAlpha ? 'FLT_MAX' : '1.0'});
 if (${denoiseAlpha}) {
-  out_color[outIdx] = vec4f(raw.rgb, 1.0 - col.r);
+  out_color[outIdx] = vec4f(raw.rgb, 1.0 - denoised.r);
 }
 else if (${isHDR}) {
   out_color[outIdx] = vec4f(
-    vec3f(HDRInverse(col.r), HDRInverse(col.g), HDRInverse(col.b)) / inputScale,
+    vec3f(HDRInverse(denoised.r), HDRInverse(denoised.g), HDRInverse(denoised.b)) / inputScale,
     // Pick the alpha
     raw.a
   );
 }
 else {
-  out_color[outIdx] = vec4f(col.rgb, raw.a);
+  out_color[outIdx] = vec4f(denoised, raw.a);
 }
 `
     });
