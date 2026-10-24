@@ -67,6 +67,14 @@ void oidnw_core_inspect_model(const uint8_t *weights, size_t weights_size,
  *         0 dispatch: pipeline, bind group (group 0), x, y, z
  *         1 copy: source, source offset, destination, destination offset, size
  *     1 write:  buffer, offset, data blob
+ * Optional trailing metadata (older replayers may ignore it):
+ *   magic 0x4154454d (META), version 1, precision (1 f32, 2 f16), tile count,
+ *   convolution kernel bits (1 direct, 2 implicit GEMM, 4 matrix, 8 spatial,
+ *   16 subgroup), frame uniform buffer id (0xffffffff for none), immutable
+ *   weight/bias buffer count and ids. A frame uniform stores inputScale as
+ *   f32 at offset zero, initially the config's scale. Updating it in command
+ *   order enables per-execution exposure. Immutable weight buffers can be
+ *   shared for identical contents/usage on the same device; workspaces cannot.
  * Create every buffer, pipeline and bind group once, binding the host's
  * images in place of the input buffers (color, albedo, normal: RGBA f32
  * pixels) and the output buffer (RGBA f32). Then run the operations in order

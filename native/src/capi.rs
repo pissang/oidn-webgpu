@@ -1,6 +1,6 @@
 //! C API of the standalone denoiser; documented in `include/oidn_webgpu.h`.
 
-use crate::{DenoiseConfig, Kernel, Network, NetworkConfig, Precision};
+use crate::{DenoiseConfig, Kernel, Network, NetworkConfig, PipelineMap, Precision, WeightMap};
 use std::ffi::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
@@ -68,13 +68,20 @@ struct Execution {
     readback: wgpu::Buffer,
 }
 
+#[derive(Default)]
+struct ExecutionState {
+    execution: Option<Execution>,
+    pipelines: PipelineMap,
+    weights: WeightMap,
+}
+
 /// Opaque `oidnw_filter`.
 pub struct OidnwFilter {
     gpu: Arc<Gpu>,
     weights: Vec<u8>,
     desc: OidnwFilterDesc,
     sources: usize,
-    execution: Mutex<Option<Execution>>,
+    execution: Mutex<ExecutionState>,
 }
 
 struct Failure(i32, String);
@@ -120,6 +127,11 @@ unsafe fn guard(error: *mut c_char, capacity: usize, body: impl FnOnce() -> Outc
             status
         }
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn oidnw_api_version() -> u32 {
+    1 << 16
 }
 
 fn wanted_features() -> wgpu::Features {
@@ -216,7 +228,10 @@ pub unsafe extern "C" fn oidnw_device_info(
         *features = [
             (wgpu::Features::SHADER_F16, OIDNW_FEATURE_SHADER_F16),
             (wgpu::Features::SUBGROUP, OIDNW_FEATURE_SUBGROUPS),
-            (wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX, OIDNW_FEATURE_COOPERATIVE_MATRIX),
+            (
+                wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX,
+                OIDNW_FEATURE_COOPERATIVE_MATRIX,
+            ),
         ]
         .iter()
         .filter(|(feature, _)| enabled.contains(*feature))
@@ -236,7 +251,10 @@ pub unsafe extern "C" fn oidnw_device_destroy(device: *mut OidnwDevice) {
 fn network_config(gpu: &Gpu, desc: &OidnwFilterDesc, width: u32, height: u32) -> Outcome<NetworkConfig> {
     let kernel = match desc.kernel {
         OIDNW_KERNEL_AUTO
-            if gpu.device.features().contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX) =>
+            if gpu
+                .device
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX) =>
         {
             Kernel::SubgroupMatrix
         }
@@ -295,16 +313,18 @@ pub unsafe extern "C" fn oidnw_filter_create(
                 filter_desc = *desc;
             }
             let weights = std::slice::from_raw_parts(weights, weights_size).to_vec();
-            // Plans a small image to validate the model and learn its inputs.
+            // Validate options and model without compiling shaders or allocating GPU buffers.
             let config = network_config(&device.gpu, &filter_desc, 16, 16)?;
-            let sources = crate::plan_inputs(&device.gpu.device, &device.gpu.adapter, &weights, &config)
-                .map_err(|message| Failure(OIDNW_ERROR_MODEL, message))?;
+            let _ = config;
+            let sources = crate::Model::from_tza(&weights)
+                .map_err(|error| Failure(OIDNW_ERROR_MODEL, error.to_string()))?
+                .input_count();
             *output = Box::into_raw(Box::new(OidnwFilter {
                 gpu: device.gpu.clone(),
                 weights,
                 desc: filter_desc,
                 sources,
-                execution: Mutex::new(None),
+                execution: Mutex::new(ExecutionState::default()),
             }));
             Ok(())
         })
@@ -316,7 +336,7 @@ pub unsafe extern "C" fn oidnw_filter_input_count(filter: *const OidnwFilter) ->
     unsafe { filter.as_ref() }.map_or(0, |filter| filter.sources as u32)
 }
 
-fn create_execution(filter: &OidnwFilter, width: u32, height: u32) -> Outcome<Execution> {
+fn create_execution(filter: &OidnwFilter, state: &mut ExecutionState, width: u32, height: u32) -> Outcome<Execution> {
     let gpu = &filter.gpu;
     let size = width as u64 * height as u64 * 16;
     let storage = |label: &str, usage: wgpu::BufferUsages| {
@@ -339,13 +359,70 @@ fn create_execution(filter: &OidnwFilter, width: u32, height: u32) -> Outcome<Ex
     });
     let config = network_config(gpu, &filter.desc, width, height)?;
     let unchecked = filter.desc.flags & OIDNW_FILTER_RUNTIME_CHECKS == 0;
-    // SAFETY: without OIDNW_FILTER_RUNTIME_CHECKS the caller accepts the
-    // generated kernels' bounds discipline (see the header).
-    let network = unsafe {
-        Network::with_buffers(&gpu.device, &gpu.adapter, &filter.weights, &config, &inputs, &output, unchecked)
-    }
+    let started = std::time::Instant::now();
+    let program = crate::plan(&gpu.device, &gpu.adapter, &filter.weights, &config)
+        .map_err(|message| Failure(OIDNW_ERROR_MODEL, message))?;
+    // Unchecked mode follows the C caller's explicit API contract.
+    let network = Network::from_program(
+        &gpu.device,
+        program,
+        Some(&inputs),
+        Some(&output),
+        unchecked,
+        crate::ResourceCaches {
+            pipelines: &mut state.pipelines,
+            weights: &mut state.weights,
+        },
+        started.elapsed().as_secs_f64() * 1e3,
+    )
     .map_err(|message| Failure(OIDNW_ERROR_MODEL, message))?;
-    Ok(Execution { width, height, network, inputs, readback })
+    Ok(Execution {
+        width,
+        height,
+        network,
+        inputs,
+        readback,
+    })
+}
+
+fn validate_size(width: u32, height: u32) -> Outcome<()> {
+    if !(1..=16384).contains(&width) || !(1..=16384).contains(&height) {
+        return Err(invalid("width and height must be in 1..=16384"));
+    }
+    Ok(())
+}
+
+fn ensure_execution(filter: &OidnwFilter, state: &mut ExecutionState, width: u32, height: u32) -> Outcome<()> {
+    if state
+        .execution
+        .as_ref()
+        .is_none_or(|execution| (execution.width, execution.height) != (width, height))
+    {
+        let execution = create_execution(filter, state, width, height)?;
+        state.execution = Some(execution);
+    }
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn oidnw_filter_prepare(
+    filter: *const OidnwFilter,
+    width: u32,
+    height: u32,
+    error: *mut c_char,
+    capacity: usize,
+) -> i32 {
+    unsafe {
+        guard(error, capacity, || {
+            let filter = filter.as_ref().ok_or_else(|| invalid("filter is NULL"))?;
+            validate_size(width, height)?;
+            let mut state = filter
+                .execution
+                .try_lock()
+                .map_err(|_| Failure(OIDNW_ERROR_BUSY, "filter is busy".into()))?;
+            ensure_execution(filter, &mut state, width, height)
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -363,9 +440,7 @@ pub unsafe extern "C" fn oidnw_filter_execute(
     unsafe {
         guard(error, capacity, || {
             let filter = filter.as_ref().ok_or_else(|| invalid("filter is NULL"))?;
-            if width == 0 || height == 0 || width > 16384 || height > 16384 {
-                return Err(invalid("width and height must be in 1..=16384"));
-            }
+            validate_size(width, height)?;
             let sources = [color, albedo, normal];
             if output.is_null() || sources[..filter.sources].iter().any(|source| source.is_null()) {
                 return Err(invalid(format!(
@@ -377,11 +452,8 @@ pub unsafe extern "C" fn oidnw_filter_execute(
                 .execution
                 .try_lock()
                 .map_err(|_| Failure(OIDNW_ERROR_BUSY, "the filter is executing on another thread".into()))?;
-            if slot.as_ref().is_none_or(|execution| (execution.width, execution.height) != (width, height)) {
-                *slot = None;
-                *slot = Some(create_execution(filter, width, height)?);
-            }
-            let execution = slot.as_ref().unwrap();
+            ensure_execution(filter, &mut slot, width, height)?;
+            let execution = slot.execution.as_ref().unwrap();
             let gpu = &filter.gpu;
             let floats = width as usize * height as usize * 4;
             for (buffer, source) in execution.inputs.iter().zip(sources) {
@@ -403,7 +475,10 @@ pub unsafe extern "C" fn oidnw_filter_execute(
                 let _ = send.send(result);
             });
             gpu.device
-                .poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(60)) })
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(Duration::from_secs(60)),
+                })
                 .map_err(|failure| Failure(OIDNW_ERROR_GPU, format!("GPU wait failed: {failure:?}")))?;
             receive
                 .recv_timeout(Duration::from_secs(5))
@@ -423,5 +498,108 @@ pub unsafe extern "C" fn oidnw_filter_execute(
 pub unsafe extern "C" fn oidnw_filter_destroy(filter: *mut OidnwFilter) {
     if !filter.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| drop(unsafe { Box::from_raw(filter) })));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires a native GPU adapter"]
+    fn explicit_prepare_reuses_resources_and_matches_execution() {
+        unsafe {
+            let mut error = [0i8; 1024];
+            let mut device = std::ptr::null_mut();
+            assert_eq!(oidnw_api_version(), 0x00010000);
+            assert_eq!(
+                oidnw_device_create(OIDNW_BACKEND_AUTO, &mut device, error.as_mut_ptr(), error.len()),
+                OIDNW_OK
+            );
+            let bytes = std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../weights/rt_hdr_alb_nrm_small.tza"
+            ))
+            .unwrap();
+            let mut desc = std::mem::zeroed();
+            oidnw_filter_desc_default(&mut desc);
+            desc.flags = OIDNW_FILTER_RUNTIME_CHECKS;
+            desc.kernel = OIDNW_KERNEL_IMPLICIT_GEMM;
+            let mut filter = std::ptr::null_mut();
+            assert_eq!(
+                oidnw_filter_create(
+                    device,
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    &desc,
+                    &mut filter,
+                    error.as_mut_ptr(),
+                    error.len()
+                ),
+                OIDNW_OK
+            );
+            assert!((*filter).execution.lock().unwrap().execution.is_none());
+            assert_eq!(
+                oidnw_filter_prepare(filter, 0, 16, error.as_mut_ptr(), error.len()),
+                OIDNW_ERROR_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                oidnw_filter_prepare(filter, 16, 16, error.as_mut_ptr(), error.len()),
+                OIDNW_OK
+            );
+            let (frame, weight) = {
+                let state = (*filter).execution.lock().unwrap();
+                let network = &state.execution.as_ref().unwrap().network;
+                let meta = network.metadata.as_ref().unwrap();
+                (
+                    network.buffers[meta.frame.unwrap()].clone(),
+                    network.buffers[meta.weights[0]].clone(),
+                )
+            };
+            assert_eq!(
+                oidnw_filter_prepare(filter, 16, 16, error.as_mut_ptr(), error.len()),
+                OIDNW_OK
+            );
+            {
+                let state = (*filter).execution.lock().unwrap();
+                let network = &state.execution.as_ref().unwrap().network;
+                assert_eq!(
+                    network.buffers[network.metadata.as_ref().unwrap().frame.unwrap()],
+                    frame
+                );
+                assert_eq!(
+                    oidnw_filter_prepare(filter, 16, 16, error.as_mut_ptr(), error.len()),
+                    OIDNW_ERROR_BUSY
+                );
+            }
+            assert_eq!(
+                oidnw_filter_prepare(filter, 17, 19, error.as_mut_ptr(), error.len()),
+                OIDNW_OK
+            );
+            {
+                let state = (*filter).execution.lock().unwrap();
+                let network = &state.execution.as_ref().unwrap().network;
+                assert_eq!(network.buffers[network.metadata.as_ref().unwrap().weights[0]], weight);
+            }
+            let input: Vec<f32> = (0..17 * 19).flat_map(|_| [0.5, 0.3, 0.1, 0.75]).collect();
+            let mut output = vec![0.0; input.len()];
+            assert_eq!(
+                oidnw_filter_execute(
+                    filter,
+                    17,
+                    19,
+                    input.as_ptr(),
+                    input.as_ptr(),
+                    input.as_ptr(),
+                    output.as_mut_ptr(),
+                    error.as_mut_ptr(),
+                    error.len()
+                ),
+                OIDNW_OK
+            );
+            assert!(output.iter().all(|v| v.is_finite()));
+            assert!(output.chunks_exact(4).all(|pixel| pixel[3] == 0.75));
+            oidnw_filter_destroy(filter);
+            oidnw_device_destroy(device);
+        }
     }
 }

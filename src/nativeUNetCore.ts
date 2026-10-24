@@ -2383,6 +2383,13 @@ export function resolveNativeUNetPrecision(
  * browser's asynchronous preparation, CPU readback and profiling.
  */
 export class NativeUNetCore {
+  readonly usedKernels = new Set<NativeUNetKernel>();
+
+  /** Immutable packed weights and biases, for native resource sharing. */
+  get weightBuffers(): OIDNGPUBuffer[] {
+    return [...this._packedConvs.values()].flatMap(packed => [packed.weights, packed.bias]);
+  }
+
   readonly precision: NativeUNetPrecision;
   readonly kernelSetting: NativeUNetKernelSetting;
   readonly gemm: Readonly<Required<NativeUNetGemmOptions>>;
@@ -3037,6 +3044,7 @@ export class NativeUNetCore {
       const isFinal = node.id === plan.spec.output;
       const fragments = this.subgroupMatrix ? this._subgroupMatrixFragmentsFor(outputShape) : 0;
       const pipelineSpec = this._nodePipelineSpec(node, isFinal, fragments);
+      if (pipelineSpec.kernel) this.usedKernels.add(pipelineSpec.kernel);
       const pipeline = this._pipeline(pipelineSpec.key, pipelineSpec.code);
       nodePipelines.push(pipeline);
       nodeKernels.push(pipelineSpec.kernel ?? 'direct');

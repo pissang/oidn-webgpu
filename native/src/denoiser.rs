@@ -1,7 +1,20 @@
-use crate::{DenoiseConfig, Kernel, Network, NetworkConfig, PipelineMap, Program, Reader};
-use std::{fmt, sync::Arc, time::Instant};
+use crate::{DenoiseConfig, Kernel, Network, NetworkConfig, PipelineMap, Reader, Result, WeightMap};
+use std::{
+    fmt,
+    sync::{Arc, Mutex, Weak},
+    time::Instant,
+};
 
-/// A failure while loading a model or preparing a denoising.
+/// Device limit that prevented preparation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    ProgramBufferSize,
+    BufferSize,
+    StorageBindingSize,
+}
+
+/// Loading, preparation and CPU argument errors. GPU execution errors are
+/// delivered through the host's wgpu error handling after commands are submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
@@ -9,32 +22,70 @@ pub enum Error {
     Model(String),
     UnsupportedDevice(String),
     Gpu(String),
+    BufferTooSmall {
+        image: &'static str,
+        required: u64,
+        available: u64,
+    },
+    LimitExceeded {
+        resource: String,
+        limit: Limit,
+        required: u64,
+        available: u64,
+    },
 }
-
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (kind, message) = match self {
-            Self::InvalidArgument(m) => ("invalid argument", m),
-            Self::Model(m) => ("model", m),
-            Self::UnsupportedDevice(m) => ("unsupported device", m),
-            Self::Gpu(m) => ("GPU", m),
-        };
-        write!(f, "{kind}: {message}")
+        match self {
+            Self::InvalidArgument(m) => write!(f, "invalid argument: {m}"),
+            Self::Model(m) => write!(f, "model: {m}"),
+            Self::UnsupportedDevice(m) => write!(f, "unsupported device: {m}"),
+            Self::Gpu(m) => write!(f, "GPU: {m}"),
+            Self::BufferTooSmall {
+                image,
+                required,
+                available,
+            } => write!(f, "{image} needs {required} bytes, has {available}"),
+            Self::LimitExceeded {
+                resource,
+                limit,
+                required,
+                available,
+            } => write!(
+                f,
+                "{resource} requires {required} bytes, {limit:?} allows {available}; request higher limits or use smaller tiles/images"
+            ),
+        }
     }
 }
-
 impl std::error::Error for Error {}
 
-/// Validated OIDN TZA weights, independent of any GPU device.
-/// Clones share the owned weights; the original byte slice may be released.
-#[derive(Clone, Debug)]
+// Models keep weak references so merely retaining CPU weights does not keep a
+// GPU device alive. Denoisers and prepared instances own active cache contexts.
+struct SharedWeights {
+    device: wgpu::Device,
+    buffers: Mutex<WeightMap>,
+}
+/// Validated, owned CPU weights. Clones share immutable GPU weights per
+/// device while denoisers or prepared instances using them remain alive.
+#[derive(Clone)]
 pub struct Model {
     weights: Arc<[u8]>,
     inputs: usize,
+    devices: Arc<Mutex<Vec<Weak<SharedWeights>>>>,
 }
-
+impl fmt::Debug for Model {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Model")
+            .field("input_count", &self.inputs)
+            .field("weight_bytes", &self.weights.len())
+            .finish()
+    }
+}
 impl Model {
-    pub fn from_tza(weights: &[u8]) -> std::result::Result<Self, Error> {
+    /// Validates and owns an OIDN TZA file without creating a GPU device.
+    /// Clones share CPU weights and device-specific immutable GPU weights.
+    pub fn from_tza(weights: &[u8]) -> Result<Self> {
         let bytes = crate::core_call(|pointer, size| unsafe {
             crate::oidnw_core_inspect_model(weights.as_ptr(), weights.len(), pointer, size);
         })
@@ -43,7 +94,7 @@ impl Model {
             bytes: &bytes,
             offset: 0,
         };
-        let parsed = (|| -> crate::Result<usize> {
+        let inputs = (|| -> crate::PlanResult<usize> {
             match reader.u32()? {
                 crate::ERROR_MAGIC => return Err(reader.string()?),
                 0x4c44_4f4d => {}
@@ -54,141 +105,219 @@ impl Model {
             }
             match reader.u32()? {
                 count @ 1..=3 => Ok(count as usize),
-                _ => Err("the model must read color, color/albedo, or color/albedo/normal".into()),
+                _ => Err("model must read 1 to 3 images".into()),
             }
-        })();
+        })()
+        .map_err(Error::Model)?;
         Ok(Self {
             weights: Arc::from(weights),
-            inputs: parsed.map_err(Error::Model)?,
+            inputs,
+            devices: Arc::new(Mutex::new(Vec::new())),
         })
     }
-
-    /// 1 = color, 2 = color and albedo, 3 = color, albedo and normal.
+    /// 1 = color, 2 = color/albedo, 3 = color/albedo/normal.
     pub fn input_count(&self) -> usize {
         self.inputs
     }
+    fn shared_weights(&self, device: &wgpu::Device) -> Result<Arc<SharedWeights>> {
+        let mut devices = self
+            .devices
+            .lock()
+            .map_err(|_| Error::Gpu("weight cache lock poisoned".into()))?;
+        devices.retain(|entry| entry.strong_count() > 0);
+        if let Some(cache) = devices
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|cache| &cache.device == device)
+        {
+            return Ok(cache);
+        }
+        let cache = Arc::new(SharedWeights {
+            device: device.clone(),
+            buffers: Mutex::new(WeightMap::new()),
+        });
+        devices.push(Arc::downgrade(&cache));
+        Ok(cache)
+    }
 }
 
-/// HDR transfer expected by the model's training.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transfer {
-    /// Regular RT HDR models.
     #[default]
     Pu,
-    /// RTLightmap HDR models.
     Log,
 }
-
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct DenoiserOptions {
-    /// True for linear HDR color. LDR also uses linear f32 RGB in [0, 1].
+    /// Linear HDR color, or linear LDR RGB in [0, 1] when false.
     pub hdr: bool,
+    /// PU for RT HDR, Log for RTLightmap HDR models.
     pub transfer: Transfer,
-    /// Maximum output tile edge, rounded down to a multiple of 16; 0 uses
-    /// one tile. Tiling reduces working memory, but not the image buffers.
+    /// Output tile edge rounded down to a multiple of 16; 0 = whole image.
     pub max_tile_size: u32,
-    /// Positive finite HDR scale, applied before transfer and undone on output.
-    /// This API does not estimate exposure automatically.
-    pub input_scale: f32,
 }
-
 impl Default for DenoiserOptions {
     fn default() -> Self {
         Self {
             hdr: true,
             transfer: Transfer::Pu,
             max_tile_size: 0,
-            input_scale: 1.0,
         }
     }
 }
+/// Per-execution values. Changing these does not prepare resources again.
+#[derive(Clone, Copy, Debug)]
+pub struct DenoiseParams {
+    /// Positive finite scale applied before HDR transfer, undone on output.
+    /// Ignored for LDR. Exposure is not estimated automatically.
+    pub input_scale: f32,
+}
+impl Default for DenoiseParams {
+    fn default() -> Self {
+        Self { input_scale: 1.0 }
+    }
+}
 
-/// Host-owned, unmapped buffers from the denoiser's device. Each must have
-/// STORAGE usage and hold at least width * height * 16 bytes from offset zero.
-/// All supplied buffers must be distinct. Extra auxiliary images are rejected.
+/// A tightly packed RGBA f32 image starting at a byte offset. The binding
+/// length is width * height * 16, independent of the host allocation's size.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageBuffer<'a> {
+    pub buffer: &'a wgpu::Buffer,
+    pub offset: u64,
+}
+impl<'a> From<&'a wgpu::Buffer> for ImageBuffer<'a> {
+    fn from(buffer: &'a wgpu::Buffer) -> Self {
+        Self { buffer, offset: 0 }
+    }
+}
+/// Host-owned, unmapped STORAGE buffers from the denoiser's device.
+/// Input ranges must not overlap; output must use a separate allocation.
+/// Albedo is linear [0, 1]; normals
+/// are signed [-1, 1] world/view-space shading normals. Auxiliary alpha is ignored.
 #[derive(Clone, Copy, Debug)]
 pub struct DenoiseBuffers<'a> {
-    pub color: &'a wgpu::Buffer,
-    /// Linear albedo RGB in [0, 1]; alpha ignored.
-    pub albedo: Option<&'a wgpu::Buffer>,
-    /// Shading normal RGB in [-1, 1], in world or view space. Accumulated
-    /// normals need not have unit length; no remapping is applied. Alpha ignored.
-    pub normal: Option<&'a wgpu::Buffer>,
-    /// RGBA f32 output, with the color input's alpha preserved.
-    pub output: &'a wgpu::Buffer,
+    pub color: ImageBuffer<'a>,
+    pub albedo: Option<ImageBuffer<'a>>,
+    pub normal: Option<ImageBuffer<'a>>,
+    /// The output preserves color alpha.
+    pub output: ImageBuffer<'a>,
 }
-
 impl DenoiseBuffers<'_> {
-    fn validate(&self, count: usize, bytes: u64) -> std::result::Result<Vec<wgpu::Buffer>, Error> {
+    fn validate(&self, count: usize, bytes: u64, alignment: u64) -> Result<Vec<ImageBuffer<'_>>> {
         if self.albedo.is_some() != (count >= 2) || self.normal.is_some() != (count >= 3) {
             return Err(Error::InvalidArgument(format!(
-                "model requires {count} images: color, then albedo, then normal; provide exactly those inputs"
+                "model requires exactly {count} images: color, then albedo, then normal"
             )));
         }
-        let inputs: Vec<_> = [Some(self.color), self.albedo, self.normal]
-            .into_iter()
-            .flatten()
-            .collect();
-        let mut all = inputs.clone();
-        all.push(self.output);
-        for (i, buffer) in all.iter().enumerate() {
-            if !buffer.usage().contains(wgpu::BufferUsages::STORAGE) || buffer.size() < bytes {
+        let all: Vec<_> = [
+            ("color", Some(self.color)),
+            ("albedo", self.albedo),
+            ("normal", self.normal),
+            ("output", Some(self.output)),
+        ]
+        .into_iter()
+        .filter_map(|(name, view)| view.map(|v| (name, v)))
+        .collect();
+        for (i, &(name, view)) in all.iter().enumerate() {
+            if !view.buffer.usage().contains(wgpu::BufferUsages::STORAGE) || !view.offset.is_multiple_of(alignment) {
                 return Err(Error::InvalidArgument(format!(
-                    "image buffer {i} must allow STORAGE and hold at least {bytes} bytes"
+                    "{name} needs STORAGE usage and an offset aligned to {alignment} bytes"
                 )));
             }
-            if all[..i].contains(buffer) {
-                return Err(Error::InvalidArgument("image buffers must not alias".into()));
+            let available = view.buffer.size().saturating_sub(view.offset);
+            if view.offset > view.buffer.size() || bytes > available {
+                return Err(Error::BufferTooSmall {
+                    image: name,
+                    required: bytes,
+                    available,
+                });
+            }
+            for &(other_name, other) in &all[..i] {
+                if view.buffer == other.buffer
+                    && view.offset < other.offset + bytes
+                    && other.offset < view.offset + bytes
+                {
+                    return Err(Error::InvalidArgument(format!("{name} overlaps {other_name}")));
+                }
             }
         }
-        Ok(inputs.into_iter().cloned().collect())
+        if all[..all.len() - 1]
+            .iter()
+            .any(|(_, view)| view.buffer == self.output.buffer)
+        {
+            return Err(Error::InvalidArgument(
+                "output must use a different buffer from inputs: wgpu storage usage applies to the whole allocation"
+                    .into(),
+            ));
+        }
+        Ok(all.into_iter().map(|(_, view)| view).collect())
     }
 }
 
-/// Device-bound model and pipeline cache. Construction does not compile
-/// pipelines; call prepare before the first interactive frame.
+/// Convolution paths actually selected by the planner; a network may use more
+/// than one (for example matrix convolutions and a direct final RGB layer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KernelPath {
+    Direct,
+    ImplicitGemm,
+    SubgroupMatrix,
+    Spatial,
+    Subgroup,
+}
+/// Resource sizes and selected execution paths for this prepared instance.
+#[derive(Clone, Debug)]
+pub struct DenoiseInfo {
+    pub size: [u32; 2],
+    /// Activation/weight storage; image buffers and output remain f32.
+    pub precision: crate::Precision,
+    pub kernels: Vec<KernelPath>,
+    pub tile_count: u32,
+    /// Per-instance GPU buffers, excluding host images and shared weights.
+    /// Small transient parameter-upload buffers and driver overhead are excluded.
+    pub workspace_bytes: u64,
+    /// Immutable weights used by this instance; shared by the same Model/device.
+    pub shared_weight_bytes: u64,
+    /// CPU planning and weight-packing time for this preparation.
+    pub planning_ms: f64,
+    /// Total preparation time, including resource creation and shader compilation.
+    pub prepare_ms: f64,
+    /// Whether shader bounds checks and workgroup initialization are enabled.
+    pub runtime_checks: bool,
+}
+
+/// Device-bound model and pipeline cache. Preparation reuses pipelines and
+/// immutable weights; every prepared instance has a separate workspace.
 pub struct Denoiser {
     device: wgpu::Device,
     adapter: wgpu::Adapter,
     model: Model,
     options: DenoiserOptions,
     pipelines: PipelineMap,
+    weights: Arc<SharedWeights>,
     unchecked: bool,
 }
-
 impl Denoiser {
-    /// Baseline FP32 denoising needs no optional features.
     pub fn required_features() -> wgpu::Features {
         wgpu::Features::empty()
     }
-
-    /// Optional stable features to request before creating the host device.
-    /// Cooperative matrices may additionally be enabled by hosts accepting
-    /// wgpu's experimental feature contract; otherwise auto uses implicit GEMM.
+    /// Optional stable acceleration; hosts may additionally opt into wgpu's
+    /// experimental cooperative-matrix feature contract before device creation.
     pub fn recommended_features(adapter: &wgpu::Adapter) -> wgpu::Features {
         adapter.features() & (wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP)
     }
-
-    /// Baseline limits to request when creating the device. Larger images
-    /// may require higher buffer limits; prepare reports insufficient limits.
+    /// Baseline; larger images may require higher buffer limits.
     pub fn required_limits() -> wgpu::Limits {
         wgpu::Limits::default()
     }
-
-    /// The adapter must be the one that created device. Shader runtime checks
-    /// and workgroup zero-initialization are enabled on this safe path.
     pub fn new(
         device: &wgpu::Device,
         adapter: &wgpu::Adapter,
         model: &Model,
         options: DenoiserOptions,
-    ) -> std::result::Result<Self, Error> {
+    ) -> Result<Self> {
         if device.adapter_info() != adapter.get_info() {
             return Err(Error::InvalidArgument("adapter must match device".into()));
-        }
-        if !(options.input_scale.is_finite() && options.input_scale > 0.0) {
-            return Err(Error::InvalidArgument("input_scale must be positive and finite".into()));
         }
         if options.max_tile_size != 0 && !(16..=16384).contains(&options.max_tile_size) {
             return Err(Error::InvalidArgument(
@@ -201,54 +330,42 @@ impl Denoiser {
             model: model.clone(),
             options,
             pipelines: PipelineMap::new(),
+            weights: model.shared_weights(device)?,
             unchecked: false,
         })
     }
-
-    /// Like new, but disables shader bounds checks and workgroup initialization.
+    /// Disables shader bounds checks and workgroup initialization.
     ///
     /// # Safety
-    /// The caller must ensure generated kernels stay in bounds and initialize
-    /// workgroup data before reading it for every prepared configuration.
-    /// Violations can read or write arbitrary GPU memory.
+    /// Generated kernels must stay in bounds and initialize workgroup data
+    /// before reading it for every configuration prepared with this denoiser.
     pub unsafe fn new_unchecked(
         device: &wgpu::Device,
         adapter: &wgpu::Adapter,
         model: &Model,
         options: DenoiserOptions,
-    ) -> std::result::Result<Self, Error> {
+    ) -> Result<Self> {
         let mut denoiser = Self::new(device, adapter, model, options)?;
         denoiser.unchecked = true;
         Ok(denoiser)
     }
-
-    /// Plans a fixed image size and allocates its workspaces. May block while
-    /// shaders compile. Pipelines are reused across sizes on this denoiser.
-    /// Each returned instance owns a separate workspace and keeps buffer handles
-    /// alive; do not explicitly destroy those buffers while work is pending.
-    pub fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        size: [u32; 2],
-        buffers: DenoiseBuffers<'_>,
-    ) -> std::result::Result<PreparedDenoise, Error> {
-        if device != &self.device {
-            return Err(Error::InvalidArgument("prepare requires the denoiser's device".into()));
-        }
+    /// Plans and allocates a fixed size before interactive rendering. May block
+    /// for shader compilation. Instances may outlive this Denoiser; they retain
+    /// their image handles, workspace and shared weights.
+    pub fn prepare(&mut self, size: [u32; 2], buffers: DenoiseBuffers<'_>) -> Result<PreparedDenoise> {
+        let device = &self.device;
         let [width, height] = size;
         if !(1..=16384).contains(&width) || !(1..=16384).contains(&height) {
             return Err(Error::InvalidArgument("width and height must be in 1..=16384".into()));
         }
         let bytes = width as u64 * height as u64 * 16;
-        if bytes > device.limits().max_buffer_size
-            || bytes > device.limits().max_storage_buffer_binding_size
-            || bytes > u32::MAX as u64
-        {
-            return Err(Error::UnsupportedDevice(
-                "image exceeds the device buffer/binding limits; tiling does not shrink external images".into(),
-            ));
-        }
-        let inputs = buffers.validate(self.model.inputs, bytes)?;
+        check_buffer_limits(device, "external image", bytes, true)?;
+        let views = buffers.validate(
+            self.model.inputs,
+            bytes,
+            device.limits().min_storage_buffer_offset_alignment as u64,
+        )?;
+        let input_buffers: Vec<_> = views[..self.model.inputs].iter().map(|v| v.buffer.clone()).collect();
         let config = NetworkConfig {
             kernel: if device
                 .features()
@@ -262,61 +379,139 @@ impl Denoiser {
                 hdr: self.options.hdr,
                 log_transfer: self.options.transfer == Transfer::Log,
                 max_tile_size: self.options.max_tile_size,
-                input_scale: self.options.input_scale,
+                input_scale: 1.0,
             }),
             ..NetworkConfig::new(width, height)
         };
         let started = Instant::now();
         let program = crate::plan(device, &self.adapter, &self.model.weights, &config).map_err(Error::Model)?;
-        check_limits(device, &program)?;
-        let planning_ms = started.elapsed().as_secs_f64() * 1e3;
+        for buffer in &program.buffers {
+            check_buffer_limits(
+                device,
+                &buffer.label,
+                buffer.size,
+                buffer.usage & wgpu::BufferUsages::STORAGE.bits() != 0,
+            )?;
+        }
+        let meta = program.metadata.as_ref().ok_or_else(|| {
+            Error::Model("core archive lacks execution metadata; rebuild it for this source revision".into())
+        })?;
+        let info = DenoiseInfo {
+            size,
+            precision: if meta.precision == 2 {
+                crate::Precision::Fp16
+            } else {
+                crate::Precision::Fp32
+            },
+            kernels: [
+                KernelPath::Direct,
+                KernelPath::ImplicitGemm,
+                KernelPath::SubgroupMatrix,
+                KernelPath::Spatial,
+                KernelPath::Subgroup,
+            ]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, k)| (meta.kernels & (1 << i) != 0).then_some(k))
+            .collect(),
+            tile_count: meta.tile_count,
+            workspace_bytes: 0,
+            shared_weight_bytes: 0,
+            planning_ms: started.elapsed().as_secs_f64() * 1e3,
+            prepare_ms: 0.0,
+            runtime_checks: !self.unchecked,
+        };
+        let mut weights = self
+            .weights
+            .buffers
+            .lock()
+            .map_err(|_| Error::Gpu("weight cache lock poisoned".into()))?;
         let network = gpu_checked(device, || {
             Network::from_program(
                 device,
                 program,
-                Some(&inputs),
-                Some(buffers.output),
+                Some(&input_buffers),
+                Some(buffers.output.buffer),
                 self.unchecked,
-                &mut self.pipelines,
-                planning_ms,
+                crate::ResourceCaches {
+                    pipelines: &mut self.pipelines,
+                    weights: &mut weights,
+                },
+                info.planning_ms,
             )
             .map_err(Error::Model)
         });
-        match network {
-            Ok(network) => Ok(PreparedDenoise {
-                device: device.clone(),
-                network,
-                inputs: self.model.inputs,
-                image_bytes: bytes,
-            }),
-            Err(error) => {
+        let network = match network {
+            Ok(n) => n,
+            Err(e) => {
                 self.pipelines.clear();
-                Err(error)
+                weights.clear();
+                return Err(e);
+            }
+        };
+        drop(weights);
+        let mut prepared = PreparedDenoise {
+            device: device.clone(),
+            staging: wgpu::util::StagingBelt::new(device.clone(), 256),
+            network,
+            inputs: self.model.inputs,
+            image_bytes: bytes,
+            info,
+            _weights: self.weights.clone(),
+        };
+        // Zero-offset host bindings were already created by from_program.
+        if views.iter().any(|view| view.offset != 0) {
+            prepared.rebind(buffers)?;
+        }
+        let meta = prepared.network.metadata.as_ref().unwrap();
+        let mut seen_weights = Vec::new();
+        for &id in &meta.weights {
+            let buffer = &prepared.network.buffers[id];
+            if !seen_weights.contains(&buffer) {
+                prepared.info.shared_weight_bytes += buffer.size();
+                seen_weights.push(buffer);
             }
         }
+        prepared.info.workspace_bytes = prepared
+            .network
+            .buffers
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| {
+                !prepared.network.inputs.contains(id) && *id != prepared.network.output && !meta.weights.contains(id)
+            })
+            .map(|(_, b)| b.size())
+            .sum();
+        prepared.info.prepare_ms = started.elapsed().as_secs_f64() * 1e3;
+        Ok(prepared)
     }
 }
-
-fn check_limits(device: &wgpu::Device, program: &Program) -> std::result::Result<(), Error> {
+fn check_buffer_limits(device: &wgpu::Device, resource: &str, required: u64, storage: bool) -> Result<()> {
     let limits = device.limits();
-    for buffer in &program.buffers {
-        if buffer.size > limits.max_buffer_size
-            || (buffer.usage & wgpu::BufferUsages::STORAGE.bits() != 0
-                && buffer.size > limits.max_storage_buffer_binding_size)
-        {
-            return Err(Error::UnsupportedDevice(format!(
-                "buffer {} needs {} bytes; device buffer/binding limits are {}/{}; request higher limits or use smaller tiles/images",
-                buffer.label, buffer.size, limits.max_buffer_size, limits.max_storage_buffer_binding_size
-            )));
+    for (limit, available) in [
+        (Limit::ProgramBufferSize, u32::MAX as u64),
+        (Limit::BufferSize, limits.max_buffer_size),
+        (
+            Limit::StorageBindingSize,
+            if storage {
+                limits.max_storage_buffer_binding_size
+            } else {
+                u64::MAX
+            },
+        ),
+    ] {
+        if required > available {
+            return Err(Error::LimitExceeded {
+                resource: resource.into(),
+                limit,
+                required,
+                available,
+            });
         }
     }
     Ok(())
 }
-
-fn gpu_checked<T>(
-    device: &wgpu::Device,
-    body: impl FnOnce() -> std::result::Result<T, Error>,
-) -> std::result::Result<T, Error> {
+fn gpu_checked<T>(device: &wgpu::Device, body: impl FnOnce() -> Result<T>) -> Result<T> {
     let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -332,66 +527,81 @@ fn gpu_checked<T>(
     result
 }
 
-/// Prepared fixed-size denoising with its own workspace. This object may outlive
-/// its Denoiser. Submit its executions in encode order on the device's queue.
-/// For independent workspaces, prepare separate instances.
+/// A fixed-size workspace. Submit executions in encode order on its device's
+/// queue, and end any active pass before encode. Separate instances have
+/// independent workspaces. Do not explicitly destroy buffers while in use.
 pub struct PreparedDenoise {
     device: wgpu::Device,
     network: Network,
     inputs: usize,
     image_bytes: u64,
+    info: DenoiseInfo,
+    staging: wgpu::util::StagingBelt,
+    _weights: Arc<SharedWeights>,
 }
-
 impl PreparedDenoise {
     pub fn size(&self) -> [u32; 2] {
-        [self.network.width, self.network.height]
+        self.info.size
     }
-
-    /// Appends GPU work only: no queue writes, submission, CPU wait or image
-    /// readback. The encoder must belong to this instance's device. Complete
-    /// any active render/compute pass before calling this method.
-    pub fn encode(&mut self, encoder: &mut wgpu::CommandEncoder) -> std::result::Result<(), Error> {
+    pub fn info(&self) -> &DenoiseInfo {
+        &self.info
+    }
+    /// Appends commands only, with a per-execution snapshot of parameters.
+    /// Reports invalid CPU parameters before modifying the encoder. GPU/device
+    /// errors use the host's wgpu error handling, not this Result.
+    pub fn encode(&mut self, encoder: &mut wgpu::CommandEncoder, params: DenoiseParams) -> Result<()> {
+        if !(params.input_scale.is_finite() && params.input_scale > 0.0) {
+            return Err(Error::InvalidArgument("input_scale must be positive and finite".into()));
+        }
+        let frame = self
+            .network
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.frame)
+            .ok_or_else(|| Error::Model("missing frame parameter buffer".into()))?;
+        self.staging
+            .write_buffer(
+                encoder,
+                &self.network.buffers[frame],
+                0,
+                std::num::NonZeroU64::new(4).unwrap(),
+            )
+            .copy_from_slice(&params.input_scale.to_le_bytes());
         self.network.encode_commands(encoder);
+        self.staging.finish_and_recall_on_submit(encoder);
         Ok(())
     }
-
-    /// Replaces image bindings at the same size without replanning or creating
-    /// pipelines/workspaces. Previously encoded commands retain old bindings.
-    /// New buffers must belong to the same device and satisfy DenoiseBuffers.
-    pub fn rebind(&mut self, buffers: DenoiseBuffers<'_>) -> std::result::Result<(), Error> {
-        let inputs = buffers.validate(self.inputs, self.image_bytes)?;
+    /// Replaces image ranges at the same size, preserving weights, pipelines
+    /// and workspace. Already encoded commands retain previous bindings.
+    pub fn rebind(&mut self, buffers: DenoiseBuffers<'_>) -> Result<()> {
+        let views = buffers.validate(
+            self.inputs,
+            self.image_bytes,
+            self.device.limits().min_storage_buffer_offset_alignment as u64,
+        )?;
         let mut candidate = self.network.buffers.clone();
-        for (&id, buffer) in self.network.inputs.iter().zip(inputs) {
-            candidate[id] = buffer;
+        let mut offsets = self.network.buffer_offsets.clone();
+        for (&id, view) in self
+            .network
+            .inputs
+            .iter()
+            .chain(std::iter::once(&self.network.output))
+            .zip(views)
+        {
+            candidate[id] = view.buffer.clone();
+            offsets[id] = view.offset;
         }
-        candidate[self.network.output] = buffers.output.clone();
         let bind_groups = gpu_checked(&self.device, || {
-            Ok(self
-                .network
-                .bind_group_descriptions
-                .iter()
-                .map(|group| {
-                    let entries: Vec<_> = group
-                        .entries
-                        .iter()
-                        .map(|&[binding, buffer, offset, size]| wgpu::BindGroupEntry {
-                            binding,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &candidate[buffer as usize],
-                                offset: offset as u64,
-                                size: std::num::NonZeroU64::new(size as u64),
-                            }),
-                        })
-                        .collect();
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("oidn-webgpu rebound images"),
-                        layout: &self.network.pipelines[group.pipeline].get_bind_group_layout(group.group),
-                        entries: &entries,
-                    })
-                })
-                .collect())
+            Ok(crate::create_bind_groups(
+                &self.device,
+                &self.network.pipelines,
+                &self.network.bind_group_descriptions,
+                &candidate,
+                &offsets,
+            ))
         })?;
         self.network.buffers = candidate;
+        self.network.buffer_offsets = offsets;
         self.network.bind_groups = bind_groups;
         Ok(())
     }
@@ -400,6 +610,7 @@ impl PreparedDenoise {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Program;
     use std::time::Duration;
 
     fn weights() -> Vec<u8> {
@@ -474,10 +685,10 @@ mod tests {
         let output = image();
         let output2 = image();
         let bindings = DenoiseBuffers {
-            color: &color,
-            albedo: Some(&albedo),
-            normal: Some(&normal),
-            output: &output,
+            color: (&color).into(),
+            albedo: Some((&albedo).into()),
+            normal: Some((&normal).into()),
+            output: (&output).into(),
         };
         let data: Vec<u8> = (0..size[0] * size[1])
             .flat_map(|p| [0.5 + (p % 7) as f32 * 0.01, 0.3, 0.1, p as f32 / 1024.0])
@@ -491,12 +702,11 @@ mod tests {
         queue.write_buffer(&normal, 0, &normals);
 
         assert!(matches!(
-            denoiser.prepare(&device, [0, 19], bindings),
+            denoiser.prepare([0, 19], bindings),
             Err(Error::InvalidArgument(_))
         ));
         assert!(matches!(
             denoiser.prepare(
-                &device,
                 size,
                 DenoiseBuffers {
                     albedo: None,
@@ -507,10 +717,9 @@ mod tests {
         ));
         assert!(matches!(
             denoiser.prepare(
-                &device,
                 size,
                 DenoiseBuffers {
-                    output: &color,
+                    output: (&color).into(),
                     ..bindings
                 }
             ),
@@ -524,30 +733,23 @@ mod tests {
         });
         assert!(matches!(
             denoiser.prepare(
-                &device,
                 size,
                 DenoiseBuffers {
-                    output: &short,
+                    output: (&short).into(),
                     ..bindings
                 }
             ),
-            Err(Error::InvalidArgument(_))
-        ));
-        let mut bad = DenoiserOptions::default();
-        bad.input_scale = f32::NAN;
-        assert!(matches!(
-            Denoiser::new(&device, &adapter, &model, bad),
-            Err(Error::InvalidArgument(_))
+            Err(Error::BufferTooSmall { .. })
         ));
 
-        let mut prepared = denoiser.prepare(&device, size, bindings).unwrap();
+        let mut prepared = denoiser.prepare(size, bindings).unwrap();
         let pipelines = denoiser.pipelines.clone();
-        let _other_size = denoiser.prepare(&device, [16, 16], bindings).unwrap();
+        let _other_size = denoiser.prepare([16, 16], bindings).unwrap();
         for (key, pipeline) in &pipelines {
             assert_eq!(denoiser.pipelines.get(key), Some(pipeline));
         }
         let mut encoder = device.create_command_encoder(&Default::default());
-        prepared.encode(&mut encoder).unwrap();
+        prepared.encode(&mut encoder, DenoiseParams::default()).unwrap();
         queue.submit([encoder.finish()]);
         let expected = download(&device, &queue, &output, bytes);
         assert!(
@@ -562,20 +764,20 @@ mod tests {
         // Rebinding does not allocate pipelines. Old encoded work keeps its
         // bindings, while both uses of the shared workspace execute in order.
         let mut encoder = device.create_command_encoder(&Default::default());
-        prepared.encode(&mut encoder).unwrap();
+        prepared.encode(&mut encoder, DenoiseParams::default()).unwrap();
         prepared
             .rebind(DenoiseBuffers {
-                output: &output2,
+                output: (&output2).into(),
                 ..bindings
             })
             .unwrap();
-        prepared.encode(&mut encoder).unwrap();
+        prepared.encode(&mut encoder, DenoiseParams::default()).unwrap();
         queue.submit([encoder.finish()]);
         assert_eq!(download(&device, &queue, &output2, bytes), expected);
         assert_eq!(prepared.size(), size);
         assert!(matches!(
             prepared.rebind(DenoiseBuffers {
-                output: &color,
+                output: (&color).into(),
                 ..bindings
             }),
             Err(Error::InvalidArgument(_))
@@ -585,9 +787,8 @@ mod tests {
         // image boundaries. Compare against the existing low-level executor.
         let mut tiled_options = DenoiserOptions::default();
         tiled_options.max_tile_size = 16;
-        tiled_options.input_scale = 0.5;
         let mut tiled = Denoiser::new(&device, &adapter, &model, tiled_options).unwrap();
-        let mut tiled = tiled.prepare(&device, size, bindings).unwrap();
+        let mut tiled = tiled.prepare(size, bindings).unwrap();
         let config = NetworkConfig {
             kernel: Kernel::ImplicitGemm,
             denoise: Some(DenoiseConfig {
@@ -611,13 +812,182 @@ mod tests {
         }
         .unwrap();
         let mut encoder = device.create_command_encoder(&Default::default());
-        tiled.encode(&mut encoder).unwrap();
+        tiled.encode(&mut encoder, DenoiseParams { input_scale: 0.5 }).unwrap();
         reference.encode(&queue, &mut encoder);
         queue.submit([encoder.finish()]);
         assert_eq!(
             download(&device, &queue, &output, bytes),
             download(&device, &queue, &output2, bytes)
         );
+
+        // Each encode snapshots exposure, including when multiple encodes
+        // share one submission. Compare against independently planned scales.
+        let half = download(&device, &queue, &output2, bytes);
+        let mut twice_config = config.clone();
+        twice_config.denoise.as_mut().unwrap().input_scale = 2.0;
+        let twice = unsafe {
+            Network::with_buffers(
+                &device,
+                &adapter,
+                &model.weights,
+                &twice_config,
+                &[color.clone(), albedo.clone(), normal.clone()],
+                &output2,
+                false,
+            )
+        }
+        .unwrap();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        twice.encode(&queue, &mut encoder);
+        queue.submit([encoder.finish()]);
+        let double = download(&device, &queue, &output2, bytes);
+        assert_ne!(half, double);
+        let snapshot_a = image();
+        let snapshot_b = image();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        assert!(matches!(
+            tiled.encode(&mut encoder, DenoiseParams { input_scale: f32::NAN }),
+            Err(Error::InvalidArgument(_))
+        ));
+        tiled.encode(&mut encoder, DenoiseParams { input_scale: 0.5 }).unwrap();
+        encoder.copy_buffer_to_buffer(&output, 0, &snapshot_a, 0, bytes);
+        tiled.encode(&mut encoder, DenoiseParams { input_scale: 2.0 }).unwrap();
+        encoder.copy_buffer_to_buffer(&output, 0, &snapshot_b, 0, bytes);
+        queue.submit([encoder.finish()]);
+        assert_eq!(download(&device, &queue, &snapshot_a, bytes), half);
+        assert_eq!(download(&device, &queue, &snapshot_b, bytes), double);
+        assert_eq!(tiled.info().precision, crate::Precision::Fp32);
+        assert_eq!(tiled.info().tile_count, 4);
+        assert!(tiled.info().kernels.contains(&KernelPath::ImplicitGemm));
+        assert!(tiled.info().workspace_bytes > 0 && tiled.info().shared_weight_bytes > 0);
+
+        // A model clone on the same device reuses physical weight allocations,
+        // while its prepared workspace remains independent.
+        let mut another = Denoiser::new(&device, &adapter, &model.clone(), DenoiserOptions::default()).unwrap();
+        let other = another.prepare(size, bindings).unwrap();
+        let ids = &prepared.network.metadata.as_ref().unwrap().weights;
+        let other_ids = &other.network.metadata.as_ref().unwrap().weights;
+        assert!(!ids.is_empty());
+        for (&a, &b) in ids.iter().zip(other_ids) {
+            assert_eq!(prepared.network.buffers[a], other.network.buffers[b]);
+        }
+        assert_ne!(
+            prepared.network.buffers[prepared.network.metadata.as_ref().unwrap().frame.unwrap()],
+            other.network.buffers[other.network.metadata.as_ref().unwrap().frame.unwrap()]
+        );
+        let limits_error = check_buffer_limits(
+            &device,
+            "test image",
+            device.limits().max_storage_buffer_binding_size + 1,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(limits_error, Error::LimitExceeded { limit: Limit::StorageBindingSize, required, available, .. } if required == available + 1)
+        );
+
+        // Host suballocation: inputs share an allocation; output uses another
+        // one due to wgpu whole-buffer usage tracking. Both allow offsets.
+        let alignment = device.limits().min_storage_buffer_offset_alignment as u64;
+        let stride = bytes.div_ceil(alignment) * alignment;
+        let arena = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: stride * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&arena, 0, &data);
+        queue.write_buffer(&arena, stride * 2, &normals);
+        let output_arena = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: stride * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let arena_bindings = DenoiseBuffers {
+            color: ImageBuffer {
+                buffer: &arena,
+                offset: 0,
+            },
+            albedo: Some(ImageBuffer {
+                buffer: &arena,
+                offset: stride,
+            }),
+            normal: Some(ImageBuffer {
+                buffer: &arena,
+                offset: stride * 2,
+            }),
+            output: ImageBuffer {
+                buffer: &output_arena,
+                offset: stride * 3,
+            },
+        };
+        assert!(matches!(
+            prepared.rebind(DenoiseBuffers {
+                output: ImageBuffer {
+                    buffer: &arena,
+                    offset: stride * 3
+                },
+                ..arena_bindings
+            }),
+            Err(Error::InvalidArgument(_))
+        ));
+        prepared.rebind(arena_bindings).unwrap();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        prepared.encode(&mut encoder, DenoiseParams::default()).unwrap();
+        encoder.copy_buffer_to_buffer(&output_arena, stride * 3, &snapshot_a, 0, bytes);
+        queue.submit([encoder.finish()]);
+        assert_eq!(download(&device, &queue, &snapshot_a, bytes), expected);
+        assert!(matches!(
+            prepared.rebind(DenoiseBuffers {
+                output: ImageBuffer {
+                    buffer: &arena,
+                    offset: 1
+                },
+                ..arena_bindings
+            }),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            prepared.rebind(DenoiseBuffers {
+                output: arena_bindings.color,
+                ..arena_bindings
+            }),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            prepared.rebind(DenoiseBuffers {
+                output: ImageBuffer {
+                    buffer: &arena,
+                    offset: u64::MAX
+                },
+                ..arena_bindings
+            }),
+            Err(Error::InvalidArgument(_) | Error::BufferTooSmall { .. })
+        ));
+
+        if device.limits().max_buffer_size > device.limits().max_storage_buffer_binding_size {
+            let large = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: device.limits().max_storage_buffer_binding_size + alignment,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            prepared
+                .rebind(DenoiseBuffers {
+                    output: ImageBuffer {
+                        buffer: &large,
+                        offset: alignment,
+                    },
+                    ..bindings
+                })
+                .unwrap();
+            let mut encoder = device.create_command_encoder(&Default::default());
+            prepared.encode(&mut encoder, DenoiseParams::default()).unwrap();
+            encoder.copy_buffer_to_buffer(&large, alignment, &snapshot_a, 0, bytes);
+            queue.submit([encoder.finish()]);
+            assert_eq!(download(&device, &queue, &snapshot_a, bytes), expected);
+        }
 
         // Wrong-device bindings are recoverable errors, not uncaptured wgpu
         // validation panics, and a failed rebind leaves the old bindings intact.
@@ -630,25 +1000,20 @@ mod tests {
         });
         assert!(matches!(
             prepared.rebind(DenoiseBuffers {
-                output: &foreign,
+                output: (&foreign).into(),
                 ..bindings
             }),
             Err(Error::Gpu(_))
         ));
         assert!(matches!(
             denoiser.prepare(
-                &device,
                 size,
                 DenoiseBuffers {
-                    output: &foreign,
+                    output: (&foreign).into(),
                     ..bindings
                 }
             ),
             Err(Error::Gpu(_))
-        ));
-        assert!(matches!(
-            denoiser.prepare(&other_device, size, bindings),
-            Err(Error::InvalidArgument(_))
         ));
 
         // A synthetic recorded program writes 1, copies it, writes 2, copies
@@ -660,6 +1025,7 @@ mod tests {
             label: String::new(),
         };
         let program = Program {
+            metadata: None,
             inputs: vec![],
             output: 1,
             output_external: false,
@@ -700,7 +1066,19 @@ mod tests {
                 }]),
             ],
         };
-        let network = Network::from_program(&device, program, None, None, false, &mut PipelineMap::new(), 0.0).unwrap();
+        let network = Network::from_program(
+            &device,
+            program,
+            None,
+            None,
+            false,
+            crate::ResourceCaches {
+                pipelines: &mut PipelineMap::new(),
+                weights: &mut WeightMap::new(),
+            },
+            0.0,
+        )
+        .unwrap();
         let mut encoder = device.create_command_encoder(&Default::default());
         network.encode_commands(&mut encoder);
         network.encode_commands(&mut encoder);

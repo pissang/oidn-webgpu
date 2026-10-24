@@ -7,7 +7,7 @@
  *     [quality 0-2] [max_tile_size] [runs] [kernel 0-3]
  *
  * albedo/normal may be "-" for models without them. Prints the time of the
- * first (planning and resource creation) and the following executions.
+ * first and following executions after explicit preparation.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,6 +86,8 @@ int main(int argc, char **argv) {
   oidnw_filter *filter = NULL;
   CHECK(oidnw_filter_create(device, weights, weights_size, &desc, &filter, error, sizeof error));
   printf("model inputs: %u\n", oidnw_filter_input_count(filter));
+
+  CHECK(oidnw_filter_prepare(filter, width, height, error, sizeof error));
 
   for (int run = 0; run <= runs; run++) {
     double start = now_ms();

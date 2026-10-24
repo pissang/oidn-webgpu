@@ -1,6 +1,6 @@
 //! A host creates GPU image buffers, produces inputs in a compute pass, then
 //! denoises on the same encoder. Only the final file export reads back to CPU.
-use oidn_webgpu::{DenoiseBuffers, Denoiser, DenoiserOptions, Model, wgpu};
+use oidn_webgpu::{DenoiseBuffers, DenoiseParams, Denoiser, DenoiserOptions, Model, wgpu};
 use std::{error::Error, time::Duration};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -103,15 +103,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     options.max_tile_size = number(5, 0)?;
     let mut denoiser = Denoiser::new(&device, &adapter, &model, options)?;
     let mut prepared = denoiser.prepare(
-        &device,
         [width, height],
         DenoiseBuffers {
-            color: &color,
-            albedo: (model.input_count() >= 2).then_some(&albedo),
-            normal: (model.input_count() >= 3).then_some(&normal),
-            output: &output,
+            color: (&color).into(),
+            albedo: (model.input_count() >= 2).then_some((&albedo).into()),
+            normal: (model.input_count() >= 3).then_some((&normal).into()),
+            output: (&output).into(),
         },
     )?;
+    println!("Denoise: {:?}", prepared.info());
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("file export"),
         size: bytes,
@@ -128,7 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         pass.set_bind_group(0, &bindings, &[]);
         pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
     }
-    prepared.encode(&mut encoder)?;
+    prepared.encode(&mut encoder, DenoiseParams::default())?;
     encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, bytes);
     let submission = queue.submit([encoder.finish()]);
 

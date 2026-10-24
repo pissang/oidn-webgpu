@@ -63,7 +63,7 @@ export function recordNetwork(tza: Uint8Array, config: Uint8Array): Uint8Array {
   executor.execute(inputs, width, height);
   device.operations = [];
   const output = executor.execute(inputs, width, height) as RecordedBuffer;
-  return serializeProgram(device, inputs, output, false, width, height, model.outputChannels);
+  return serializeProgram(device, inputs, output, false, width, height, model.outputChannels, executor, 0, undefined);
 }
 
 /**
@@ -90,7 +90,7 @@ export function recordDenoise(tza: Uint8Array, config: Uint8Array): Uint8Array {
     maxTileSize: words[next + 2],
     inputScale
   });
-  return serializeProgram(device, recorded.inputs, recorded.output, true, width, height, 4);
+  return serializeProgram(device, recorded.inputs, recorded.output, true, width, height, 4, executor, recorded.tiles, recorded.frame);
 }
 
 function createNativeExecutor(tza: Uint8Array, config: Uint8Array) {
@@ -211,7 +211,10 @@ function serializeProgram(
   outputExternal: boolean,
   width: number,
   height: number,
-  outputChannels: number
+  outputChannels: number,
+  executor: NativeUNetCore,
+  tiles: number,
+  frame: RecordedBuffer | undefined
 ) {
   const writer = new ProgramWriter();
   writer.u32(0x4e44494f);
@@ -280,6 +283,21 @@ function serializeProgram(
       writer.bytes(operation.data ?? new Uint8Array(0));
     }
   }
+  // Optional extension after v2 operations. Old replayers can ignore it.
+  writer.u32(0x4154454d); // META
+  writer.u32(1);
+  writer.u32(executor.precision === 'fp16' ? 2 : 1);
+  writer.u32(tiles);
+  let kernels = 0;
+  for (const kernel of executor.usedKernels) {
+    kernels |= kernel === 'direct' ? 1 : kernel === 'implicit-gemm' ? 2
+      : kernel === 'subgroup-matrix' ? 4 : kernel === 'spatial' ? 8 : 16;
+  }
+  writer.u32(kernels);
+  writer.u32(frame ? frame.id : 0xffffffff);
+  const weights = executor.weightBuffers as RecordedBuffer[];
+  writer.u32(weights.length);
+  for (const buffer of weights) writer.u32(buffer.id);
   return writer.finish();
 }
 

@@ -36,27 +36,33 @@ If your host already depends on wgpu, keep its requirements compatible with `=30
 Load the model once, create a denoiser on the host's device, and prepare the image size and bindings before the first interactive frame:
 
 ```rust
-use oidn_webgpu::{DenoiseBuffers, Denoiser, DenoiserOptions, Model};
+use oidn_webgpu::{DenoiseBuffers, DenoiseParams, Denoiser, DenoiserOptions, Model};
 
 let model = Model::from_tza(weights)?;
 let mut denoiser = Denoiser::new(device, adapter, &model, DenoiserOptions::default())?;
-let mut prepared = denoiser.prepare(device, [width, height], DenoiseBuffers {
-    color,
-    albedo: Some(albedo),
-    normal: Some(normal),
-    output,
+let mut prepared = denoiser.prepare([width, height], DenoiseBuffers {
+    color: color.into(),
+    albedo: Some(albedo.into()),
+    normal: Some(normal.into()),
+    output: output.into(),
 })?;
 
 let mut encoder = device.create_command_encoder(&Default::default());
 // Encode the host's render/normalization pass here, ending the pass first.
-prepared.encode(&mut encoder)?;
+prepared.encode(&mut encoder, DenoiseParams { input_scale: exposure })?;
 // Encode a display or other consumer pass here.
 queue.submit([encoder.finish()]);
 ```
 
 `encode` only appends commands: it does not submit, wait for the GPU or read images back to CPU. Input/output buffers are shared with the host; intermediate GPU processing still uses its own workspace. Submit executions of one prepared instance in encode order on the device's queue. Prepare separate instances for independent workspaces.
 
-`prepare` may block for shader compilation and allocates a workspace for that size. Call it again when dimensions change; the denoiser reuses matching pipelines. Use `prepared.rebind(buffers)` when only image buffers change; this preserves the pipelines and workspace. Already encoded commands retain their previous bindings. Prepared instances may outlive the denoiser and retain their image buffer handles; do not explicitly destroy buffers while pending GPU work uses them.
+`prepare` may block for shader compilation and allocates a workspace for that size. Call it again when dimensions change; the denoiser reuses matching pipelines and immutable GPU weights. Denoisers created from the same `Model` or its clones share compatible weights on the same device; every prepared instance has its own workspace. Loading the TZA again as a separate `Model` creates a separate cache. Active caches also retain packed weight data in CPU memory.
+
+Use `prepared.rebind(buffers)` when only image buffers change; this preserves the pipelines and workspace. Already encoded commands retain their previous bindings. Prepared instances may outlive the denoiser and retain their image buffer handles; do not explicitly destroy buffers while pending GPU work uses them.
+
+Use `prepared.info()` to query the actual activation/weight precision, convolution paths (including fallbacks), tile count, preparation/planning time, per-instance workspace bytes and shared weight bytes. Image buffers and output remain f32. Reported buffer sizes exclude driver overhead and small transient parameter uploads; shared weight bytes must not be added once per instance when estimating total memory.
+
+`Result<T>` uses the typed `Error`. `BufferTooSmall` and `LimitExceeded` include `required` and `available` bytes, and a device-limit error identifies the limit. Invalid per-frame parameters are reported before commands are encoded. Encoding success does not mean GPU completion; execution and device-loss errors follow the host's wgpu handling. The experimental low-level `Network` API uses the separate `PlanResult<T>` with string errors.
 
 The [complete host-buffer example](examples/host_buffers.rs) creates a device, generates noisy color and AOVs on the GPU, denoises in the same command encoder, then exports the final image. From the repository root:
 
@@ -69,11 +75,12 @@ The output is tightly packed little-endian RGBA f32. The example reads back only
 
 ### Image and device requirements
 
-- Every image is a tightly packed RGBA f32 buffer starting at offset zero, with at least `width * height * 16` bytes and `STORAGE` usage. All supplied buffers must be distinct, unmapped and belong to the denoiser's device. Textures, strides, buffer offsets and in-place output are not supported in this API.
+- Every image is tightly packed RGBA f32 with `STORAGE` usage, unmapped and on the denoiser's device. `ImageBuffer { buffer, offset }` binds exactly `width * height * 16` bytes starting at the byte offset; `(&buffer).into()` selects offset zero. The offset must satisfy the device's `min_storage_buffer_offset_alignment` and the range must fit the allocation. A host allocation may be larger than the image's binding limit when the bound image range fits.
+- Input ranges may share an allocation if they do not overlap. Output must use a different allocation from all inputs, even for disjoint ranges, because wgpu tracks conflicting storage usages for the whole buffer. Textures, strides and in-place GPU output are not supported.
 - Color and albedo are linear RGB. LDR color and albedo use [0, 1]; HDR color is nonnegative. Pass averaged color rather than an unnormalized sample sum. Output keeps the color's alpha; auxiliary alpha is ignored.
 - Normals are shading normals in world or view space, with signed components in [-1, 1]. Accumulated normals need not have unit length. Normals encoded in [0, 1] must be remapped before use, consistent with [OIDN's input conventions](https://www.openimagedenoise.org/documentation.html#normals).
 - `Model::input_count()` reports 1 (color), 2 (color/albedo) or 3 (color/albedo/normal). Supply exactly those images. Choose weights trained for your HDR/LDR and auxiliary inputs; use `_small` weights for the smaller, faster network. Weights are separate from the crate and C package; see the [repository weights](https://github.com/pissang/oidn-webgpu/tree/main/weights).
-- Options default to HDR, PU transfer, `input_scale = 1` and whole-image execution. Select `Transfer::Log` for RTLightmap HDR weights. Input scale must be positive and finite; it is applied before the HDR transfer and undone on output. Exposure is not estimated automatically.
+- Preparation options default to HDR, PU transfer and whole-image execution. Select `Transfer::Log` for RTLightmap HDR weights. Supply `DenoiseParams` to every `encode`; its default `input_scale` is 1. Scale must be positive and finite, is applied before HDR transfer and undone on output, and is ignored for LDR. You can change it every frame without preparing again. Multiple executions in one command buffer retain their own parameter values. Exposure is not estimated automatically.
 - `max_tile_size` limits the output tile edge, rounded down to a multiple of 16. Zero disables tiling; positive values must be in 16..=16384. Tiling reduces intermediate memory but not full-size image buffers. Dimensions must be in 1..=16384 and fit the enabled device buffer limits.
 - Before requesting a device, use `Denoiser::required_features()`, `recommended_features(&adapter)` and `required_limits()` to select baseline settings. Higher buffer limits may be needed for your image sizes. Existing devices use only their enabled features and limits; the library cannot enable more afterward.
 - Auto uses cooperative-matrix kernels when the host enables `EXPERIMENTAL_COOPERATIVE_MATRIX`, otherwise implicit GEMM. Cooperative matrices also require accepting wgpu's experimental feature contract when requesting the device. Windows/Linux require Vulkan for these kernels; DX12 uses implicit GEMM.
@@ -108,12 +115,15 @@ oidnw_filter_desc desc;
 oidnw_filter_desc_default(&desc);
 oidnw_filter *filter;
 oidnw_filter_create(device, tza, tza_size, &desc, &filter, error, sizeof error);
+oidnw_filter_prepare(filter, width, height, error, sizeof error);
 oidnw_filter_execute(filter, width, height, color, albedo, normal, output, error, sizeof error);
 oidnw_filter_destroy(filter);
 oidnw_device_destroy(device);
 ```
 
-Check status codes after each call; [denoise.c](examples/denoise.c) shows error handling. Link with `-loidn_webgpu` and distribute the platform shared library and chosen TZA weights with your application. Images are tightly packed RGBA f32. Execution blocks until CPU output is available, and output may alias an input. The filter caches resources for its last image size; changing size prepares new resources. Tiling is off by default.
+Check status codes after each call; [denoise.c](examples/denoise.c) shows error handling. Link with `-loidn_webgpu` and distribute the platform shared library and chosen TZA weights with your application. Images are tightly packed RGBA f32. Execution blocks until CPU output is available, and output may alias an input. The filter caches a workspace for its last image size; changing size creates a new workspace and reuses weights and matching pipelines. Tiling is off by default. `oidnw_filter_prepare` is optional: it allocates and compiles for a size before the first image, without processing an image. Repeating that size reuses resources; `execute` still prepares automatically if needed. Concurrent prepare/execute on one filter returns `OIDNW_ERROR_BUSY`.
+
+`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; the header's `OIDNW_API_VERSION` is currently 1.0.0 (`0x00010000`). Dynamic loaders can compare the major version for ABI compatibility before resolving optional functions. Libraries predating this query have no version symbol, so feature detection must handle a missing symbol.
 
 The C API defaults to unchecked shaders; set `OIDNW_FILTER_RUNTIME_CHECKS` to enable checks. `quality` controls accumulation precision, while the weights select the model size. See the [header](include/oidn_webgpu.h) for option and lifetime contracts.
 

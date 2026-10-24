@@ -4,6 +4,8 @@
 #include "oidn_webgpu.h"
 
 int main(void) {
+  if (oidnw_api_version() != OIDNW_API_VERSION) return 1;
+  if (oidnw_filter_prepare(NULL, 16, 16, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT) return 1;
   oidnw_filter_desc desc;
   memset(&desc, 0xff, sizeof desc);
   oidnw_filter_desc_default(&desc);

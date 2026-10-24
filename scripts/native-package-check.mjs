@@ -78,11 +78,11 @@ try {
   writeFileSync(path.join(consumer, 'Cargo.toml'), `[package]\nname = "oidn-package-consumer"\nversion = "0.0.0"\nedition = "2024"\n[dependencies]\noidn-webgpu = { package = "oidn-webgpu-native", path = ${JSON.stringify(path.join(root, 'native'))} }\n`);
   copyFileSync(path.join(root, 'native/Cargo.lock'), path.join(consumer, 'Cargo.lock'));
   writeFileSync(path.join(consumer, 'src/main.rs'), `
-use oidn_webgpu::{Model, PreparedDenoise, Error, wgpu};
+use oidn_webgpu::{Model, PreparedDenoise, DenoiseParams, Result, wgpu};
 fn main() {
     let weights = std::fs::read(std::env::args().nth(1).unwrap()).unwrap();
     assert_eq!(Model::from_tza(&weights).unwrap().input_count(), 3);
-    let _: fn(&mut PreparedDenoise, &mut wgpu::CommandEncoder) -> Result<(), Error> = PreparedDenoise::encode;
+    let _: fn(&mut PreparedDenoise, &mut wgpu::CommandEncoder, DenoiseParams) -> Result<()> = PreparedDenoise::encode;
     println!("Rust consumer linked to packaged core: OK");
 }
 `);

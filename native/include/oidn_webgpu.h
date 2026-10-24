@@ -109,6 +109,12 @@ typedef struct oidnw_filter_desc {
 typedef struct oidnw_device oidnw_device;
 typedef struct oidnw_filter oidnw_filter;
 
+/* API version = major << 16 | minor << 8 | patch. Compare the major for
+ * ABI compatibility; a newer minor may add functions without removing old ones.
+ * Dynamic loaders should resolve this symbol before optional entry points. */
+#define OIDNW_API_VERSION 0x00010000u
+uint32_t oidnw_api_version(void);
+
 void oidnw_filter_desc_default(oidnw_filter_desc *desc);
 
 /* Creates a GPU device (oidnw_backend). Blocks while the adapter is opened. */
@@ -121,13 +127,19 @@ int32_t oidnw_device_info(const oidnw_device *device, char *name, size_t name_ca
 void oidnw_device_destroy(oidnw_device *device);
 
 /* weights: an OIDN TZA file (copied). desc may be NULL for defaults.
- * Validates the model; GPU resources are created by the first execute of
- * each image size. */
+ * Validates the model; GPU resources are created by prepare or the first
+ * execute of each image size. */
 int32_t oidnw_filter_create(oidnw_device *device, const void *weights, size_t weights_size,
   const oidnw_filter_desc *desc, oidnw_filter **filter, char *error, size_t capacity);
 /* Images the model reads: 1 (color), 2 (color, albedo) or 3 (color, albedo,
  * normal); 0 for NULL. */
 uint32_t oidnw_filter_input_count(const oidnw_filter *filter);
+/* Prepares one size without input images or a GPU execution. May block for
+ * shader compilation. Repeating the current size reuses resources; changing
+ * size creates a new workspace while reusing weights and matching pipelines.
+ * Concurrent prepare/execute on the same filter returns OIDNW_ERROR_BUSY. */
+int32_t oidnw_filter_prepare(const oidnw_filter *filter, uint32_t width, uint32_t height,
+  char *error, size_t capacity);
 /* Denoises one image. All images are width x height RGBA f32 pixels, tightly
  * packed, in the same row order; albedo and normal are required as the model
  * reads them (otherwise ignored, may be NULL). The output keeps the color's

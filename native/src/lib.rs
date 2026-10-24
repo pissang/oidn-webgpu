@@ -40,9 +40,10 @@ unsafe extern "C" {
 const PROGRAM_MAGIC: u32 = 0x4e44_494f;
 const ERROR_MAGIC: u32 = 0x4f52_5245;
 
-/// Result for the low-level Network/planner API. Denoiser methods return the
-/// typed [`Error`] instead.
-pub type Result<T> = std::result::Result<T, String>;
+/// Result for the public denoising API.
+pub type Result<T> = std::result::Result<T, Error>;
+/// Result for the low-level experimental planner API.
+pub type PlanResult<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Precision {
@@ -105,7 +106,7 @@ impl NetworkConfig {
 /// The scriptc runtime keeps process-global state; one recording at a time.
 static CORE: Mutex<()> = Mutex::new(());
 
-fn record(tza: &[u8], config: &[u32], denoise: bool) -> Result<Vec<u8>> {
+fn record(tza: &[u8], config: &[u32], denoise: bool) -> PlanResult<Vec<u8>> {
     let config_bytes: Vec<u8> = config.iter().flat_map(|word| word.to_le_bytes()).collect();
     core_call(|pointer, size| unsafe {
         let entry = if denoise {
@@ -124,7 +125,7 @@ fn record(tza: &[u8], config: &[u32], denoise: bool) -> Result<Vec<u8>> {
     })
 }
 
-fn core_call(call: impl FnOnce(*mut *const u8, *mut usize)) -> Result<Vec<u8>> {
+fn core_call(call: impl FnOnce(*mut *const u8, *mut usize)) -> PlanResult<Vec<u8>> {
     static INIT: Once = Once::new();
     let _guard = CORE.lock().map_err(|_| "oidn-webgpu core lock poisoned")?;
     INIT.call_once(|| unsafe { oidnw_core_init() });
@@ -149,7 +150,7 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    fn u32(&mut self) -> Result<u32> {
+    fn u32(&mut self) -> PlanResult<u32> {
         let end = self.offset + 4;
         let word = self
             .bytes
@@ -159,7 +160,7 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(word.try_into().unwrap()))
     }
 
-    fn bytes(&mut self) -> Result<&'a [u8]> {
+    fn bytes(&mut self) -> PlanResult<&'a [u8]> {
         let length = self.u32()? as usize;
         let data = self
             .bytes
@@ -169,7 +170,7 @@ impl<'a> Reader<'a> {
         Ok(data)
     }
 
-    fn string(&mut self) -> Result<String> {
+    fn string(&mut self) -> PlanResult<String> {
         String::from_utf8(self.bytes()?.to_vec()).map_err(|error| error.to_string())
     }
 }
@@ -210,6 +211,15 @@ enum Operation {
     Write { buffer: usize, offset: u64, data: Vec<u8> },
 }
 
+#[derive(Default)]
+struct ProgramMetadata {
+    precision: u32,
+    tile_count: u32,
+    kernels: u32,
+    frame: Option<usize>,
+    weights: Vec<usize>,
+}
+
 struct Program {
     inputs: Vec<usize>,
     output: usize,
@@ -222,10 +232,11 @@ struct Program {
     pipelines: Vec<(usize, String)>,
     bind_groups: Vec<BindGroupDescription>,
     operations: Vec<Operation>,
+    metadata: Option<ProgramMetadata>,
 }
 
 impl Program {
-    fn parse(bytes: &[u8]) -> Result<Self> {
+    fn parse(bytes: &[u8]) -> PlanResult<Self> {
         let mut reader = Reader { bytes, offset: 0 };
         match reader.u32()? {
             PROGRAM_MAGIC => {}
@@ -239,7 +250,7 @@ impl Program {
         let input_count = reader.u32()?;
         let inputs = (0..input_count)
             .map(|_| reader.u32().map(|id| id as usize))
-            .collect::<Result<_>>()?;
+            .collect::<PlanResult<_>>()?;
         let output = reader.u32()? as usize;
         let output_external = reader.u32()? == 1;
         let width = reader.u32()?;
@@ -310,7 +321,35 @@ impl Program {
                 kind => return Err(format!("unknown oidn-webgpu operation {kind}")),
             }
         }
+        let metadata = if reader.offset < bytes.len() {
+            if reader.u32()? != 0x4154_454d || reader.u32()? != 1 {
+                return Err("unsupported program metadata".into());
+            }
+            let precision = reader.u32()?;
+            let tile_count = reader.u32()?;
+            let kernels = reader.u32()?;
+            let frame = match reader.u32()? {
+                u32::MAX => None,
+                id => Some(id as usize),
+            };
+            let weights = (0..reader.u32()?)
+                .map(|_| reader.u32().map(|id| id as usize))
+                .collect::<PlanResult<Vec<_>>>()?;
+            if frame.is_some_and(|id| id >= buffers.len()) || weights.iter().any(|&id| id >= buffers.len()) {
+                return Err("invalid program metadata buffer id".into());
+            }
+            Some(ProgramMetadata {
+                precision,
+                tile_count,
+                kernels,
+                frame,
+                weights,
+            })
+        } else {
+            None
+        };
         Ok(Self {
+            metadata,
             inputs,
             output,
             output_external,
@@ -406,7 +445,7 @@ fn config_words(device: &wgpu::Device, adapter: &wgpu::Adapter, config: &Network
     words
 }
 
-fn plan(device: &wgpu::Device, adapter: &wgpu::Adapter, tza: &[u8], config: &NetworkConfig) -> Result<Program> {
+fn plan(device: &wgpu::Device, adapter: &wgpu::Adapter, tza: &[u8], config: &NetworkConfig) -> PlanResult<Program> {
     Program::parse(&record(
         tza,
         &config_words(device, adapter, config),
@@ -421,7 +460,7 @@ pub fn plan_inputs(
     adapter: &wgpu::Adapter,
     tza: &[u8],
     config: &NetworkConfig,
-) -> Result<usize> {
+) -> PlanResult<usize> {
     Ok(plan(device, adapter, tza, config)?.inputs.len())
 }
 
@@ -431,6 +470,8 @@ pub struct Network {
     pipelines: Vec<wgpu::ComputePipeline>,
     bind_groups: Vec<wgpu::BindGroup>,
     bind_group_descriptions: Vec<BindGroupDescription>,
+    buffer_offsets: Vec<u64>,
+    metadata: Option<ProgramMetadata>,
     operations: Vec<Operation>,
     inputs: Vec<usize>,
     output: usize,
@@ -443,6 +484,12 @@ pub struct Network {
 
 // Cache actual pipeline handles, including their auto-generated layouts, so
 // new image sizes and buffer bindings can reuse them on this device.
+type WeightMap = HashMap<(u32, Vec<u8>), wgpu::Buffer>;
+struct ResourceCaches<'a> {
+    pipelines: &'a mut PipelineMap,
+    weights: &'a mut WeightMap,
+}
+
 type PipelineMap = HashMap<(String, String, bool), wgpu::ComputePipeline>;
 
 impl Network {
@@ -457,7 +504,7 @@ impl Network {
         tza: &[u8],
         config: &NetworkConfig,
         inputs: Option<&[wgpu::Buffer]>,
-    ) -> Result<Self> {
+    ) -> PlanResult<Self> {
         Self::create(device, adapter, tza, config, inputs, None, false)
     }
 
@@ -477,7 +524,7 @@ impl Network {
         tza: &[u8],
         config: &NetworkConfig,
         inputs: Option<&[wgpu::Buffer]>,
-    ) -> Result<Self> {
+    ) -> PlanResult<Self> {
         Self::create(device, adapter, tza, config, inputs, None, true)
     }
 
@@ -498,7 +545,7 @@ impl Network {
         inputs: &[wgpu::Buffer],
         output: &wgpu::Buffer,
         unchecked: bool,
-    ) -> Result<Self> {
+    ) -> PlanResult<Self> {
         Self::create(device, adapter, tza, config, Some(inputs), Some(output), unchecked)
     }
 
@@ -510,7 +557,7 @@ impl Network {
         inputs: Option<&[wgpu::Buffer]>,
         output: Option<&wgpu::Buffer>,
         unchecked: bool,
-    ) -> Result<Self> {
+    ) -> PlanResult<Self> {
         let started = std::time::Instant::now();
         let program = plan(device, adapter, tza, config)?;
         let planning_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -520,7 +567,10 @@ impl Network {
             inputs,
             output,
             unchecked,
-            &mut PipelineMap::new(),
+            ResourceCaches {
+                pipelines: &mut PipelineMap::new(),
+                weights: &mut WeightMap::new(),
+            },
             planning_ms,
         )
     }
@@ -531,9 +581,13 @@ impl Network {
         inputs: Option<&[wgpu::Buffer]>,
         output: Option<&wgpu::Buffer>,
         unchecked: bool,
-        cache: &mut PipelineMap,
+        caches: ResourceCaches<'_>,
         planning_ms: f64,
-    ) -> Result<Self> {
+    ) -> PlanResult<Self> {
+        let ResourceCaches {
+            pipelines: cache,
+            weights,
+        } = caches;
         if output.is_some() && !program.output_external {
             return Err("the network program has no external output".into());
         }
@@ -561,6 +615,13 @@ impl Network {
                 {
                     return output.clone();
                 }
+                let immutable = program.metadata.as_ref().is_some_and(|m| m.weights.contains(&id));
+                let key = immutable.then(|| (description.usage, description.data.clone()));
+                if let Some(key) = &key
+                    && let Some(buffer) = weights.get(key)
+                {
+                    return buffer.clone();
+                }
                 let mut usage = wgpu::BufferUsages::from_bits_truncate(description.usage);
                 if program
                     .operations
@@ -581,6 +642,9 @@ impl Network {
                         .unwrap()
                         .copy_from_slice(&description.data);
                     buffer.unmap();
+                }
+                if let Some(key) = key {
+                    weights.insert(key, buffer.clone());
                 }
                 buffer
             })
@@ -622,29 +686,16 @@ impl Network {
                     .clone()
             })
             .collect::<Vec<_>>();
-        let bind_groups = program
-            .bind_groups
-            .iter()
-            .map(|group| {
-                let entries = group
-                    .entries
-                    .iter()
-                    .map(|&[binding, buffer, offset, size]| wgpu::BindGroupEntry {
-                        binding,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &buffers[buffer as usize],
-                            offset: offset as u64,
-                            size: std::num::NonZeroU64::new(size as u64),
-                        }),
-                    })
-                    .collect::<Vec<_>>();
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("oidn-webgpu"),
-                    layout: &pipelines[group.pipeline].get_bind_group_layout(group.group),
-                    entries: &entries,
-                })
-            })
-            .collect::<Vec<_>>();
+        let buffer_offsets = vec![0; buffers.len()];
+        let mut descriptions = program.bind_groups;
+        for group in &mut descriptions {
+            for entry in &mut group.entries {
+                if entry[3] == 0 {
+                    entry[3] = (program.buffers[entry[1] as usize].size - entry[2] as u64) as u32;
+                }
+            }
+        }
+        let bind_groups = create_bind_groups(device, &pipelines, &descriptions, &buffers, &buffer_offsets);
         // A queue write would move ahead of all encoded commands at submit.
         // Immutable staging copies preserve the program's interleaved writes
         // and dispatches, including repeated encodes in one command buffer.
@@ -683,7 +734,9 @@ impl Network {
             buffers,
             pipelines,
             bind_groups,
-            bind_group_descriptions: program.bind_groups,
+            bind_group_descriptions: descriptions,
+            buffer_offsets,
+            metadata: program.metadata,
             operations,
             inputs: program.inputs,
             output: program.output,
@@ -768,4 +821,37 @@ impl Network {
             }
         }
     }
+}
+
+// Base offsets are nonzero only for external image views. Binding lengths
+// always come from the recorded plan, never the rest of a host allocation.
+fn create_bind_groups(
+    device: &wgpu::Device,
+    pipelines: &[wgpu::ComputePipeline],
+    descriptions: &[BindGroupDescription],
+    buffers: &[wgpu::Buffer],
+    offsets: &[u64],
+) -> Vec<wgpu::BindGroup> {
+    descriptions
+        .iter()
+        .map(|group| {
+            let entries: Vec<_> = group
+                .entries
+                .iter()
+                .map(|&[binding, buffer, offset, size]| wgpu::BindGroupEntry {
+                    binding,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &buffers[buffer as usize],
+                        offset: offsets[buffer as usize] + offset as u64,
+                        size: std::num::NonZeroU64::new(size as u64),
+                    }),
+                })
+                .collect();
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("oidn-webgpu"),
+                layout: &pipelines[group.pipeline].get_bind_group_layout(group.group),
+                entries: &entries,
+            })
+        })
+        .collect()
 }

@@ -44,9 +44,11 @@ struct Params {
   imageSize: vec2i,
   tileSize: vec2i,
   offset: vec2i,
-  inputScale: f32,
+
 }${bindings}
 @group(0) @binding(${sourceCount * 2}) var<uniform> params: Params;
+struct Frame { inputScale: f32, }
+@group(0) @binding(${sourceCount * 2 + 1}) var<uniform> frame: Frame;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP}, 1)
 fn main(@builtin(global_invocation_id) globalId: vec3u) {
@@ -59,7 +61,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3u) {
   let outIdx = position.y * params.tileSize.x + position.x;
   let col = in_color[inIdx];
   ${hdr
-    ? 'out_color[outIdx] = vec4f(HDRForward(col.r * params.inputScale), HDRForward(col.g * params.inputScale), HDRForward(col.b * params.inputScale), 0.0);'
+    ? 'out_color[outIdx] = vec4f(HDRForward(col.r * frame.inputScale), HDRForward(col.g * frame.inputScale), HDRForward(col.b * frame.inputScale), 0.0);'
     : 'out_color[outIdx] = vec4f(col.rgb, 0.0);'}
   ${copies}
 }
@@ -79,12 +81,14 @@ struct Params {
   outputOffset: vec2i,
   outputSize: vec2i,
   inputOffset: vec2i,
-  inputScale: f32,
+
 }
 @group(0) @binding(0) var<storage, read> in_color: array<vec4f>;
 @group(0) @binding(1) var<storage, read> in_raw: array<vec4f>;
 @group(0) @binding(2) var<storage, read_write> out_color: array<vec4f>;
 @group(0) @binding(3) var<uniform> params: Params;
+struct Frame { inputScale: f32, }
+@group(0) @binding(4) var<uniform> frame: Frame;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP}, 1)
 fn main(@builtin(global_invocation_id) globalId: vec3u) {
@@ -98,7 +102,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3u) {
   let col = in_color[inIdx];
   let raw = in_raw[outIdx];
   ${hdr
-    ? 'out_color[outIdx] = vec4f(vec3f(HDRInverse(col.r), HDRInverse(col.g), HDRInverse(col.b)) / params.inputScale, raw.a);'
+    ? 'out_color[outIdx] = vec4f(vec3f(HDRInverse(col.r), HDRInverse(col.g), HDRInverse(col.b)) / frame.inputScale, raw.a);'
     : 'out_color[outIdx] = vec4f(col.rgb, raw.a);'}
 }
 `;
@@ -108,7 +112,7 @@ function uniformBuffer(device: OIDNGPUDevice, label: string, words: Int32Array) 
   const buffer = device.createBuffer({
     label,
     size: alignUp(words.byteLength, 16),
-    usage: BufferUsage.UNIFORM,
+    usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
     mappedAtCreation: true
   });
   new Uint8Array(buffer.getMappedRange()).set(new Uint8Array(words.buffer));
@@ -178,6 +182,8 @@ export function recordDenoiseExecution(
   });
   const scaleWord = new Int32Array(new Float32Array([options.inputScale]).buffer)[0];
 
+  const frame = uniformBuffer(device, 'oidn/native/frame', new Int32Array([scaleWord, 0, 0, 0])) as RecordedBuffer;
+
   // Network inputs are per tile shape; tiles run in order on one queue.
   const tileInputs = new Map<string, OIDNGPUBuffer[]>();
   for (const tile of plan.tiles) {
@@ -196,7 +202,7 @@ export function recordDenoiseExecution(
   plan.tiles.forEach((tile, index) => {
     const buffers = tileInputs.get(`${tile.input.width}x${tile.input.height}`)!;
     const inputParams = uniformBuffer(device, `oidn/native/input/${index}`, new Int32Array([
-      width, height, tile.input.width, tile.input.height, tile.input.x, tile.input.y, scaleWord, 0
+      width, height, tile.input.width, tile.input.height, tile.input.x, tile.input.y, 0, 0
     ]));
     const entries: OIDNGPUBindGroupEntry[] = [];
     for (let source = 0; source < sourceCount; source++) {
@@ -204,6 +210,7 @@ export function recordDenoiseExecution(
       entries.push({ binding: sourceCount + source, resource: { buffer: buffers[source] } });
     }
     entries.push({ binding: sourceCount * 2, resource: { buffer: inputParams } });
+    entries.push({ binding: sourceCount * 2 + 1, resource: { buffer: frame } });
     const inputBindings = device.createBindGroup({
       label: `oidn/native/input/${index}`,
       layout: inputPipeline.getBindGroupLayout(0),
@@ -227,7 +234,7 @@ export function recordDenoiseExecution(
       tile.output.x, tile.output.y,
       tile.output.width, tile.output.height,
       tile.output.x - tile.input.x, tile.output.y - tile.input.y,
-      scaleWord, 0, 0, 0
+      0, 0, 0, 0
     ]));
     const outputBindings = device.createBindGroup({
       label: `oidn/native/output/${index}`,
@@ -236,7 +243,8 @@ export function recordDenoiseExecution(
         { binding: 0, resource: { buffer: networkOutput } },
         { binding: 1, resource: { buffer: inputs[0] } },
         { binding: 2, resource: { buffer: output } },
-        { binding: 3, resource: { buffer: outputParams } }
+        { binding: 3, resource: { buffer: outputParams } },
+        { binding: 4, resource: { buffer: frame } }
       ]
     });
     const outputEncoder = device.createCommandEncoder({ label: `oidn/native/output/${index}` });
@@ -250,5 +258,5 @@ export function recordDenoiseExecution(
     outputPass.end();
     device.queue.submit([outputEncoder.finish()]);
   });
-  return { inputs, output, tiles: plan.tiles.length };
+  return { inputs, output, tiles: plan.tiles.length, frame };
 }
