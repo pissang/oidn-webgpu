@@ -46,6 +46,10 @@ export interface NativeUNetGemmOptions {
   tilePolicy?: 'fixed' | 'output-aligned';
   /** Internal decoder source-branch scheduling experiment. */
   decoderLoad?: 'per-load' | 'source-first';
+  /** Sub-pixel GEMM decoder experiment; defaults to FP16 with K-major weights. */
+  decoderSubPixel?: boolean;
+  /** Expand register-tile rows for native shader robustness; off by default in browsers. */
+  unrollRows?: boolean;
   /** Internal pooling dispatch experiment for the GEMM execution path. */
   poolLayout?: 'spatial' | 'channels';
   /** Internal shared-memory padding experiment; does not change storage ABI. */
@@ -551,6 +555,36 @@ function gemmLoadExpression(expression: string, packed: boolean) {
 }
 
 function tiledAccumulationCode(precision: NativeUNetPrecision, gemm: Readonly<Required<NativeUNetGemmOptions>>) {
+  const { rowsPerThread, tileNBlocks, tileKBlocks } = gemmTile(gemm);
+  if (!gemm.unrollRows || gemm.accumulationOrder === 'row-major') {
+    return rolledAccumulationCode(precision, gemm);
+  }
+  const weightBase = `(tileK * ${tileNBlocks}u + localId.x) * ${gemm.sharedLayout === 'padded' || gemm.sharedLayout === 'padded-weights' ? 5 : 4}u`;
+  // Constant register-tile indices avoid robust dynamic private-array
+  // accesses in Naga. Leave the K loop rolled to limit shader/register size;
+  // every row keeps the same four FMAs and the same FP16 fold boundaries.
+  const rows = Array.from({ length: rowsPerThread }, (_, row) => row);
+  const type = storageVecType(precision);
+  return /* wgsl */ `
+    ${precision === 'fp16' ? rows.map((row) => `var partial${row} = vec4<f16>(0.0h);`).join('\n    ') : ''}
+    for (var tileK = 0u; tileK < ${tileKBlocks}u; tileK++) {
+      let weightBase = ${weightBase};
+      let w0 = weightTile[weightBase];
+      let w1 = weightTile[weightBase + 1u];
+      let w2 = weightTile[weightBase + 2u];
+      let w3 = weightTile[weightBase + 3u];
+      ${rows.map((row) => {
+        const index = gemmSharedInputIndex(`(localId.y * ${rowsPerThread}u + ${row}u) * ${tileKBlocks}u + tileK`, gemm);
+        const target = precision === 'fp16' ? `partial${row}` : `acc[${row}]`;
+        return `let v${row} = inputTile[${index}];\n      ` +
+          ['x', 'y', 'z', 'w'].map((lane, k) => `${target} = fma(w${k}, ${type}(v${row}.${lane}), ${target});`).join('\n      ');
+      }).join('\n      ')}
+    }
+    ${precision === 'fp16' ? rows.map((row) => `acc[${row}] += vec4<f32>(partial${row});`).join('\n    ') : ''}
+`;
+}
+
+function rolledAccumulationCode(precision: NativeUNetPrecision, gemm: Readonly<Required<NativeUNetGemmOptions>>) {
   const { rowsPerThread, tileNBlocks, tileKBlocks } = gemmTile(gemm);
   const inputIndex = gemmSharedInputIndex(`tileSpatial * ${tileKBlocks}u + tileK`, gemm);
   const weightBase = `(tileK * ${tileNBlocks}u + localId.x) * ${gemm.sharedLayout === 'padded' || gemm.sharedLayout === 'padded-weights' ? 5 : 4}u`;
@@ -1414,6 +1448,143 @@ fn main(
       if (spatialIndex < spatialCount) {
         let outputIndex = spatialIndex * ${outputBlocks}u + outputBlock;
         outputData[outputIndex] = ${stored};
+      }
+    }
+  }
+}
+`;
+}
+
+/**
+ * One workgroup owns one output phase, so its GEMM rows share the same four
+ * combined upsampling taps. Skip inputs retain their original nine taps.
+ * The shared tiles and short FP16 reduction groups match the regular GEMM;
+ * only the decoder's mathematical decomposition and reduction order change.
+ */
+function createTiledSubpixelDecoderShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  sourceBlocks: readonly number[],
+  upsampledSource: 0 | 1,
+  outputBlocks: number,
+  gemm: Readonly<Required<NativeUNetGemmOptions>>
+) {
+  const tile = gemmTile(gemm);
+  const { workgroupX, workgroupY, rowsPerThread, tileM, tileNBlocks, tileKBlocks } = tile;
+  const threads = workgroupX * workgroupY;
+  const loads = tileM * tileKBlocks / threads;
+  const valueType = storageVecType(precision);
+  const packedInput = gemmPackedLoad(precision, gemm, false);
+  const packedWeights = gemmPackedLoad(precision, gemm, true);
+  const upBlocks = sourceBlocks[upsampledSource];
+  const skipSource = (1 - upsampledSource) as 0 | 1;
+  const skipBlocks = sourceBlocks[skipSource];
+  const reduction = (source: 0 | 1, upsampled: boolean) => {
+    const blocks = sourceBlocks[source];
+    const taps = upsampled ? 4 : 9;
+    const weightOffset = upsampled
+      ? `phase * ${4 * upBlocks * outputBlocks * 4}u`
+      : `${SUBPIXEL_MATRICES * upBlocks * outputBlocks * 4}u`;
+    const offset = upsampled
+      ? `(i32(tap / 2u) + i32(phaseY) - 1) * i32(params.source${source}Width) + i32(tap % 2u) + i32(phaseX) - 1`
+      : `(i32(tap / 3u) - 1) * i32(params.source${source}Width) + i32(tap % 3u) - 1`;
+    return /* wgsl */ `
+  for (var kBase = 0u; kBase < ${taps * blocks}u; kBase += ${tileKBlocks}u) {
+    let inputK = kBase + localLinear % ${tileKBlocks}u;
+    let tap = inputK / ${blocks}u;
+    let channel = inputK % ${blocks}u;
+    for (var load = 0u; load < ${loads}u; load++) {
+      let i = localLinear + load * ${threads}u;
+      var value = ${valueType}(0.0);
+      if (tap < ${taps}u && (mask${source}[load] & (1u << tap)) != 0u) {
+        let offset = ${offset};
+        let index = u32(base${source}[load] + offset) * ${blocks}u + channel;
+        value = ${gemmLoadExpression(`input${source}[index]`, packedInput)};
+      }
+      inputTile[${gemmSharedInputIndex('i', gemm)}] = value;
+    }
+    for (var i = localLinear; i < ${tileKBlocks * tileNBlocks * 4}u; i += ${threads}u) {
+      let k = kBase + i / ${tileNBlocks * 4}u;
+      let outputBlock = workgroupId.y * ${tileNBlocks}u + (i % ${tileNBlocks * 4}u) / 4u;
+      var value = ${valueType}(0.0);
+      if (k < ${taps * blocks}u && outputBlock < ${outputBlocks}u) {
+        let index = ${weightOffset} + (k * ${outputBlocks}u + outputBlock) * 4u + i % 4u;
+        value = ${gemmLoadExpression('weights[index]', packedWeights)};
+      }
+      weightTile[${gemmSharedWeightIndex('i', gemm)}] = value;
+    }
+    workgroupBarrier();
+    ${tiledAccumulationCode(precision, gemm)}
+    workgroupBarrier();
+  }`;
+  };
+  const cache = (source: 0 | 1, upsampled: boolean) => {
+    const taps = upsampled ? 4 : 9;
+    const side = upsampled ? 2 : 3;
+    const x = upsampled ? 'x' : 'x * 2u + phaseX';
+    const y = upsampled ? 'y' : 'y * 2u + phaseY';
+    return /* wgsl */ `
+    let x${source} = i32(${x});
+    let y${source} = i32(${y});
+    base${source}[load] = y${source} * i32(params.source${source}Width) + x${source};
+    var bits${source} = 0u;
+    for (var tap = 0u; tap < ${taps}u; tap++) {
+      let sx = x${source} + i32(tap % ${side}u) ${upsampled ? '+ i32(phaseX)' : ''} - 1;
+      let sy = y${source} + i32(tap / ${side}u) ${upsampled ? '+ i32(phaseY)' : ''} - 1;
+      if (valid && sx >= 0 && sy >= 0 && sx < i32(params.source${source}Width) && sy < i32(params.source${source}Height)) {
+        bits${source} |= 1u << tap;
+      }
+    }
+    mask${source}[load] = bits${source};`;
+  };
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  outputWidth: u32, outputHeight: u32, outputBlocks: u32, inputBlocks: u32,
+  source0Width: u32, source0Height: u32, source1Width: u32, source1Height: u32,
+}
+@group(0) @binding(0) var<storage, read> input0: array<${packedInput ? 'vec2<u32>' : valueType}>;
+@group(0) @binding(1) var<storage, read> input1: array<${packedInput ? 'vec2<u32>' : valueType}>;
+@group(0) @binding(2) var<storage, read> weights: array<${packedWeights ? 'vec2<u32>' : valueType}>;
+@group(0) @binding(3) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> outputData: array<${storageVecType(outputPrecision)}>;
+@group(0) @binding(5) var<uniform> params: Params;
+var<workgroup> inputTile: array<${valueType}, ${gemmSharedSizes(gemm).input}>;
+var<workgroup> weightTile: array<${valueType}, ${gemmSharedSizes(gemm).weights}>;
+
+@compute @workgroup_size(${workgroupX}, ${workgroupY}, 1)
+fn main(@builtin(local_invocation_id) localId: vec3<u32>, @builtin(workgroup_id) workgroupId: vec3<u32>) {
+  let phase = workgroupId.z;
+  let phaseX = phase & 1u;
+  let phaseY = phase >> 1u;
+  let phaseWidth = (params.outputWidth + 1u) / 2u;
+  let localLinear = localId.y * ${workgroupX}u + localId.x;
+  let outputBlock = workgroupId.y * ${tileNBlocks}u + localId.x;
+  var acc: array<vec4<f32>, ${rowsPerThread}>;
+  if (outputBlock < ${outputBlocks}u) {
+    for (var row = 0u; row < ${rowsPerThread}u; row++) { acc[row] = bias[outputBlock]; }
+  }
+  var base0: array<i32, ${loads}>;
+  var base1: array<i32, ${loads}>;
+  var mask0: array<u32, ${loads}>;
+  var mask1: array<u32, ${loads}>;
+  for (var load = 0u; load < ${loads}u; load++) {
+    let spatial = workgroupId.x * ${tileM}u + (localLinear + load * ${threads}u) / ${tileKBlocks}u;
+    let x = spatial % phaseWidth;
+    let y = spatial / phaseWidth;
+    let valid = x * 2u + phaseX < params.outputWidth && y * 2u + phaseY < params.outputHeight;
+    ${cache(upsampledSource, true)}
+    ${cache(skipSource, false)}
+  }
+  ${reduction(upsampledSource, true)}
+  ${reduction(skipSource, false)}
+  if (outputBlock < ${outputBlocks}u) {
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      let spatial = workgroupId.x * ${tileM}u + localId.y * ${rowsPerThread}u + row;
+      let x = (spatial % phaseWidth) * 2u + phaseX;
+      let y = (spatial / phaseWidth) * 2u + phaseY;
+      if (x < params.outputWidth && y < params.outputHeight) {
+        outputData[(y * params.outputWidth + x) * ${outputBlocks}u + outputBlock] = ${storeExpression(activationExpression('acc[row]', activation), outputPrecision)};
       }
     }
   }
@@ -2430,6 +2601,8 @@ export class NativeUNetCore {
     this.gemm = Object.freeze({
       tilePolicy: options.gemm?.tilePolicy ?? (options.gemm?.workgroupSize ? 'fixed' : 'output-aligned'),
       decoderLoad: options.gemm?.decoderLoad ?? 'per-load',
+      decoderSubPixel: options.gemm?.decoderSubPixel ?? (this.precision === 'fp16'),
+      unrollRows: options.gemm?.unrollRows ?? false,
       poolLayout: options.gemm?.poolLayout ?? 'channels',
       sharedLayout: options.gemm?.sharedLayout ?? (this.precision === 'fp16' ? 'padded-input' : 'padded'),
       accumulationOrder: options.gemm?.accumulationOrder ?? 'k-major',
@@ -2499,6 +2672,11 @@ export class NativeUNetCore {
       subgroupMatrixSharedBytes(
         matrixConfig, this.subgroupMatrixOutputFragments, this.subgroupMatrixSubPixel, doubleBuffer
       ) <= _device.limits.maxComputeWorkgroupStorageSize;
+    // A 16x16 matrix with two fragments can exceed a browser's 32 KiB limit.
+    // Keep hardware matrices available with one fragment before using GEMM.
+    if (matrixConfig && matrixOptions.outputFragments === undefined && !fitsSharedMemory(false)) {
+      this.subgroupMatrixOutputFragments = 1;
+    }
     this.subgroupMatrixDoubleBuffer = (matrixOptions.doubleBuffer ?? false) && fitsSharedMemory(true);
     if (
       matrixConfig &&
@@ -2665,7 +2843,7 @@ export class NativeUNetCore {
         `in${inputBlocks}/out${outputBlocks}` +
         (kernel === 'implicit-gemm'
           ? `/address-${gemm.addressMode}/weights-${gemm.weightLayout}-v1` +
-            `/tile-${gemm.workgroupSize.join('x')}-r${gemm.rowsPerThread}/loads-${gemm.loadMode}/shared-${gemm.sharedLayout}/acc-${gemm.accumulationOrder}`
+            `/tile-${gemm.workgroupSize.join('x')}-r${gemm.rowsPerThread}/loads-${gemm.loadMode}/shared-${gemm.sharedLayout}/acc-${gemm.accumulationOrder}/unroll-${Number(gemm.unrollRows)}`
           : '');
       return {
         key,
@@ -2792,18 +2970,18 @@ export class NativeUNetCore {
       }
       const gemm = this._gemmForOutput(outputBlocks);
       const key =
-        `decoder-${kernel}/${this.precision}/${outputPrecision}/` +
+        `decoder-${kernel}${kernel === 'implicit-gemm' && this._subPixelDecoder(node) ? '-subpixel' : ''}/${this.precision}/${outputPrecision}/` +
         `${node.conv.activation}/` +
         `${sourceBlocks.join('+')}/out${outputBlocks}/up${upsampledSource}` +
         (kernel === 'implicit-gemm'
           ? `/address-${gemm.addressMode}/weights-${gemm.weightLayout}-v1` +
-            `/tile-${gemm.workgroupSize.join('x')}-r${gemm.rowsPerThread}/loads-${gemm.loadMode}/shared-${gemm.sharedLayout}/acc-${gemm.accumulationOrder}/decoder-${gemm.decoderLoad}`
+            `/tile-${gemm.workgroupSize.join('x')}-r${gemm.rowsPerThread}/loads-${gemm.loadMode}/shared-${gemm.sharedLayout}/acc-${gemm.accumulationOrder}/unroll-${Number(gemm.unrollRows)}/decoder-${gemm.decoderLoad}`
           : '');
       return {
         key,
         kernel,
         code: kernel === 'implicit-gemm'
-          ? createTiledDecoderShader(
+          ? (this._subPixelDecoder(node) ? createTiledSubpixelDecoderShader : createTiledDecoderShader)(
               this.precision,
               outputPrecision,
               node.conv.activation,
@@ -2838,12 +3016,14 @@ export class NativeUNetCore {
 
   /** The decoder's sources when it runs with the sub-pixel decomposition. */
   private _subPixelDecoder(node: FusedUpsampleConcatConvNodeSpec) {
-    if (!this.subgroupMatrix || !this.subgroupMatrixSubPixel || node.inputs.length !== 2) {
+    if (node.id === this._model.spec.output || node.inputs.length !== 2) {
       return undefined;
     }
-    if (this._selectConvKernel(
+    const kernel = this._selectConvKernel(
       blocksForChannels(this._model.convChannels.get(node.conv.id)!.inputChannels), false
-    ) !== 'subgroup-matrix') {
+    );
+    if (!(kernel === 'subgroup-matrix' && this.subgroupMatrixSubPixel) &&
+        !(kernel === 'implicit-gemm' && this.gemm.decoderSubPixel && this.gemm.weightLayout === 'k-major')) {
       return undefined;
     }
     const upsampledSource = node.inputs[0].upsample ? 0 : node.inputs[1].upsample ? 1 : -1;
@@ -3229,16 +3409,31 @@ export class NativeUNetCore {
     return true;
   }
 
+  /** Shape-owned packed input; external preprocessing must write all lanes. */
+  packedInputBuffer(width: number, height: number) {
+    const execution = this._execution(width, height);
+    return execution.valueBuffers.get(execution.plan.spec.input)!;
+  }
+
+  /** Executes after a preprocessing pass has filled packedInputBuffer. */
+  executePacked(width: number, height: number) {
+    return this._execute([], width, height, true);
+  }
+
   execute(inputBuffers: readonly OIDNGPUBuffer[], width: number, height: number) {
+    return this._execute(inputBuffers, width, height, false);
+  }
+
+  private _execute(inputBuffers: readonly OIDNGPUBuffer[], width: number, height: number, packedInput: boolean) {
     const sourceCount = this._model.inputChannels / 3;
-    if (inputBuffers.length !== sourceCount) {
+    if (!packedInput && inputBuffers.length !== sourceCount) {
       throw new Error(
         `Native OIDN expected ${sourceCount} input buffers, got ${inputBuffers.length}`
       );
     }
     const execution = this._execution(width, height);
     const profileLabels = [
-      'input-pack',
+      ...(packedInput ? [] : ['input-pack']),
       ...execution.plan.nodes.map((node) => node.id)
     ];
     const shouldProfile =
@@ -3299,23 +3494,23 @@ export class NativeUNetCore {
         label: `oidn/native/${width}x${height}`
       });
 
-    const inputEntries: OIDNGPUBindGroupEntry[] = inputBuffers.map(
-      (buffer, binding) => ({ binding, resource: { buffer } })
-    );
-    inputEntries.push({
-      binding: sourceCount,
-      resource: { buffer: execution.valueBuffers.get(execution.plan.spec.input)! }
-    });
-    inputEntries.push({
-      binding: sourceCount + 1,
-      resource: { buffer: execution.inputUniform }
-    });
-    const inputBindings = this._device.createBindGroup({
-      label: 'oidn/input/bindings',
-      layout: execution.inputPipeline.getBindGroupLayout(0),
-      entries: inputEntries
-    });
-    {
+    if (!packedInput) {
+      const inputEntries: OIDNGPUBindGroupEntry[] = inputBuffers.map(
+        (buffer, binding) => ({ binding, resource: { buffer } })
+      );
+      inputEntries.push({
+        binding: sourceCount,
+        resource: { buffer: execution.valueBuffers.get(execution.plan.spec.input)! }
+      });
+      inputEntries.push({
+        binding: sourceCount + 1,
+        resource: { buffer: execution.inputUniform }
+      });
+      const inputBindings = this._device.createBindGroup({
+        label: 'oidn/input/bindings',
+        layout: execution.inputPipeline.getBindGroupLayout(0),
+        entries: inputEntries
+      });
       const pass = encoder.beginComputePass(
         passDescriptor('oidn/input-pack', 0)
       );
@@ -3331,7 +3526,7 @@ export class NativeUNetCore {
 
     execution.plan.plannedNodes.forEach(({ node, outputShape }, index) => {
       const pass = encoder.beginComputePass(
-        passDescriptor(`oidn/${execution.plan.nodes[index].id}`, index + 1)
+        passDescriptor(`oidn/${execution.plan.nodes[index].id}`, index + (packedInput ? 0 : 1))
       );
       pass.setPipeline(execution.nodePipelines[index]);
       pass.setBindGroup(0, execution.nodeBindings[index]);
@@ -3357,14 +3552,16 @@ export class NativeUNetCore {
         );
       } else if (execution.nodeKernels[index] === 'implicit-gemm') {
         const tile = gemmTile(this._gemmForOutput(blocksForChannels(outputShape.channels)));
+        const subPixel = node.op === 'fusedUpsampleConcatConv2d' && this._subPixelDecoder(node) !== undefined;
         pass.dispatchWorkgroups(
           Math.ceil(
-            (outputShape.width * outputShape.height) / tile.tileM
+            (subPixel ? Math.ceil(outputShape.width / 2) * Math.ceil(outputShape.height / 2)
+              : outputShape.width * outputShape.height) / tile.tileM
           ),
           Math.ceil(
             blocksForChannels(outputShape.channels) / tile.tileNBlocks
           ),
-          1
+          subPixel ? 4 : 1
         );
       } else {
         pass.dispatchWorkgroups(

@@ -75,7 +75,7 @@ typedef enum oidnw_transfer {
   OIDNW_TRANSFER_LOG = 1
 } oidnw_transfer;
 
-/* Compile shaders with bounds checks (about 4x slower convolutions on Metal).
+/* Compile shaders with bounds checks; performance depends on the GPU/kernel.
  * Without it the generated kernels run unchecked: they are written to stay in
  * bounds, but a kernel bug can then touch arbitrary GPU memory. */
 #define OIDNW_FILTER_RUNTIME_CHECKS 1u

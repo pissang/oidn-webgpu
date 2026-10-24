@@ -276,6 +276,8 @@ test('freezes normalized GEMM configuration without mutating caller input', asyn
     );
     assert.deepEqual(executor.gemm, {
       decoderLoad: 'per-load',
+      decoderSubPixel: false,
+      unrollRows: false,
       poolLayout: 'channels',
       sharedLayout: 'padded',
       accumulationOrder: 'k-major',
@@ -338,6 +340,23 @@ test('rejects unsupported GEMM address, layout, register, workgroup, and storage
       /Unsupported GEMM tile configuration/
     );
   });
+});
+
+function matrixDevice(storageBytes, size = 16) {
+  const device = fakeDevice({ maxComputeWorkgroupStorageSize: storageBytes });
+  device.features.add('subgroups');
+  device.features.add('chromium-experimental-subgroup-matrix');
+  device.adapterInfo = { subgroupMinSize: 32, subgroupMaxSize: 32,
+    subgroupMatrixConfigs: [{ componentType: size === 16 ? 'f16' : 'f32', resultComponentType: 'f32', M: size, N: size, K: size }] };
+  return device;
+}
+
+test('retains 16x16 matrices with one fragment when two exceed the shared-memory limit', () => {
+  const executor = new NativeUNetExecutor(matrixDevice(32768), testModel('Float16').model,
+    { precision: 'fp16', kernel: 'subgroup-matrix' });
+  assert.equal(executor.subgroupMatrix?.size, 16);
+  assert.equal(executor.subgroupMatrixOutputFragments, 1);
+  executor.dispose();
 });
 
 test('padded shared-memory layout accepts its exact storage limit and rejects one byte below it', async () => {

@@ -84,6 +84,25 @@ test('replicates the image edge into padded model input tiles', () => {
   assert.deepEqual(pixel(303, 303), [299, 299, 598]);
 });
 
+test('profiles every tile and sums matching network nodes for the complete image', async () => {
+  let captured = 0;
+  const unet = createUNet(async () => {});
+  unet._device.features = new Set(['timestamp-query']);
+  unet._nativeExecutor = {
+    profileNextExecution() { captured++; return true; },
+    getLastExecutionProfile: async () => ({ totalMs: captured + 0.5,
+      layers: [{ id: 'input-pack', durationMs: 0.5 }, { id: 'conv', durationMs: captured }] })
+  };
+  assert.equal(unet.profileNextExecution(), true);
+  assert.equal((await run(unet)).type, 'done');
+  assert.equal(captured, 2);
+  assert.deepEqual(await unet.getLastExecutionProfile(), {
+    totalMs: 4, layers: [{ id: 'input-pack', durationMs: 1 }, { id: 'conv', durationMs: 3 }]
+  });
+  await run(unet);
+  assert.equal(captured, 2);
+});
+
 test('reports first and later asynchronous tile failures exactly once', async () => {
   const firstFailure = new Error('first tile failed');
   const first = await run(createUNet(async () => { throw firstFailure; }));

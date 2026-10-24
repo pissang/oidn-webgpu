@@ -658,6 +658,125 @@ mod tests {
     // pass them. Run: cargo test --manifest-path native/Cargo.toml -- --ignored
     #[test]
     #[ignore = "requires a native GPU adapter"]
+    fn packed_ldr_color_matches_separate_pack_at_odd_image_edges() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../weights/rt_ldr.tza"
+        ))
+        .unwrap();
+        let model = Model::from_tza(&bytes).unwrap();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        for features in [wgpu::Features::empty(), wgpu::Features::SHADER_F16] {
+            if !adapter.features().contains(features) {
+                continue;
+            }
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    required_features: features,
+                    ..Default::default()
+                }))
+                .unwrap();
+            let image = |width: u32, height: u32| -> Vec<u8> {
+                (0..height)
+                    .flat_map(|y| {
+                        (0..width).flat_map(move |x| {
+                            let pixel = y.min(16) * 19 + x.min(18);
+                            [
+                                0.1 + (pixel % 13) as f32 / 32.0,
+                                0.2,
+                                0.3,
+                                pixel as f32 / 1024.0,
+                            ]
+                            .into_iter()
+                            .flat_map(f32::to_le_bytes)
+                        })
+                    })
+                    .collect()
+            };
+            let buffer = |data: &[u8]| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: data.len() as u64,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&buffer, 0, data);
+                buffer
+            };
+            let input_bytes = image(19, 17);
+            let color = buffer(&input_bytes);
+            let output = buffer(&vec![0u8; input_bytes.len()]);
+            let padded = buffer(&image(32, 32));
+            let reference = Network::new(
+                &device,
+                &adapter,
+                &bytes,
+                &NetworkConfig {
+                    precision: if features.contains(wgpu::Features::SHADER_F16) {
+                        crate::Precision::Fp16
+                    } else {
+                        crate::Precision::Fp32
+                    },
+                    ..NetworkConfig::new(32, 32)
+                },
+                Some(&[padded]),
+            )
+            .unwrap();
+            let mut denoiser = Denoiser::new(
+                &device,
+                &adapter,
+                &model,
+                DenoiserOptions {
+                    hdr: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut prepared = denoiser
+                .prepare(
+                    [19, 17],
+                    DenoiseBuffers {
+                        color: (&color).into(),
+                        albedo: None,
+                        normal: None,
+                        output: (&output).into(),
+                    },
+                )
+                .unwrap();
+            let mut encoder = device.create_command_encoder(&Default::default());
+            reference.encode(&queue, &mut encoder);
+            prepared
+                .encode(&mut encoder, DenoiseParams::default())
+                .unwrap();
+            queue.submit([encoder.finish()]);
+            let actual = download(&device, &queue, &output, input_bytes.len() as u64);
+            let expected = download(&device, &queue, reference.output_buffer(), 32 * 32 * 16);
+            for y in 0..17 {
+                for x in 0..19 {
+                    for channel in 0..4 {
+                        let offset = ((y * 19 + x) * 4 + channel) * 4;
+                        let expected = if channel == 3 {
+                            &input_bytes[offset..offset + 4]
+                        } else {
+                            let offset = ((y * 32 + x) * 4 + channel) * 4;
+                            &expected[offset..offset + 4]
+                        };
+                        assert_eq!(
+                            &actual[offset..offset + 4],
+                            expected,
+                            "{features:?} pixel {x},{y}, channel {channel}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU adapter"]
     fn host_buffers_lifecycle_and_recorded_write_order() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();

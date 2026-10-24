@@ -10,8 +10,14 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- Experimental native runtime with a C API (`native/`): the WGSL kernels run through wgpu on Metal, Vulkan or Direct3D 12, planned by the TypeScript core compiled with scriptc. Build with `npm run native:build`.
-- Experimental `kernel: 'subgroup-matrix'` using `chromium-experimental-subgroup-matrix` (or wgpu cooperative matrices natively), with sub-pixel decoder convolutions and `subgroupMatrix` tuning options.
+- Experimental native denoising through Rust and C APIs on Metal, Vulkan or Direct3D 12. Rust hosts can share GPU buffers; the C API accepts CPU images. See the [native guide](native/README.md).
+- Experimental `kernel: 'subgroup-matrix'` acceleration and `subgroupMatrix` tuning options. Browser use requires `chromium-experimental-subgroup-matrix`; native use requires wgpu cooperative-matrix support.
+
+### Changed
+
+- Default FP16 GEMM denoising is faster on the tested Apple M4 Max, with increased first-time initialization cost. Outputs differ slightly from the previous FP16 path; `gemm: { decoderSubPixel: false }` restores its decoder calculation. FP32 defaults are unchanged.
+- Native denoising uses less temporary GPU memory. Native FP16 GEMM also runs faster with shader runtime checks enabled on the tested Apple M4 Max.
+- GPU profiles now sum network time across all tiles of a completed image, rather than reporting only its first tile. Image preprocessing and output conversion are excluded.
 
 ## [0.5.0] - 2026-10-09
 

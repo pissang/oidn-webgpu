@@ -6,7 +6,7 @@ import {
 } from '../gpuTypes.js';
 import { hdrForwardWGSL, hdrInverseWGSL, type HDRTransfer } from '../hdrTransfer.js';
 import type { ValidatedUNetModel } from '../modelSpec.js';
-import type { NativeUNetCore } from '../nativeUNetCore.js';
+import type { NativeUNetCore, NativeUNetPrecision } from '../nativeUNetCore.js';
 import { OIDN_TILE_ALIGNMENT, planTileGrid } from '../tileScheduler.js';
 import type { RecordedBuffer, RecordingDevice } from './recordingDevice.js';
 
@@ -28,29 +28,34 @@ function alignUp(value: number, alignment: number) {
 
 /**
  * Input processing of one tile for buffer images: clamp-to-edge reads of the
- * tile's input rectangle, the HDR transfer of the color, and RGBA f32 network
- * inputs. Matches the browser runtime's GPU input pass (without the alpha
- * denoising mode), except that normals are signed [-1, 1] as in OIDN.
+ * tile's input rectangle, HDR transfer, and conversion directly into the
+ * network's packed tensor. Auxiliary RGB channels cross vec4 boundaries;
+ * unused lanes must be zero just as in createInputPackShader.
  */
-function inputShader(sourceCount: number, hdr: boolean, transfer: HDRTransfer) {
+function inputShader(sourceCount: number, hdr: boolean, transfer: HDRTransfer, precision: NativeUNetPrecision) {
   const names = ['color', 'albedo', 'normal'].slice(0, sourceCount);
   const bindings = names.map((name, index) => `
-@group(0) @binding(${index}) var<storage, read> in_${name}: array<vec4f>;
-@group(0) @binding(${sourceCount + index}) var<storage, read_write> out_${name}: array<vec4f>;`).join('');
+@group(0) @binding(${index}) var<storage, read> in_${name}: array<vec4f>;`).join('');
   // Like OIDN, callers pass signed [-1, 1] normals; the network reads n * 0.5 + 0.5.
   const copies = names.slice(1).map((name) => name === 'normal'
-    ? 'out_normal[outIdx] = vec4f(clamp(in_normal[inIdx].rgb, vec3f(-1.0), vec3f(1.0)) * 0.5 + 0.5, 0.0);'
-    : `out_${name}[outIdx] = vec4f(in_${name}[inIdx].rgb, 0.0);`).join('\n  ');
-  return /* wgsl */ `${hdrForwardWGSL(transfer)}
+    ? 'let normal = clamp(in_normal[inIdx].rgb, vec3f(-1.0), vec3f(1.0)) * 0.5 + 0.5;'
+    : `let ${name} = in_${name}[inIdx].rgb;`).join('\n  ');
+  const channels = names.flatMap((name) => ['r', 'g', 'b'].map((channel) => `${name}.${channel}`));
+  const blocks = Math.ceil(channels.length / 4);
+  const type = precision === 'fp16' ? 'vec4<f16>' : 'vec4<f32>';
+  const stores = Array.from({ length: blocks }, (_, block) =>
+    `packed[outIdx * ${blocks} + ${block}] = ${type}(vec4f(${[0, 1, 2, 3].map((lane) => channels[block * 4 + lane] ?? '0.0').join(', ')}));`).join('\n  ');
+  return /* wgsl */ `${precision === 'fp16' ? 'enable f16;\n' : ''}${hdrForwardWGSL(transfer)}
 struct Params {
   imageSize: vec2i,
   tileSize: vec2i,
   offset: vec2i,
 
 }${bindings}
-@group(0) @binding(${sourceCount * 2}) var<uniform> params: Params;
-struct Frame { inputScale: f32, }
-@group(0) @binding(${sourceCount * 2 + 1}) var<uniform> frame: Frame;
+@group(0) @binding(${sourceCount}) var<storage, read_write> packed: array<${type}>;
+@group(0) @binding(${sourceCount + 1}) var<uniform> params: Params;
+${hdr ? `struct Frame { inputScale: f32, }
+@group(0) @binding(${sourceCount + 2}) var<uniform> frame: Frame;` : ''}
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP}, 1)
 fn main(@builtin(global_invocation_id) globalId: vec3u) {
@@ -63,9 +68,10 @@ fn main(@builtin(global_invocation_id) globalId: vec3u) {
   let outIdx = position.y * params.tileSize.x + position.x;
   let col = in_color[inIdx];
   ${hdr
-    ? 'out_color[outIdx] = vec4f(HDRForward(col.r * frame.inputScale), HDRForward(col.g * frame.inputScale), HDRForward(col.b * frame.inputScale), 0.0);'
-    : 'out_color[outIdx] = vec4f(col.rgb, 0.0);'}
+    ? 'let color = vec3f(HDRForward(col.r * frame.inputScale), HDRForward(col.g * frame.inputScale), HDRForward(col.b * frame.inputScale));'
+    : 'let color = col.rgb;'}
   ${copies}
+  ${stores}
 }
 `;
 }
@@ -89,8 +95,8 @@ struct Params {
 @group(0) @binding(1) var<storage, read> in_raw: array<vec4f>;
 @group(0) @binding(2) var<storage, read_write> out_color: array<vec4f>;
 @group(0) @binding(3) var<uniform> params: Params;
-struct Frame { inputScale: f32, }
-@group(0) @binding(4) var<uniform> frame: Frame;
+${hdr ? `struct Frame { inputScale: f32, }
+@group(0) @binding(4) var<uniform> frame: Frame;` : ''}
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP}, 1)
 fn main(@builtin(global_invocation_id) globalId: vec3u) {
@@ -166,7 +172,7 @@ export function recordDenoiseExecution(
     compute: {
       module: device.createShaderModule({
         label: 'oidn/native/input',
-        code: inputShader(sourceCount, options.hdr, options.transfer)
+        code: inputShader(sourceCount, options.hdr, options.transfer, executor.precision)
       }),
       entryPoint: 'main'
     }
@@ -187,32 +193,26 @@ export function recordDenoiseExecution(
   const frame = uniformBuffer(device, 'oidn/native/frame', new Int32Array([scaleWord, 0, 0, 0])) as RecordedBuffer;
 
   // Network inputs are per tile shape; tiles run in order on one queue.
-  const tileInputs = new Map<string, OIDNGPUBuffer[]>();
+  const tileInputs = new Map<string, OIDNGPUBuffer>();
   for (const tile of plan.tiles) {
     const key = `${tile.input.width}x${tile.input.height}`;
     if (tileInputs.has(key)) continue;
-    const buffers: OIDNGPUBuffer[] = [];
-    for (let source = 0; source < sourceCount; source++) {
-      buffers.push(storageBuffer(device, `oidn/native/tile/${key}/${source}`, tile.input.width * tile.input.height * 16));
-    }
-    tileInputs.set(key, buffers);
-    // Creates the shape's network resources outside the recorded commands.
-    executor.execute(buffers, tile.input.width, tile.input.height);
+    tileInputs.set(key, executor.packedInputBuffer(tile.input.width, tile.input.height));
   }
   device.operations = [];
 
   plan.tiles.forEach((tile, index) => {
-    const buffers = tileInputs.get(`${tile.input.width}x${tile.input.height}`)!;
+    const packed = tileInputs.get(`${tile.input.width}x${tile.input.height}`)!;
     const inputParams = uniformBuffer(device, `oidn/native/input/${index}`, new Int32Array([
       width, height, tile.input.width, tile.input.height, tile.input.x, tile.input.y, 0, 0
     ]));
     const entries: OIDNGPUBindGroupEntry[] = [];
     for (let source = 0; source < sourceCount; source++) {
       entries.push({ binding: source, resource: { buffer: inputs[source] } });
-      entries.push({ binding: sourceCount + source, resource: { buffer: buffers[source] } });
     }
-    entries.push({ binding: sourceCount * 2, resource: { buffer: inputParams } });
-    entries.push({ binding: sourceCount * 2 + 1, resource: { buffer: frame } });
+    entries.push({ binding: sourceCount, resource: { buffer: packed } });
+    entries.push({ binding: sourceCount + 1, resource: { buffer: inputParams } });
+    if (options.hdr) entries.push({ binding: sourceCount + 2, resource: { buffer: frame } });
     const inputBindings = device.createBindGroup({
       label: `oidn/native/input/${index}`,
       layout: inputPipeline.getBindGroupLayout(0),
@@ -229,7 +229,7 @@ export function recordDenoiseExecution(
     inputPass.end();
     device.queue.submit([inputEncoder.finish()]);
 
-    const networkOutput = executor.execute(buffers, tile.input.width, tile.input.height);
+    const networkOutput = executor.executePacked(tile.input.width, tile.input.height);
 
     const outputParams = uniformBuffer(device, `oidn/native/output/${index}`, new Int32Array([
       width, tile.input.width,
@@ -246,7 +246,7 @@ export function recordDenoiseExecution(
         { binding: 1, resource: { buffer: inputs[0] } },
         { binding: 2, resource: { buffer: output } },
         { binding: 3, resource: { buffer: outputParams } },
-        { binding: 4, resource: { buffer: frame } }
+        ...(options.hdr ? [{ binding: 4, resource: { buffer: frame } }] : [])
       ]
     });
     const outputEncoder = device.createCommandEncoder({ label: `oidn/native/output/${index}` });

@@ -30,7 +30,8 @@ Options:
   --kernels <list>     Compare FP16 kernels (comma separated) against FP32
                        implicit GEMM, e.g. implicit-gemm,subgroup-matrix
   --matrix <list>      Subgroup-matrix variants for --kernels, as
-                       <fragments>[-f16] items, e.g. 2,4,4-f16
+                       <fragments|default>[-f16], e.g. default,1,2,4-f16
+  --gemm-subpixel <list>  GEMM decoder variants: off,on (requires --kernels)
   --output <path>      JSON output (default: benchmarks/results/latest.json)
   --help               Show this message
 `);
@@ -49,6 +50,7 @@ function parseArgs(argv) {
     weights: 'rt_hdr_calb_cnrm_large.tza',
     kernels: null,
     matrix: null,
+    gemmSubpixel: null,
     output: path.join(benchmarkDirectory, 'results/latest.json')
   };
   const names = {
@@ -63,6 +65,7 @@ function parseArgs(argv) {
     weights: 'weights',
     kernels: 'kernels',
     matrix: 'matrix',
+    'gemm-subpixel': 'gemmSubpixel',
     output: 'output'
   };
   for (let index = 0; index < argv.length; index++) {
@@ -101,6 +104,9 @@ function parseArgs(argv) {
   }
   options.output = path.resolve(projectRoot, options.output);
   if (options.inputHDR) options.inputHDR = path.resolve(process.cwd(), options.inputHDR);
+  if (options.gemmSubpixel && (!options.kernels || options.gemmSubpixel.split(',').some((value) => !['off', 'on'].includes(value)))) {
+    throw new Error('--gemm-subpixel requires --kernels and a comma-separated list of off,on');
+  }
   if (options.defaultOnly && options.directGemmOnly) {
     throw new Error('--default-only and --direct-gemm-only cannot be combined');
   }
@@ -385,6 +391,7 @@ async function benchmarkVariant(browser, origin, options, variant) {
         runtimeOptions.engine = config.engine ?? 'auto';
         runtimeOptions.precision = config.precision;
         runtimeOptions.kernel = config.kernel;
+        if (config.gemm) runtimeOptions.gemm = config.gemm;
         if (config.subgroupMatrix) runtimeOptions.subgroupMatrix = config.subgroupMatrix;
         runtimeOptions.dynamicTile = false;
       }
@@ -534,6 +541,7 @@ async function benchmarkVariant(browser, origin, options, variant) {
       baseline: variant.baseline,
       precision: variant.precision,
       kernel: variant.kernel,
+      gemm: variant.gemm,
       subgroupMatrix: variant.subgroupMatrix,
       engine: variant.engine,
       nativeOptions: variant.nativeOptions,
@@ -678,7 +686,7 @@ async function main() {
       executablePath: chrome,
       headless: true,
       args: [
-        '--enable-unsafe-webgpu',
+        ...(options.kernels?.split(',').includes('subgroup-matrix') ? ['--enable-unsafe-webgpu'] : []),
         '--enable-features=UseSkiaRenderer,WebMachineLearningNeuralNetwork'
       ]
     });
@@ -697,10 +705,11 @@ async function main() {
             kernel === 'subgroup-matrix'
               ? (options.matrix ?? '').split(',').filter(Boolean).concat(options.matrix ? [] : ['default'])
                   .map((item) => {
-                    const [fragments, accumulation] = item.split('-');
+                    const [fragments, ...flags] = item.split('-');
                     const subgroupMatrix = item === 'default'
                       ? undefined
-                      : { outputFragments: Number(fragments), ...(accumulation ? { accumulation } : {}) };
+                      : { ...(fragments === 'default' ? {} : { outputFragments: Number(fragments) }),
+                          ...(flags.includes('f16') ? { accumulation: 'f16' } : {}) };
                     return {
                       label: `WGSL FP16 subgroup-matrix${subgroupMatrix ? ` ${item}` : ''}`,
                       bundle: 'current',
@@ -712,15 +721,16 @@ async function main() {
                       subgroupMatrix
                     };
                   })
-              : [{
-                  label: `WGSL FP16 ${kernel}`,
+              : (kernel === 'implicit-gemm' && options.gemmSubpixel ? options.gemmSubpixel.split(',') : ['default']).map((subpixel) => ({
+                  label: `WGSL FP16 ${kernel}${subpixel === 'default' ? '' : ` subpixel ${subpixel}`}`,
                   bundle: 'current',
                   baseline: false,
                   nativeOptions: true,
                   engine: 'auto',
                   precision: 'fp16',
-                  kernel
-                }])
+                  kernel,
+                  ...(subpixel === 'default' ? {} : { gemm: { decoderSubPixel: subpixel === 'on' } })
+                })))
         ]
       : options.directGemmOnly
       ? [

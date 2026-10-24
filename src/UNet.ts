@@ -24,6 +24,7 @@ import {
   type NativeSubgroupMatrixOptions,
   type NativeUNetGemmOptions,
   type NativeUNetKernelSetting,
+  type NativeUNetExecutionProfile,
   type NativeUNetPrecisionSetting
 } from './nativeUNet';
 import { WebNNUNetExecutor } from './webnnUNet';
@@ -96,6 +97,8 @@ class UNet {
 
   private _dynamicTileController: DynamicTileController;
   private _lastExecution?: UNetExecutionStats;
+  private _profileNextImage = false;
+  private _lastImageProfile?: NativeUNetExecutionProfile;
   private _activeExecutionFailures = new Set<(reason: unknown) => void>();
   private _deviceLostObserved = false;
   private _deviceLostSettled = false;
@@ -302,13 +305,15 @@ class UNet {
     return () => this._activeExecutionFailures.delete(fail);
   }
 
-  /** Captures per-node GPU timestamps for the next native tile execution. */
+  /** Captures network GPU timestamps across every tile of the next image. */
   profileNextExecution() {
-    return this._nativeExecutor?.profileNextExecution() ?? false;
+    if (!this._nativeExecutor || !this._device.features.has('timestamp-query')) return false;
+    this._profileNextImage = true;
+    return true;
   }
 
   getLastExecutionProfile() {
-    return this._nativeExecutor?.getLastExecutionProfile();
+    return this._lastImageProfile ? Promise.resolve(this._lastImageProfile) : undefined;
   }
 
   private _processImageData(
@@ -661,6 +666,9 @@ class UNet {
       typeof performance === 'undefined' ? Date.now() : performance.now();
     const executionStartTime = now();
     const tileTimesMs: number[] = [];
+    const profileImage = this._profileNextImage === true;
+    this._profileNextImage = false;
+    const layerTimes = new Map<string, number>();
     const cancelScheduledTile = () => {
       if (scheduledTimer !== undefined) {
         clearTimeout(scheduledTimer);
@@ -725,6 +733,7 @@ class UNet {
         ? undefined
         : makeImageData(tile.output.width, tile.output.height);
       const tileStartTime = now();
+      if (profileImage) this._nativeExecutor!.profileNextExecution();
       const resGPUBuffer = await this._executeTile(
         isGPUImageData(color)
           ? {
@@ -742,6 +751,12 @@ class UNet {
         hdr,
         denoiseAlpha
       );
+      if (profileImage) {
+        const profile = await this._nativeExecutor!.getLastExecutionProfile();
+        for (const layer of profile?.layers ?? []) {
+          layerTimes.set(layer.id, (layerTimes.get(layer.id) ?? 0) + layer.durationMs);
+        }
+      }
       if (state !== 'active') return;
       const output = outputImageData || {
         data: resGPUBuffer,
@@ -811,6 +826,10 @@ class UNet {
           // execution. Deregister before the user callback resolves so a
           // completed execution never remains retained by the device watcher.
           unregisterDeviceLoss();
+          if (profileImage) {
+            const layers = [...layerTimes].map(([id, durationMs]) => ({ id, durationMs }));
+            this._lastImageProfile = { totalMs: layers.reduce((sum, layer) => sum + layer.durationMs, 0), layers };
+          }
           await done(output as any);
           if (state === 'active') {
             state = 'settled';

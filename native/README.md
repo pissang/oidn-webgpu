@@ -248,7 +248,7 @@ Without `OIDN_WEBGPU_CORE_ARCHIVE`, the core is built automatically, for native 
 
 ## Performance
 
-Network-only GPU time on an Apple M4 Max, the only measured device. oidn-webgpu numbers exclude input/output processing, which the OIDN numbers include.
+Network timings on an Apple M4 Max, the only measured device. oidn-webgpu numbers are per-image wall times from batched dispatches and exclude input/output processing, which the OIDN numbers include.
 
 | Model | Size | OIDN 2.5.1 Metal | oidn-webgpu native |
 | --- | --- | ---: | ---: |

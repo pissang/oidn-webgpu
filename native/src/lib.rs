@@ -509,8 +509,8 @@ impl Network {
     }
 
     /// Like [`Network::new`], but compiles the shaders without runtime bounds
-    /// checks and without zero-initializing workgroup memory. Naga's checks
-    /// make the convolutions about four times slower on Metal.
+    /// checks and without zero-initializing workgroup memory. The performance
+    /// difference depends on the GPU and generated convolution kernels.
     ///
     /// # Safety
     ///
@@ -772,6 +772,51 @@ impl Network {
     }
 
     fn encode_commands(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.encode_profiled(encoder, None);
+    }
+
+    /// Writes optional timestamps at the first and last compute pass. The
+    /// device must enable TIMESTAMP_QUERY and indices must name unused slots.
+    pub fn encode_with_timestamps(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queries: &wgpu::QuerySet,
+        begin: Option<u32>,
+        end: Option<u32>,
+    ) {
+        self.encode_profiled(encoder, Some((queries, begin, end)));
+    }
+
+    fn encode_profiled(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        profile: Option<(&wgpu::QuerySet, Option<u32>, Option<u32>)>,
+    ) {
+        let pass_count: usize = if profile.is_some() {
+            self.operations
+                .iter()
+                .map(|operation| {
+                    let mut count = 0;
+                    let mut in_pass = false;
+                    if let Operation::Submit(commands) = operation {
+                        for command in commands {
+                            if matches!(command, Command::Dispatch { .. }) {
+                                if !in_pass {
+                                    count += 1;
+                                }
+                                in_pass = true;
+                            } else {
+                                in_pass = false;
+                            }
+                        }
+                    }
+                    count
+                })
+                .sum()
+        } else {
+            0
+        };
+        let mut pass_index = 0;
         for operation in &self.operations {
             match operation {
                 Operation::Write { .. } => unreachable!("writes are lowered during preparation"),
@@ -788,10 +833,29 @@ impl Network {
                                 z,
                             } => {
                                 let pass = pass.get_or_insert_with(|| {
+                                    let timestamp_writes =
+                                        profile.and_then(|(queries, begin, end)| {
+                                            let beginning_of_pass_write_index =
+                                                if pass_index == 0 { begin } else { None };
+                                            let end_of_pass_write_index =
+                                                if pass_index + 1 == pass_count {
+                                                    end
+                                                } else {
+                                                    None
+                                                };
+                                            (beginning_of_pass_write_index.is_some()
+                                                || end_of_pass_write_index.is_some())
+                                            .then_some(wgpu::ComputePassTimestampWrites {
+                                                query_set: queries,
+                                                beginning_of_pass_write_index,
+                                                end_of_pass_write_index,
+                                            })
+                                        });
+                                    pass_index += 1;
                                     encoder
                                         .begin_compute_pass(&wgpu::ComputePassDescriptor {
                                             label: Some("oidn-webgpu"),
-                                            timestamp_writes: None,
+                                            timestamp_writes,
                                         })
                                         .forget_lifetime()
                                 });

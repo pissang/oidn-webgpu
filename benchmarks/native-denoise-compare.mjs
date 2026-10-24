@@ -50,7 +50,8 @@ const server = createServer(async (request, response) => {
 }).listen(0, '127.0.0.1');
 await new Promise((resolve) => server.once('listening', resolve));
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'oidn-native-denoise-'));
-const browser = await chromium.launch({ executablePath: chrome, headless: true, args: ['--enable-unsafe-webgpu'] });
+const browser = await chromium.launch({ executablePath: chrome, headless: true,
+  args: browserKernel === 'subgroup-matrix' ? ['--enable-unsafe-webgpu'] : [] });
 try {
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
@@ -74,8 +75,9 @@ try {
     const albedo = await image('/albedo.png');
     const normal = await image('/normal.png');
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    const features = ['shader-f16', 'subgroups', 'chromium-experimental-subgroup-matrix']
-      .filter((feature) => adapter.features.has(feature));
+    const features = precision === 'fp16' ? ['shader-f16'] : [];
+    if (kernel === 'subgroup-matrix') features.push('subgroups', 'chromium-experimental-subgroup-matrix');
+    if (kernel === 'subgroup') features.push('subgroups');
     const device = await adapter.requestDevice({
       requiredFeatures: features,
       requiredLimits: {
@@ -137,18 +139,25 @@ try {
     path.join(root, 'weights', weights), String(result.width), String(result.height),
     paths.color, paths.albedo, paths.normal, outputPath, quality, maxTile, '3', nativeKernel
   ], { stdio: 'inherit' });
-  const native = new Float32Array((await readFile(outputPath)).buffer.slice(0));
-  const reference = new Float32Array(Buffer.from(result.denoised, 'base64').buffer.slice(0));
-  const color = new Float32Array(Buffer.from(result.color, 'base64').buffer.slice(0));
+  const floats = (bytes) => new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  const native = floats(await readFile(outputPath));
+  const reference = floats(Buffer.from(result.denoised, 'base64'));
+  const color = floats(Buffer.from(result.color, 'base64'));
   let relative = 0;
   let absolute = 0;
   let alphaMismatches = 0;
+  let outliers = 0;
+  if (native.length !== reference.length) throw new Error('native/browser output length mismatch');
   for (let pixel = 0; pixel < result.width * result.height; pixel++) {
     for (let channel = 0; channel < 3; channel++) {
       const expected = reference[pixel * 4 + channel];
       const actual = native[pixel * 4 + channel];
-      absolute += Math.abs(expected - actual);
-      relative += Math.abs(expected - actual) / (Math.abs(expected) + Math.abs(actual) + 0.01);
+      const error = Math.abs(expected - actual);
+      if (!Number.isFinite(error)) throw new Error(`non-finite output at pixel ${pixel}, channel ${channel}`);
+      const rel = error / (Math.abs(expected) + Math.abs(actual) + 0.01);
+      absolute += error;
+      relative += rel;
+      if (error > 0.02 && rel > 0.05) outliers++;
     }
     if (native[pixel * 4 + 3] !== color[pixel * 4 + 3]) alphaMismatches++;
   }
@@ -168,8 +177,9 @@ try {
   }
   console.log(`${weights} ${result.width}x${result.height}: native (quality ${quality}, kernel ${nativeKernel}) vs browser ` +
     `${browserKernel}/${browserPrecision}: avgerror ${(relative / count).toExponential(3)}, ` +
-    `MAE ${(absolute / count).toExponential(3)}, alpha mismatches ${alphaMismatches}, ` +
+    `MAE ${(absolute / count).toExponential(3)}, outliers ${outliers}, alpha mismatches ${alphaMismatches}, ` +
     `bit-identical ${native.every((value, index) => Object.is(value, reference[index]))}`);
+  if (relative / count > 0.003 || outliers || alphaMismatches) throw new Error('native/browser denoising validation failed');
 } finally {
   await browser.close();
   server.close();

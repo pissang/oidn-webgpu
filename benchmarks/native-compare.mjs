@@ -50,7 +50,8 @@ try {
     ...['--unchecked', '--double-buffer', '--no-double-buffer', '--f16-accumulation', '--no-sub-pixel']
       .filter((flag) => args.includes(flag))
   ], { stdio: 'inherit' });
-  const native = new Float32Array((await readFile(outputPath)).buffer.slice(0));
+  const nativeBytes = await readFile(outputPath);
+  const native = new Float32Array(nativeBytes.buffer.slice(nativeBytes.byteOffset, nativeBytes.byteOffset + nativeBytes.byteLength));
 
   const files = new Map([
     ['/oidn.js', [path.join(root, 'dist/oidn.js'), 'text/javascript']],
@@ -68,7 +69,8 @@ try {
     response.end(await readFile(file[0]));
   }).listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
-  const browser = await chromium.launch({ executablePath: chrome, headless: true, args: ['--enable-unsafe-webgpu'] });
+  const browser = await chromium.launch({ executablePath: chrome, headless: true,
+    args: browserKernel === 'subgroup-matrix' ? ['--enable-unsafe-webgpu'] : [] });
   let browserOutput;
   try {
     const page = await browser.newPage();
@@ -76,10 +78,18 @@ try {
     browserOutput = await page.evaluate(async ({ size, kernel, precision }) => {
       const oidn = await import('/oidn.js');
       const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-      const device = await adapter.requestDevice({ requiredFeatures: ['shader-f16'] });
+      const requiredFeatures = precision === 'fp16' ? ['shader-f16'] : [];
+      if (kernel === 'subgroup-matrix') requiredFeatures.push('subgroups', 'chromium-experimental-subgroup-matrix');
+      if (kernel === 'subgroup') requiredFeatures.push('subgroups');
+      const device = await adapter.requestDevice({ requiredFeatures, requiredLimits: {
+        maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize
+      } });
       const tensors = oidn.parseTZA(await (await fetch('/model.tza')).arrayBuffer());
       const model = oidn.validateUNetModel(tensors, oidn.detectUNetModelSpec(tensors));
       const executor = new oidn.NativeUNetExecutor(device, model, { precision, kernel });
+      if (kernel === 'subgroup-matrix' && !executor.subgroupMatrix) throw new Error('browser subgroup-matrix kernel is unavailable');
       await executor.prepare();
       const input = new Float32Array(await (await fetch('/input.f32')).arrayBuffer());
       return Array.from(await executor.executeCPU(input, size, size));
@@ -93,18 +103,27 @@ try {
   let relative = 0;
   let max = 0;
   let maxReference = 0;
+  let outliers = 0;
+  if (native.length !== browserOutput.length) throw new Error('native/browser output length mismatch');
   for (let index = 0; index < native.length; index++) {
     const error = Math.abs(native[index] - browserOutput[index]);
+    if (!Number.isFinite(error)) throw new Error(`non-finite output at ${index}`);
     sum += error;
     // Open Image Denoise's oidnDenoise -r metric (here in the network's transfer space).
-    relative += error / (Math.abs(browserOutput[index]) + Math.abs(native[index]) + 0.01);
+    const rel = error / (Math.abs(browserOutput[index]) + Math.abs(native[index]) + 0.01);
+    relative += rel;
+    if (error > 0.02 && rel > 0.05) outliers++;
     max = Math.max(max, error);
     maxReference = Math.max(maxReference, Math.abs(browserOutput[index]));
   }
   const identical = native.every((value, index) => Object.is(value, Math.fround(browserOutput[index])));
   console.log(`${weights} ${size}x${size} native ${kernel} vs browser ${browserKernel}/${browserPrecision}: MAE ${(sum / native.length).toExponential(3)}, ` +
     `max ${max.toExponential(3)} (output max ${maxReference.toFixed(3)}), ` +
-    `avgerror ${(relative / native.length).toExponential(3)}, bit-identical ${identical}`);
+    `avgerror ${(relative / native.length).toExponential(3)}, outliers ${outliers}, bit-identical ${identical}`);
+  if (relative / native.length > 0.003 || outliers ||
+      (kernel === browserKernel && browserPrecision === 'fp16' && ['implicit-gemm', 'direct'].includes(kernel) && !identical)) {
+    throw new Error('native/browser output validation failed');
+  }
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }

@@ -139,6 +139,7 @@ function createNativeExecutor(tza: Uint8Array, config: Uint8Array) {
   const executor = new NativeUNetCore(device, model, {
     precision: precisions[words[3]],
     kernel: kernels[words[4]],
+    gemm: { unrollRows: true },
     subgroupMatrix: {
       ...(doubleBuffer === undefined ? {} : { doubleBuffer }),
       accumulation: words[options + 1] === 1 ? 'f16' : 'f32',
