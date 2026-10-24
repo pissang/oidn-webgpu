@@ -14,19 +14,19 @@ import { benchmarkVariant, defaultChrome, startServer, summarize } from './compa
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const options = { baseline: 'v0.5.0', 'current-ref': 'HEAD', warmup: 3, runs: 7,
-  models: 'small,base,large', sizes: '720p,1080p,2k', chrome: defaultChrome(),
+  models: 'small,base,large', sizes: '720p,1080p,1440p', chrome: defaultChrome(),
   'oidn-library': process.env.OIDN_LIBRARY,
   output: 'benchmarks/results/mac-performance.json' };
 if (argv.includes('--help')) {
   console.log(`Usage: node benchmarks/mac-performance.mjs --oidn-library /path/to/libOpenImageDenoise.dylib
   [--baseline v0.5.0] [--current-ref HEAD] [--chrome PATH]
-  [--warmup 3] [--runs 7] [--models small,base,large] [--sizes 720p,1080p,2k]
+  [--warmup 3] [--runs 7] [--models small,base,large] [--sizes 720p,1080p,1440p]
   [--output benchmarks/results/mac-performance.json]
 
 macOS only. Requires Node 22+, Chrome, Rust, cc and an OIDN SDK with Metal.
 OIDN_LIBRARY and CHROME_PATH may supply paths. Builds pinned source revisions
 in temporary worktrees; other uncommitted runtime edits are excluded. Runs all
-GPUs sequentially. 720p = 1280x720; 2k = 2560x1440. --sizes 512 retains the
+GPUs sequentially. 720p = 1280x720; 1440p = 2560x1440. --sizes 512 retains the
 512x512 regression case. Input/output: GPU-resident RGBA32F, HDR,
 albedo + normal, inputScale=1, one image per sync, 3 warmups/7 samples.
 Native uses cooperative matrices when supported, runtime checks off (C API
@@ -53,7 +53,7 @@ const models = {
   base: { weights: 'rt_hdr_alb_nrm.tza', oidn: 'base' },
   large: { weights: 'rt_hdr_calb_cnrm_large.tza', oidn: 'large' }
 };
-const sizes = { '512': [512, 512], '720p': [1280, 720], '1080p': [1920, 1080], '2k': [2560, 1440] };
+const sizes = { '512': [512, 512], '720p': [1280, 720], '1080p': [1920, 1080], '1440p': [2560, 1440] };
 const modelNames = [...new Set(options.models.split(','))];
 const sizeNames = [...new Set(options.sizes.split(','))];
 if (modelNames.some((name) => !models[name]) || sizeNames.some((name) => !sizes[name])) throw new Error('Invalid model/size');

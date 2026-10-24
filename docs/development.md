@@ -114,11 +114,11 @@ Each script's header comment lists its options.
 
 The Mac suite requires Node 22+, Chrome, Rust, a C compiler and an OIDN SDK with Metal. `CHROME_PATH` and `OIDN_LIBRARY` may supply the executable/library paths. Run `node benchmarks/mac-performance.mjs --help` for model, size, repetition and revision overrides. It builds detached temporary worktrees, so uncommitted runtime edits are excluded; temporary worktrees are removed after the run. GPU cases run sequentially.
 
-Default inputs are `720p` (1280x720), `1080p` (1920x1080) and `2k` (2560x1440). Use `--sizes 720p` to measure only 720p, or `--sizes 512` for the 512x512 regression case.
+Default inputs are `720p` (1280x720), `1080p` (1920x1080) and `1440p` (2560x1440). Use `--sizes 720p` to measure only 720p, or `--sizes 512` for the 512x512 regression case.
 
 The suite writes raw samples, model and binary hashes, source revisions, selected kernels, resource sizes and a Markdown report to `benchmarks/results/mac-performance.{json,md}`. Its metric is synchronized latency for one GPU-resident RGBA32F HDR image with albedo and normal. It includes preprocessing, network execution and output conversion, and excludes uploads, readback, device creation and preparation. Default protocol: 3 warmups, 7 measured images, whole-image processing, `inputScale=1`. Native runtime checks are disabled to match the C API default. Official OIDN loads the same TZA weights; Small uses fast quality, Base uses high, and Large uses high with clean auxiliary images. This is a timing comparison, not an image-quality comparison.
 
-The changelog combines separate runs. Repeat the earlier Chrome and 1080p/2k comparison with OIDN 2.5.1 and:
+The changelog combines separate runs. Repeat the earlier Chrome and 1080p/1440p comparison with OIDN 2.5.1 and:
 
 ```bash
 OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-performance.mjs \
