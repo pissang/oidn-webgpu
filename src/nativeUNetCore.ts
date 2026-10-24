@@ -140,6 +140,8 @@ export interface CachedExecution {
   nodeBindings: OIDNGPUBindGroup[];
   nodePipelines: OIDNGPUComputePipeline[];
   nodeKernels: NativeUNetKernel[];
+  /** Subgroup-matrix output fragments per node (0 for other kernels). */
+  nodeFragments: number[];
   inputPipeline: OIDNGPUComputePipeline;
   inputUniform: OIDNGPUBuffer;
   ownedBuffers: OIDNGPUBuffer[];
@@ -1665,6 +1667,8 @@ const SUBGROUP_MATRIX_TILE_WIDTH = 32;
 // Four subgroups own two output rows each, matching the 2x2 pooling windows.
 const SUBGROUP_MATRIX_TILE_HEIGHT = 8;
 const SUBGROUP_MATRIX_SUBGROUPS = 4;
+// Below this many workgroups a layer uses one output fragment per workgroup.
+const SUBGROUP_MATRIX_MIN_WORKGROUPS = 1024;
 
 interface AdapterSubgroupMatrixInfo {
   subgroupMinSize?: number;
@@ -2309,6 +2313,7 @@ export class NativeUNetCore {
   readonly subgroupMatrix?: NativeSubgroupMatrixConfig;
   readonly subgroupMatrixOutputFragments: number;
   readonly subgroupMatrixSubPixel: boolean;
+  private _subgroupMatrixFixedFragments: boolean;
 
   protected _model: UNetModelGraph;
   private _gemmByOutputBlocks = new Map<number, Readonly<Required<NativeUNetGemmOptions>>>();
@@ -2402,6 +2407,7 @@ export class NativeUNetCore {
       ? subgroupMatrixFragments(matrixConfig, matrixOptions)
       : 0;
     this.subgroupMatrixSubPixel = matrixOptions.subPixel ?? true;
+    this._subgroupMatrixFixedFragments = matrixOptions.outputFragments !== undefined;
     if (
       matrixConfig &&
       SUBGROUP_MATRIX_SUBGROUPS * matrixConfig.subgroupSize <= _device.limits.maxComputeInvocationsPerWorkgroup &&
@@ -2520,7 +2526,8 @@ export class NativeUNetCore {
 
   protected _nodePipelineSpec(
     node: ExecutableModelNode,
-    isFinal: boolean
+    isFinal: boolean,
+    fragments = this.subgroupMatrixOutputFragments
   ): NativePipelineSpec {
     if (node.op === 'conv2d') {
       const outputPrecision = isFinal ? 'fp32' : this.precision;
@@ -2559,7 +2566,8 @@ export class NativeUNetCore {
           outputPrecision,
           node.activation,
           inputBlocks,
-          outputBlocks
+          outputBlocks,
+          fragments
         );
       }
       const key =
@@ -2667,7 +2675,7 @@ export class NativeUNetCore {
         return {
           key: `subgroup-matrix-subpixel/${this.precision}/${outputPrecision}/` +
             `${config.dialect}/${config.componentType}-${config.resultType}-${config.size}-sg${config.subgroupSize}/` +
-            `n${this.subgroupMatrixOutputFragments}/${node.conv.activation}/${sourceBlocks.join('+')}/out${outputBlocks}/up${upsampledSource}`,
+            `n${fragments}/${node.conv.activation}/${sourceBlocks.join('+')}/out${outputBlocks}/up${upsampledSource}`,
           kernel: 'subgroup-matrix',
           code: createSubgroupMatrixSubpixelShader(
             this.precision,
@@ -2675,7 +2683,7 @@ export class NativeUNetCore {
             node.conv.activation,
             outputBlocks,
             config,
-            this.subgroupMatrixOutputFragments,
+            fragments,
             sourceBlocks,
             upsampledSource
           )
@@ -2688,6 +2696,7 @@ export class NativeUNetCore {
           node.conv.activation,
           inputBlocks,
           outputBlocks,
+          fragments,
           { sourceBlocks, upsampledSource }
         );
       }
@@ -2763,13 +2772,14 @@ export class NativeUNetCore {
     activation: Conv2DNodeSpec['activation'],
     inputBlocks: number,
     outputBlocks: number,
+    fragments: number,
     decoder?: { sourceBlocks: readonly number[]; upsampledSource: 0 | 1 }
   ): NativePipelineSpec {
     const config = this.subgroupMatrix!;
     return {
       key: `subgroup-matrix/${this.precision}/${outputPrecision}/` +
         `${config.dialect}/${config.componentType}-${config.resultType}-${config.size}-sg${config.subgroupSize}/` +
-        `n${this.subgroupMatrixOutputFragments}/${key}`,
+        `n${fragments}/${key}`,
       kernel: 'subgroup-matrix',
       code: createSubgroupMatrixConvShader(
         this.precision,
@@ -2778,10 +2788,24 @@ export class NativeUNetCore {
         inputBlocks,
         outputBlocks,
         config,
-        this.subgroupMatrixOutputFragments,
+        fragments,
         decoder
       )
     };
+  }
+
+  /**
+   * Output fragments per workgroup for a subgroup-matrix layer: the default
+   * unless that leaves fewer than SUBGROUP_MATRIX_MIN_WORKGROUPS workgroups,
+   * where one fragment keeps more of the GPU busy (low-resolution layers).
+   */
+  private _subgroupMatrixFragmentsFor(shape: ModelValueShape) {
+    const fragments = this.subgroupMatrixOutputFragments;
+    if (this._subgroupMatrixFixedFragments || fragments === 1) return fragments;
+    const workgroups = Math.ceil(shape.width / SUBGROUP_MATRIX_TILE_WIDTH) *
+      Math.ceil(shape.height / SUBGROUP_MATRIX_TILE_HEIGHT) *
+      Math.ceil(blocksForChannels(shape.channels) * 4 / (fragments * this.subgroupMatrix!.size));
+    return workgroups < SUBGROUP_MATRIX_MIN_WORKGROUPS ? 1 : fragments;
   }
 
   // Wider output tiles reuse each input load across twice as many channels.
@@ -2921,15 +2945,18 @@ export class NativeUNetCore {
     );
     const nodePipelines: OIDNGPUComputePipeline[] = [];
     const nodeKernels: NativeUNetKernel[] = [];
+    const nodeFragments: number[] = [];
     const nodeBindings: OIDNGPUBindGroup[] = [];
     const ownedBuffers: OIDNGPUBuffer[] = [];
 
     plan.plannedNodes.forEach(({ node, outputShape }, index) => {
       const isFinal = node.id === plan.spec.output;
-      const pipelineSpec = this._nodePipelineSpec(node, isFinal);
+      const fragments = this.subgroupMatrix ? this._subgroupMatrixFragmentsFor(outputShape) : 0;
+      const pipelineSpec = this._nodePipelineSpec(node, isFinal, fragments);
       const pipeline = this._pipeline(pipelineSpec.key, pipelineSpec.code);
       nodePipelines.push(pipeline);
       nodeKernels.push(pipelineSpec.kernel ?? 'direct');
+      nodeFragments.push(pipelineSpec.kernel === 'subgroup-matrix' ? fragments : 0);
       const output = valueBuffers.get(node.id)!;
       let entries: OIDNGPUBindGroupEntry[];
       let uniformValues: number[];
@@ -3055,6 +3082,7 @@ export class NativeUNetCore {
         nodeBindings,
         nodePipelines,
         nodeKernels,
+        nodeFragments,
         inputPipeline,
         inputUniform,
         ownedBuffers,
@@ -3232,7 +3260,7 @@ export class NativeUNetCore {
           Math.ceil(outputShape.height / SUBGROUP_MATRIX_TILE_HEIGHT),
           Math.ceil(
             blocksForChannels(outputShape.channels) /
-              (this.subgroupMatrixOutputFragments * this.subgroupMatrix!.size / 4)
+              (execution.nodeFragments[index] * this.subgroupMatrix!.size / 4)
           )
         );
       } else if (execution.nodeKernels[index] === 'implicit-gemm') {
