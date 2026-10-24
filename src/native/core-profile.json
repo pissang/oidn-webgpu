@@ -13,6 +13,12 @@
   },
   "exports": [
     {
+      "export": "inspectModelPacket",
+      "symbol": "oidnw_core_inspect_model",
+      "params": ["bytes"],
+      "returns": "bytes"
+    },
+    {
       "export": "recordNetworkPacket",
       "symbol": "oidnw_core_record_network",
       "params": [

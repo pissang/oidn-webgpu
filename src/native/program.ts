@@ -187,6 +187,23 @@ class ProgramWriter {
   }
 }
 
+// Device-independent model validation for native Rust hosts. Packet: MODEL
+// magic, version, image input count; errors use the existing ERRO packet.
+export function inspectModelPacket(tza: Uint8Array): Uint8Array {
+  const writer = new ProgramWriter();
+  try {
+    const tensors = parseTZA(tza.buffer.slice(tza.byteOffset, tza.byteOffset + tza.byteLength) as ArrayBuffer);
+    const model = validateUNetModel(tensors, detectUNetModelSpec(tensors));
+    writer.u32(0x4c444f4d);
+    writer.u32(1);
+    writer.u32(model.inputChannels / 3);
+  } catch (error) {
+    writer.u32(0x4f525245);
+    writer.string(error instanceof Error ? error.message : String(error));
+  }
+  return writer.finish();
+}
+
 function serializeProgram(
   device: RecordingDevice,
   inputs: readonly RecordedBuffer[],
@@ -209,6 +226,9 @@ function serializeProgram(
 
   writer.u32(device.buffers.length);
   for (const buffer of device.buffers) {
+    if (!Number.isSafeInteger(buffer.size) || buffer.size <= 0 || buffer.size > 0xffffffff) {
+      throw new Error(`Native program buffer ${buffer.label} exceeds the 32-bit size limit`);
+    }
     writer.u32(buffer.size);
     writer.u32(buffer.usage);
     writer.bytes(buffer.data ?? new Uint8Array(0));

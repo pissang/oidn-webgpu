@@ -3,7 +3,7 @@ name = "oidn-webgpu-native"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Experimental native wgpu runtime for oidn-webgpu, driven by its scriptc-compiled TypeScript core"
+description = "Experimental GPU denoising on host-owned wgpu devices and buffers, with a standalone C API"
 publish = false
 
 [lib]

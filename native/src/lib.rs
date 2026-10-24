@@ -1,20 +1,24 @@
-//! Experimental native runtime for oidn-webgpu.
+//! GPU denoising on a host-owned wgpu device and image buffers.
 //!
-//! The TypeScript core (`src/native/program.ts`, compiled by scriptc) plans a
-//! denoising (or the bare network) for one image size and records it as a
-//! program: buffers with their initial data, WGSL shaders, pipelines, bind
-//! groups and the commands of one execution. This crate creates those
-//! resources on a wgpu device once and encodes the recorded commands for every
-//! execution. The C API (`capi`, `include/oidn_webgpu.h`) builds a standalone
-//! denoiser on it.
+//! Load a [`Model`], create a [`Denoiser`], then prepare a fixed image size and
+//! buffers. [`PreparedDenoise::encode`] appends work to the host's encoder;
+//! the host submits it. Images are tightly packed RGBA f32 storage buffers.
+//! The API is experimental. See `examples/host_buffers.rs` for a complete host.
 
 pub mod capi;
+mod denoiser;
+pub use denoiser::*;
+/// The exact wgpu crate used by the GPU API. Hosts may use this re-export to
+/// avoid incompatible Device and Buffer types from another wgpu dependency.
+pub use wgpu;
 
+use std::collections::HashMap;
 use std::sync::{Mutex, Once};
 
 unsafe extern "C" {
     fn oidnw_core_init();
     fn oidnw_core_reset();
+    fn oidnw_core_inspect_model(tza: *const u8, tza_length: usize, output: *mut *const u8, size: *mut usize);
     fn oidnw_core_record_network(
         tza: *const u8,
         tza_length: usize,
@@ -36,6 +40,8 @@ unsafe extern "C" {
 const PROGRAM_MAGIC: u32 = 0x4e44_494f;
 const ERROR_MAGIC: u32 = 0x4f52_5245;
 
+/// Result for the low-level Network/planner API. Denoiser methods return the
+/// typed [`Error`] instead.
 pub type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,22 +106,32 @@ impl NetworkConfig {
 static CORE: Mutex<()> = Mutex::new(());
 
 fn record(tza: &[u8], config: &[u32], denoise: bool) -> Result<Vec<u8>> {
-    static INIT: Once = Once::new();
-    let _guard = CORE.lock().map_err(|_| "oidn-webgpu core lock poisoned")?;
-    INIT.call_once(|| unsafe { oidnw_core_init() });
     let config_bytes: Vec<u8> = config.iter().flat_map(|word| word.to_le_bytes()).collect();
-    let mut pointer = std::ptr::null();
-    let mut size = 0usize;
-    let bytes = unsafe {
-        let entry = if denoise { oidnw_core_record_denoise } else { oidnw_core_record_network };
+    core_call(|pointer, size| unsafe {
+        let entry = if denoise {
+            oidnw_core_record_denoise
+        } else {
+            oidnw_core_record_network
+        };
         entry(
             tza.as_ptr(),
             tza.len(),
             config_bytes.as_ptr(),
             config_bytes.len(),
-            &mut pointer,
-            &mut size,
+            pointer,
+            size,
         );
+    })
+}
+
+fn core_call(call: impl FnOnce(*mut *const u8, *mut usize)) -> Result<Vec<u8>> {
+    static INIT: Once = Once::new();
+    let _guard = CORE.lock().map_err(|_| "oidn-webgpu core lock poisoned")?;
+    INIT.call_once(|| unsafe { oidnw_core_init() });
+    let mut pointer = std::ptr::null();
+    let mut size = 0usize;
+    call(&mut pointer, &mut size);
+    let bytes = unsafe {
         if pointer.is_null() {
             oidnw_core_reset();
             return Err("oidn-webgpu core returned no program".into());
@@ -165,6 +181,7 @@ struct BufferDescription {
     label: String,
 }
 
+#[derive(Clone)]
 struct BindGroupDescription {
     pipeline: usize,
     group: u32,
@@ -172,8 +189,20 @@ struct BindGroupDescription {
 }
 
 enum Command {
-    Dispatch { pipeline: usize, bind_group: usize, x: u32, y: u32, z: u32 },
-    Copy { source: usize, source_offset: u64, destination: usize, destination_offset: u64, size: u64 },
+    Dispatch {
+        pipeline: usize,
+        bind_group: usize,
+        x: u32,
+        y: u32,
+        z: u32,
+    },
+    Copy {
+        source: usize,
+        source_offset: u64,
+        destination: usize,
+        destination_offset: u64,
+        size: u64,
+    },
 }
 
 enum Operation {
@@ -241,7 +270,11 @@ impl Program {
             for _ in 0..reader.u32()? {
                 entries.push([reader.u32()?, reader.u32()?, reader.u32()?, reader.u32()?]);
             }
-            bind_groups.push(BindGroupDescription { pipeline, group, entries });
+            bind_groups.push(BindGroupDescription {
+                pipeline,
+                group,
+                entries,
+            });
         }
         let mut operations = Vec::new();
         for _ in 0..reader.u32()? {
@@ -315,18 +348,23 @@ fn capability_words(device: &wgpu::Device, adapter: &wgpu::Adapter) -> Vec<u32> 
         };
         for properties in adapter.cooperative_matrix_properties() {
             if let (Some(component), Some(result)) = (scalar(properties.ab_type), scalar(properties.cr_type)) {
-                matrices.push([component, result, properties.m_size, properties.n_size, properties.k_size]);
+                matrices.push([
+                    component,
+                    result,
+                    properties.m_size,
+                    properties.n_size,
+                    properties.k_size,
+                ]);
             }
         }
     }
     // wgpu reports Metal's possible range (4-64); Apple GPUs always run
     // 32-wide simdgroups, which the matrix kernels rely on.
-    let (subgroup_min, subgroup_max) =
-        if info.backend == wgpu::Backend::Metal && info.name.starts_with("Apple") {
-            (32, 32)
-        } else {
-            (info.subgroup_min_size, info.subgroup_max_size)
-        };
+    let (subgroup_min, subgroup_max) = if info.backend == wgpu::Backend::Metal && info.name.starts_with("Apple") {
+        (32, 32)
+    } else {
+        (info.subgroup_min_size, info.subgroup_max_size)
+    };
     let mut words = vec![
         bits,
         limits.max_compute_workgroup_storage_size,
@@ -344,7 +382,13 @@ fn capability_words(device: &wgpu::Device, adapter: &wgpu::Adapter) -> Vec<u32> 
 
 /// Planner config words (see `src/native/program.ts`).
 fn config_words(device: &wgpu::Device, adapter: &wgpu::Adapter, config: &NetworkConfig) -> Vec<u32> {
-    let mut words = vec![1, config.width, config.height, config.precision as u32, config.kernel as u32];
+    let mut words = vec![
+        1,
+        config.width,
+        config.height,
+        config.precision as u32,
+        config.kernel as u32,
+    ];
     words.extend(capability_words(device, adapter));
     words.push(match config.double_buffer {
         None => 0,
@@ -363,7 +407,11 @@ fn config_words(device: &wgpu::Device, adapter: &wgpu::Adapter, config: &Network
 }
 
 fn plan(device: &wgpu::Device, adapter: &wgpu::Adapter, tza: &[u8], config: &NetworkConfig) -> Result<Program> {
-    Program::parse(&record(tza, &config_words(device, adapter, config), config.denoise.is_some())?)
+    Program::parse(&record(
+        tza,
+        &config_words(device, adapter, config),
+        config.denoise.is_some(),
+    )?)
 }
 
 /// Plans `config` without creating GPU resources and returns the number of
@@ -382,6 +430,7 @@ pub struct Network {
     buffers: Vec<wgpu::Buffer>,
     pipelines: Vec<wgpu::ComputePipeline>,
     bind_groups: Vec<wgpu::BindGroup>,
+    bind_group_descriptions: Vec<BindGroupDescription>,
     operations: Vec<Operation>,
     inputs: Vec<usize>,
     output: usize,
@@ -391,6 +440,10 @@ pub struct Network {
     /// Time spent in the TypeScript planner, for diagnostics.
     pub planning_ms: f64,
 }
+
+// Cache actual pipeline handles, including their auto-generated layouts, so
+// new image sizes and buffer bindings can reuse them on this device.
+type PipelineMap = HashMap<(String, String, bool), wgpu::ComputePipeline>;
 
 impl Network {
     /// Plans the network for `config` and creates its resources on `device`.
@@ -460,35 +513,62 @@ impl Network {
     ) -> Result<Self> {
         let started = std::time::Instant::now();
         let program = plan(device, adapter, tza, config)?;
+        let planning_ms = started.elapsed().as_secs_f64() * 1e3;
+        Self::from_program(
+            device,
+            program,
+            inputs,
+            output,
+            unchecked,
+            &mut PipelineMap::new(),
+            planning_ms,
+        )
+    }
+
+    fn from_program(
+        device: &wgpu::Device,
+        program: Program,
+        inputs: Option<&[wgpu::Buffer]>,
+        output: Option<&wgpu::Buffer>,
+        unchecked: bool,
+        cache: &mut PipelineMap,
+        planning_ms: f64,
+    ) -> Result<Self> {
         if output.is_some() && !program.output_external {
             return Err("the network program has no external output".into());
         }
-        let planning_ms = started.elapsed().as_secs_f64() * 1e3;
-        if let Some(inputs) = inputs {
-            if inputs.len() != program.inputs.len() {
-                return Err(format!(
-                    "the model expects {} input buffers, got {}",
-                    program.inputs.len(),
-                    inputs.len()
-                ));
-            }
+        if let Some(inputs) = inputs
+            && inputs.len() != program.inputs.len()
+        {
+            return Err(format!(
+                "the model expects {} input buffers, got {}",
+                program.inputs.len(),
+                inputs.len()
+            ));
         }
-        let buffers = program
+        let mut buffers = program
             .buffers
             .iter()
             .enumerate()
             .map(|(id, description)| {
-                if let Some(position) = program.inputs.iter().position(|&input| input == id) {
-                    if let Some(inputs) = inputs {
-                        return inputs[position].clone();
-                    }
+                if let Some(position) = program.inputs.iter().position(|&input| input == id)
+                    && let Some(inputs) = inputs
+                {
+                    return inputs[position].clone();
                 }
-                if id == program.output {
-                    if let Some(output) = output {
-                        return output.clone();
-                    }
+                if id == program.output
+                    && let Some(output) = output
+                {
+                    return output.clone();
                 }
-                let usage = wgpu::BufferUsages::from_bits_truncate(description.usage);
+                let mut usage = wgpu::BufferUsages::from_bits_truncate(description.usage);
+                if program
+                    .operations
+                    .iter()
+                    .any(|op| matches!(op, Operation::Write { buffer, .. } if *buffer == id))
+                {
+                    usage |= wgpu::BufferUsages::COPY_DST;
+                }
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(&description.label),
                     size: description.size,
@@ -497,7 +577,7 @@ impl Network {
                 });
                 if !description.data.is_empty() {
                     buffer
-                        .get_mapped_range_mut(..)
+                        .get_mapped_range_mut(..description.data.len() as u64)
                         .unwrap()
                         .copy_from_slice(&description.data);
                     buffer.unmap();
@@ -505,43 +585,41 @@ impl Network {
                 buffer
             })
             .collect::<Vec<_>>();
-        let modules = program
-            .shaders
-            .iter()
-            .map(|code| {
-                let descriptor = wgpu::ShaderModuleDescriptor {
-                    label: Some("oidn-webgpu"),
-                    source: wgpu::ShaderSource::Wgsl(code.as_str().into()),
-                };
-                if unchecked {
-                    // SAFETY: the caller of `new_unchecked` vouches for the kernels.
-                    unsafe {
-                        device.create_shader_module_trusted(
-                            descriptor,
-                            wgpu::ShaderRuntimeChecks::unchecked(),
-                        )
-                    }
-                } else {
-                    device.create_shader_module(descriptor)
-                }
-            })
-            .collect::<Vec<_>>();
         let pipelines = program
             .pipelines
             .iter()
             .map(|(shader, entry_point)| {
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("oidn-webgpu"),
-                    layout: None,
-                    module: &modules[*shader],
-                    entry_point: Some(entry_point),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        // Every kernel writes workgroup memory before reading it.
-                        zero_initialize_workgroup_memory: !unchecked,
-                        ..Default::default()
-                    },
-                    cache: None,
-                })
+                let code = &program.shaders[*shader];
+                let key = (code.clone(), entry_point.clone(), unchecked);
+                cache
+                    .entry(key)
+                    .or_insert_with(|| {
+                        let descriptor = wgpu::ShaderModuleDescriptor {
+                            label: Some("oidn-webgpu"),
+                            source: wgpu::ShaderSource::Wgsl(code.as_str().into()),
+                        };
+                        let module = if unchecked {
+                            // SAFETY: the caller of `new_unchecked` vouches for the kernels.
+                            unsafe {
+                                device.create_shader_module_trusted(descriptor, wgpu::ShaderRuntimeChecks::unchecked())
+                            }
+                        } else {
+                            device.create_shader_module(descriptor)
+                        };
+                        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some("oidn-webgpu"),
+                            layout: None,
+                            module: &module,
+                            entry_point: Some(entry_point),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                // Every kernel writes workgroup memory before reading it.
+                                zero_initialize_workgroup_memory: !unchecked,
+                                ..Default::default()
+                            },
+                            cache: None,
+                        })
+                    })
+                    .clone()
             })
             .collect::<Vec<_>>();
         let bind_groups = program
@@ -567,11 +645,46 @@ impl Network {
                 })
             })
             .collect::<Vec<_>>();
+        // A queue write would move ahead of all encoded commands at submit.
+        // Immutable staging copies preserve the program's interleaved writes
+        // and dispatches, including repeated encodes in one command buffer.
+        let mut operations = Vec::new();
+        for operation in program.operations {
+            match operation {
+                Operation::Write { buffer, offset, data } => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if offset % 4 != 0 || data.len() % 4 != 0 {
+                        return Err("unaligned recorded buffer write".into());
+                    }
+                    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("oidn-webgpu recorded write"),
+                        size: data.len() as u64,
+                        usage: wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: true,
+                    });
+                    staging.get_mapped_range_mut(..).unwrap().copy_from_slice(&data);
+                    staging.unmap();
+                    let source = buffers.len();
+                    buffers.push(staging);
+                    operations.push(Operation::Submit(vec![Command::Copy {
+                        source,
+                        source_offset: 0,
+                        destination: buffer,
+                        destination_offset: offset,
+                        size: data.len() as u64,
+                    }]));
+                }
+                op => operations.push(op),
+            }
+        }
         Ok(Self {
             buffers,
             pipelines,
             bind_groups,
-            operations: program.operations,
+            bind_group_descriptions: program.bind_groups,
+            operations,
             inputs: program.inputs,
             output: program.output,
             width: program.width,
@@ -599,20 +712,28 @@ impl Network {
         &self.buffers[self.output]
     }
 
-    /// Encodes one execution. Recorded buffer writes are issued on `queue`
-    /// immediately, so they take effect before the encoder is submitted.
-    pub fn encode(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
+    /// Encodes one execution without submitting or writing to the queue.
+    /// The queue argument is retained for compatibility with the low-level API.
+    pub fn encode(&self, _queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
+        self.encode_commands(encoder);
+    }
+
+    fn encode_commands(&self, encoder: &mut wgpu::CommandEncoder) {
         for operation in &self.operations {
             match operation {
-                Operation::Write { buffer, offset, data } => {
-                    queue.write_buffer(&self.buffers[*buffer], *offset, data);
-                }
+                Operation::Write { .. } => unreachable!("writes are lowered during preparation"),
                 Operation::Submit(commands) => {
                     // Lifetime-free passes let copies end a pass inside the loop.
                     let mut pass: Option<wgpu::ComputePass<'static>> = None;
                     for command in commands {
                         match *command {
-                            Command::Dispatch { pipeline, bind_group, x, y, z } => {
+                            Command::Dispatch {
+                                pipeline,
+                                bind_group,
+                                x,
+                                y,
+                                z,
+                            } => {
                                 let pass = pass.get_or_insert_with(|| {
                                     encoder
                                         .begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -625,7 +746,13 @@ impl Network {
                                 pass.set_bind_group(0, &self.bind_groups[bind_group], &[]);
                                 pass.dispatch_workgroups(x, y, z);
                             }
-                            Command::Copy { source, source_offset, destination, destination_offset, size } => {
+                            Command::Copy {
+                                source,
+                                source_offset,
+                                destination,
+                                destination_offset,
+                                size,
+                            } => {
                                 drop(pass.take());
                                 encoder.copy_buffer_to_buffer(
                                     &self.buffers[source],

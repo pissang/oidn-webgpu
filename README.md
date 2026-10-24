@@ -1,7 +1,7 @@
 # oidn-webgpu
 
 This library brings the state-of-the-art AI-based denoising library [Open Image Denoise](https://github.com/RenderKit/oidn) to WebGPU.
-It runs in browsers that support WebGPU, and natively through [wgpu](https://wgpu.rs) with a C API (experimental, see [native/README.md](native/README.md)).
+It runs in browsers that support WebGPU, and natively through [wgpu](https://wgpu.rs) with experimental Rust and C APIs. The [native guide](native/README.md) covers sharing a Rust host's GPU device and buffers, or denoising CPU images through C.
 
 > Formerly published as `oidn-web`; versions up to 0.5.0 remain available under that name.
 

@@ -1,0 +1,104 @@
+name: Native packages
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/native.yml
+      - native/**
+      - scripts/native-*.mjs
+      - src/**
+      - weights/**
+      - package.json
+      - tsconfig.json
+      - LICENSE
+  push:
+    branches: [main]
+    tags: ['v*', 'native-v*']
+    paths:
+      - .github/workflows/native.yml
+      - native/**
+      - scripts/native-*.mjs
+      - src/**
+      - weights/**
+      - package.json
+      - tsconfig.json
+      - LICENSE
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # Keep downloadable PR artifacts tied to the PR's actual source
+          # revision, rather than GitHub's temporary synthetic merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Set up MSVC and Windows SDK
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add '${{ matrix.target }}'
+      - name: Build C library and core archive
+        id: package
+        run: node scripts/native-build.mjs --target '${{ matrix.target }}' --archive --require-clean
+      # No GPU is assumed on hosted runners. These checks load the C library,
+      # execute the planner, and link a separate Rust consumer to the shipped core.
+      - name: Verify packaged C and Rust interfaces
+        run: node scripts/native-package-check.mjs '${{ steps.package.outputs.archive_path }}'
+      - name: Upload package and archive checksum
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: |
+            ${{ steps.package.outputs.archive_path }}
+            ${{ steps.package.outputs.checksum_path }}
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+      - name: Summarize download
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          node --input-type=module - <<'JS'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          const m = JSON.parse(readFileSync('.native-build/package/manifest.json', 'utf8'));
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `### ${m.target}\n\nSource: \`${m.source.commit}\`\n\n[Download ${m.name}](${process.env.ARTIFACT_URL})\n\nIncludes C shared library, import library on Windows, core static library, headers and SHA-256 checksums.\n`);
+          JS

@@ -23,6 +23,12 @@ extern "C" {
 
 void oidnw_core_init(void);
 
+/* Validates weights without a GPU. The returned little-endian u32 packet is
+ * magic 0x4c444f4d, version 1, input image count (color, albedo, normal).
+ * Failures use the same ERRO packet as recording. Reset after copying it. */
+void oidnw_core_inspect_model(const uint8_t *weights, size_t weights_size,
+  const uint8_t **result, size_t *result_size);
+
 /*
  * Records the whole denoising of one image: tiles, input processing (HDR
  * transfer), the U-Net and output processing (color alpha preserved).
