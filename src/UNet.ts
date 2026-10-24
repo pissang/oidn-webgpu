@@ -21,6 +21,7 @@ import {
 } from './modelSpec';
 import {
   NativeUNetExecutor,
+  type NativeSubgroupMatrixOptions,
   type NativeUNetGemmOptions,
   type NativeUNetKernelSetting,
   type NativeUNetPrecisionSetting
@@ -122,6 +123,7 @@ class UNet {
       /** Model-independent convolution kernel selection. */
       kernel?: NativeUNetKernelSetting;
       gemm?: NativeUNetGemmOptions;
+      subgroupMatrix?: NativeSubgroupMatrixOptions;
       /** Explicit descriptor for a new OIDN topology not in the built-in registry. */
       modelSpec?: UNetModelSpec;
     } = {}
@@ -160,7 +162,12 @@ class UNet {
       this._nativeExecutor = new NativeUNetExecutor(
         this._device,
         validatedModel,
-        { precision: opts.precision, kernel: opts.kernel, gemm: opts.gemm }
+        {
+          precision: opts.precision,
+          kernel: opts.kernel,
+          gemm: opts.gemm,
+          subgroupMatrix: opts.subgroupMatrix
+        }
       );
     }
   }
@@ -236,7 +243,8 @@ class UNet {
             configured: this._nativeExecutor.kernelSetting,
             gemm: this._nativeExecutor.gemm,
             maxSpatialInputBlocks: this._nativeExecutor.maxSpatialInputBlocks,
-            subgroupsAvailable: this._nativeExecutor.subgroupsAvailable
+            subgroupsAvailable: this._nativeExecutor.subgroupsAvailable,
+            subgroupMatrix: this._nativeExecutor.subgroupMatrix
           }
         : undefined,
       webnn: this._webNNExecutor?.support,

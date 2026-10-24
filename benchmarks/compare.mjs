@@ -26,6 +26,11 @@ Options:
   --direct-gemm-only   Compare v0.4.0 Direct with current Direct and GEMM
   --baseline <commit>  Reference commit (default: nearest TFJS ancestor)
   --chrome <path>      Chrome/Chromium executable
+  --weights <name>     Model in weights/ (default: rt_hdr_calb_cnrm_large.tza)
+  --kernels <list>     Compare FP16 kernels (comma separated) against FP32
+                       implicit GEMM, e.g. implicit-gemm,subgroup-matrix
+  --matrix <list>      Subgroup-matrix variants for --kernels, as
+                       <fragments>[-f16] items, e.g. 2,4,4-f16
   --output <path>      JSON output (default: benchmarks/results/latest.json)
   --help               Show this message
 `);
@@ -41,6 +46,9 @@ function parseArgs(argv) {
     inputHDR: null,
     defaultOnly: false,
     directGemmOnly: false,
+    weights: 'rt_hdr_calb_cnrm_large.tza',
+    kernels: null,
+    matrix: null,
     output: path.join(benchmarkDirectory, 'results/latest.json')
   };
   const names = {
@@ -52,6 +60,9 @@ function parseArgs(argv) {
     'input-hdr': 'inputHDR',
     baseline: 'baseline',
     chrome: 'chrome',
+    weights: 'weights',
+    kernels: 'kernels',
+    matrix: 'matrix',
     output: 'output'
   };
   for (let index = 0; index < argv.length; index++) {
@@ -344,6 +355,12 @@ async function benchmarkVariant(browser, origin, options, variant) {
         }
         requiredFeatures.push('subgroups');
       }
+      if (config.kernel === 'subgroup-matrix') {
+        for (const feature of ['subgroups', 'chromium-experimental-subgroup-matrix']) {
+          if (!adapter.features.has(feature)) return { skipped: `${feature} is unavailable` };
+          requiredFeatures.push(feature);
+        }
+      }
       if (adapter.features.has('timestamp-query')) requiredFeatures.push('timestamp-query');
       const device = await adapter.requestDevice({
         requiredFeatures,
@@ -368,6 +385,7 @@ async function benchmarkVariant(browser, origin, options, variant) {
         runtimeOptions.engine = config.engine ?? 'auto';
         runtimeOptions.precision = config.precision;
         runtimeOptions.kernel = config.kernel;
+        if (config.subgroupMatrix) runtimeOptions.subgroupMatrix = config.subgroupMatrix;
         runtimeOptions.dynamicTile = false;
       }
       let unet;
@@ -512,10 +530,11 @@ async function benchmarkVariant(browser, origin, options, variant) {
       };
     }, {
       moduleUrl: `${origin}/${variant.bundle}/oidn.js`,
-      modelUrl: `${origin}/weights/rt_hdr_calb_cnrm_large.tza`,
+      modelUrl: `${origin}/weights/model.tza`,
       baseline: variant.baseline,
       precision: variant.precision,
       kernel: variant.kernel,
+      subgroupMatrix: variant.subgroupMatrix,
       engine: variant.engine,
       nativeOptions: variant.nativeOptions,
       width: options.width,
@@ -600,7 +619,7 @@ async function main() {
   }
   const chrome = options.chrome || defaultChrome();
   if (!chrome) throw new Error('Chrome/Chromium not found; pass --chrome or CHROME_PATH');
-  const baselineCommit = options.defaultOnly
+  const baselineCommit = options.defaultOnly || options.kernels
     ? null
     : await findTFJSBaseline(options.baseline);
   const currentCommit = await gitText(['rev-parse', 'HEAD']);
@@ -650,7 +669,7 @@ async function main() {
 
     const serverFiles = [
       ['/current/oidn.js', path.join(projectRoot, 'dist/oidn.js')],
-      ['/weights/rt_hdr_calb_cnrm_large.tza', path.join(projectRoot, 'weights/rt_hdr_calb_cnrm_large.tza')]
+      ['/weights/model.tza', path.join(projectRoot, 'weights', options.weights)]
     ];
     if (baselineCommit) serverFiles.push(['/baseline/oidn.js', path.join(baselineRoot, 'dist/oidn.js')]);
     if (inputPath) serverFiles.push(['/input.bin', inputPath]);
@@ -663,7 +682,47 @@ async function main() {
         '--enable-features=UseSkiaRenderer,WebMachineLearningNeuralNetwork'
       ]
     });
-    const variants = options.directGemmOnly
+    const variants = options.kernels
+      ? [
+          {
+            label: 'WGSL FP32 Implicit GEMM (reference)',
+            bundle: 'current',
+            baseline: true,
+            nativeOptions: true,
+            engine: 'auto',
+            precision: 'fp32',
+            kernel: 'implicit-gemm'
+          },
+          ...options.kernels.split(',').flatMap((kernel) =>
+            kernel === 'subgroup-matrix'
+              ? (options.matrix ?? '').split(',').filter(Boolean).concat(options.matrix ? [] : ['default'])
+                  .map((item) => {
+                    const [fragments, accumulation] = item.split('-');
+                    const subgroupMatrix = item === 'default'
+                      ? undefined
+                      : { outputFragments: Number(fragments), ...(accumulation ? { accumulation } : {}) };
+                    return {
+                      label: `WGSL FP16 subgroup-matrix${subgroupMatrix ? ` ${item}` : ''}`,
+                      bundle: 'current',
+                      baseline: false,
+                      nativeOptions: true,
+                      engine: 'auto',
+                      precision: 'fp16',
+                      kernel,
+                      subgroupMatrix
+                    };
+                  })
+              : [{
+                  label: `WGSL FP16 ${kernel}`,
+                  bundle: 'current',
+                  baseline: false,
+                  nativeOptions: true,
+                  engine: 'auto',
+                  precision: 'fp16',
+                  kernel
+                }])
+        ]
+      : options.directGemmOnly
       ? [
           {
             label: `v0.4.0 Direct (${baselineCommit.slice(0, 7)})`,
@@ -801,7 +860,7 @@ async function main() {
         defaultOnly: options.defaultOnly,
         directGemmOnly: options.directGemmOnly,
         referenceRuntime: Boolean(options.baseline),
-        model: 'rt_hdr_calb_cnrm_large.tza',
+        model: options.weights,
         gpuQueueCompletionIncluded: true
       },
       browser: chrome,

@@ -18,6 +18,12 @@ export async function initWebGPUBackend() {
   if (adapter.features.has('shader-f16')) {
     requiredFeatures.push('shader-f16');
   }
+  // Experimental: only exposed by Chrome with unsafe WebGPU features enabled.
+  for (const feature of ['subgroups', 'chromium-experimental-subgroup-matrix']) {
+    if (adapter.features.has(feature)) {
+      requiredFeatures.push(feature as GPUFeatureName);
+    }
+  }
   deviceDescriptor.requiredFeatures = requiredFeatures;
 
   const adapterLimits = adapter.limits;
