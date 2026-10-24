@@ -469,6 +469,7 @@ async function benchmarkVariant(browser, origin, options, variant) {
               color: image(buffers.color),
               albedo: image(buffers.albedo),
               normal: image(buffers.normal),
+              error: reject,
               done: (output) => {
                 lastOutput = output;
                 resolve();
@@ -528,6 +529,12 @@ async function benchmarkVariant(browser, origin, options, variant) {
         outputSamples,
         runtimeInfo,
         supportsFP16,
+        enabledFeatures: [...device.features],
+        deviceLimits: {
+          maxBufferSize: device.limits.maxBufferSize,
+          maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+          maxComputeWorkgroupStorageSize: device.limits.maxComputeWorkgroupStorageSize
+        },
         adapter: {
           vendor: adapterInfo.vendor ?? '',
           architecture: adapterInfo.architecture ?? '',
@@ -903,7 +910,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : error);
-  process.exitCode = 1;
-});
+export { benchmarkVariant, defaultChrome, startServer, summarize };
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : error);
+    process.exitCode = 1;
+  });
+}
