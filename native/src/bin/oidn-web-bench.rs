@@ -40,22 +40,37 @@ fn main() -> Result<(), String> {
     }))
     .map_err(|e| format!("no adapter: {e}"))?;
     let info = adapter.get_info();
-    let wanted = wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP;
+    let mut wanted = wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP;
+    if kernel == Kernel::SubgroupMatrix {
+        wanted |= wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX;
+        for properties in adapter.cooperative_matrix_properties() {
+            println!("cooperative matrix: {properties:?}");
+        }
+    }
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_features: adapter.features() & wanted,
         required_limits: adapter.limits(),
+        // SAFETY: cooperative matrices are an experimental wgpu feature.
+        experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
         ..Default::default()
     }))
     .map_err(|e| format!("no device: {e}"))?;
-    println!("{} ({:?}), features {:?}", info.name, info.backend, device.features() & wanted);
+    println!(
+        "{} ({:?}), subgroup {}-{}, features {:?}",
+        info.name,
+        info.backend,
+        info.subgroup_min_size,
+        info.subgroup_max_size,
+        device.features() & wanted
+    );
 
     let config = NetworkConfig { width, height, precision, kernel };
     let created = Instant::now();
     let network = if args.iter().any(|arg| arg == "--unchecked") {
         // SAFETY: benchmarking the generated kernels without runtime checks.
-        unsafe { Network::new_unchecked(&device, &info, &tza, &config, None)? }
+        unsafe { Network::new_unchecked(&device, &adapter, &tza, &config, None)? }
     } else {
-        Network::new(&device, &info, &tza, &config, None)?
+        Network::new(&device, &adapter, &tza, &config, None)?
     };
     println!(
         "planned in {:.1} ms, resources created in {:.1} ms",

@@ -4,6 +4,9 @@
 //   npm run build && cargo build --release --manifest-path native/Cargo.toml
 //   node benchmarks/native-compare.mjs [--weights rt_hdr_alb_nrm.tza] [--size 256]
 //     [--kernel implicit-gemm] [--chrome PATH] [--unchecked]
+//     [--browser-kernel K] [--browser-precision fp16|fp32]
+// The browser runs the same kernel and precision unless told otherwise, so
+// the default comparison expects bit-identical outputs.
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
@@ -19,6 +22,8 @@ const option = (name, fallback) => (args.includes(name) ? args[args.indexOf(name
 const weights = option('--weights', 'rt_hdr_alb_nrm.tza');
 const size = Number(option('--size', '256'));
 const kernel = option('--kernel', 'implicit-gemm');
+const browserKernel = option('--browser-kernel', kernel);
+const browserPrecision = option('--browser-precision', 'fp16');
 const chrome = option('--chrome', process.env.CHROME_PATH) ??
   ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium']
     .find((candidate) => existsSync(candidate));
@@ -67,17 +72,17 @@ try {
   try {
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
-    browserOutput = await page.evaluate(async ({ size, kernel }) => {
+    browserOutput = await page.evaluate(async ({ size, kernel, precision }) => {
       const oidn = await import('/oidn.js');
       const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
       const device = await adapter.requestDevice({ requiredFeatures: ['shader-f16'] });
       const tensors = oidn.parseTZA(await (await fetch('/model.tza')).arrayBuffer());
       const model = oidn.validateUNetModel(tensors, oidn.detectUNetModelSpec(tensors));
-      const executor = new oidn.NativeUNetExecutor(device, model, { precision: 'fp16', kernel });
+      const executor = new oidn.NativeUNetExecutor(device, model, { precision, kernel });
       await executor.prepare();
       const input = new Float32Array(await (await fetch('/input.f32')).arrayBuffer());
       return Array.from(await executor.executeCPU(input, size, size));
-    }, { size, kernel });
+    }, { size, kernel: browserKernel, precision: browserPrecision });
   } finally {
     await browser.close();
     server.close();
@@ -93,7 +98,7 @@ try {
     maxReference = Math.max(maxReference, Math.abs(browserOutput[index]));
   }
   const identical = native.every((value, index) => Object.is(value, Math.fround(browserOutput[index])));
-  console.log(`${weights} ${size}x${size} ${kernel}: MAE ${(sum / native.length).toExponential(3)}, ` +
+  console.log(`${weights} ${size}x${size} native ${kernel} vs browser ${browserKernel}/${browserPrecision}: MAE ${(sum / native.length).toExponential(3)}, ` +
     `max ${max.toExponential(3)} (output max ${maxReference.toFixed(3)}), bit-identical ${identical}`);
 } finally {
   await rm(temporary, { recursive: true, force: true });

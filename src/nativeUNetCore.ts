@@ -72,6 +72,11 @@ export interface NativeSubgroupMatrixConfig {
   /** M = N = K. */
   size: 8 | 16;
   subgroupSize: number;
+  /**
+   * WGSL spelling: Chrome's `chromium_experimental_subgroup_matrix`, or
+   * wgpu/Naga's `wgpu_cooperative_matrix` for native hosts.
+   */
+  dialect: 'tint' | 'naga';
 }
 
 /** Experimental subgroup-matrix tile tuning; not covered by semver. */
@@ -1651,6 +1656,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 const SUBGROUP_MATRIX_FEATURE = 'chromium-experimental-subgroup-matrix';
+/** wgpu's feature name; native hosts report it through their device. */
+const COOPERATIVE_MATRIX_FEATURE = 'wgpu-cooperative-matrix';
 const SUBGROUP_MATRIX_TILE_WIDTH = 32;
 // Four subgroups own two output rows each, matching the 2x2 pooling windows.
 const SUBGROUP_MATRIX_TILE_HEIGHT = 8;
@@ -1677,10 +1684,12 @@ export function selectSubgroupMatrixConfig(
   device: OIDNGPUDevice,
   accumulation: 'f32' | 'f16' = 'f32'
 ): NativeSubgroupMatrixConfig | undefined {
-  if (!device.features.has(SUBGROUP_MATRIX_FEATURE) ||
-      !device.features.has('subgroups')) {
-    return undefined;
-  }
+  const dialect = device.features.has(SUBGROUP_MATRIX_FEATURE)
+    ? 'tint'
+    : device.features.has(COOPERATIVE_MATRIX_FEATURE)
+      ? 'naga'
+      : undefined;
+  if (!dialect || !device.features.has('subgroups')) return undefined;
   const info = (device as OIDNGPUDevice & { adapterInfo?: OIDNGPUAdapterInfo }).adapterInfo;
   const subgroupSize = info?.subgroupMaxSize ?? 0;
   if (!info || !subgroupSize || info.subgroupMinSize !== subgroupSize) return undefined;
@@ -1700,7 +1709,8 @@ export function selectSubgroupMatrixConfig(
           componentType: componentType as 'f16' | 'f32',
           resultType: resultType as 'f16' | 'f32',
           size,
-          subgroupSize
+          subgroupSize,
+          dialect
         };
       }
     }
@@ -1758,9 +1768,20 @@ function createSubgroupMatrixConvShader(
   const threads = SUBGROUP_MATRIX_SUBGROUPS * config.subgroupSize;
   const valueType = storageVecType(precision);
   const outputType = storageVecType(outputPrecision);
-  const left = `subgroup_matrix_left<${component}, ${size}, ${size}>`;
-  const right = `subgroup_matrix_right<${component}, ${size}, ${size}>`;
-  const resultMatrix = `subgroup_matrix_result<${result}, ${size}, ${size}>`;
+  const naga = config.dialect === 'naga';
+  const matrixType = (scalar: string, tint: string, role: string) => naga
+    ? `coop_mat${size}x${size}<${scalar}, ${role}>`
+    : `subgroup_matrix_${tint}<${scalar}, ${size}, ${size}>`;
+  const left = matrixType(component, 'left', 'A');
+  const right = matrixType(component, 'right', 'B');
+  const resultMatrix = matrixType(result, 'result', 'C');
+  const load = (type: string, array: string, offset: string, stride: string) => naga
+    ? `coopLoadT<${type}>(&${array}[${offset}], ${stride})`
+    : `subgroupMatrixLoad<${type}, row_major>(&${array}, ${offset}, ${stride})`;
+  const store = (array: string, offset: string, value: string, stride: string) => naga
+    ? `coopStoreT(${value}, &${array}[${offset}], ${stride});`
+    : `subgroupMatrixStore<row_major>(&${array}, ${offset}, ${value}, ${stride});`;
+  const multiplyAdd = naga ? 'coopMultiplyAdd' : 'subgroupMatrixMultiplyAccumulate';
   const accumulators: string[] = [];
   for (let row = 0; row < 2; row++) {
     for (let pixel = 0; pixel < pixelFragments; pixel++) {
@@ -1770,19 +1791,19 @@ function createSubgroupMatrixConvShader(
     }
   }
   const declarations = accumulators
-    .map((name) => `var ${name} = ${resultMatrix}();`)
+    .map((name) => naga ? `var ${name}: ${resultMatrix};` : `var ${name} = ${resultMatrix}();`)
     .join('\n  ');
   const rightLoads = Array.from({ length: outputFragments }, (_, fragment) =>
-    `let b${fragment} = subgroupMatrixLoad<${right}, row_major>(&weightTile, tap * ${size * outputChannels}u + ${fragment * size}u, ${outputChannels}u);`
+    `let b${fragment} = ${load(right, 'weightTile', `tap * ${size * outputChannels}u + ${fragment * size}u`, `${outputChannels}u`)};`
   ).join('\n      ');
   const multiplies: string[] = [];
   for (let row = 0; row < 2; row++) {
     for (let pixel = 0; pixel < pixelFragments; pixel++) {
       multiplies.push(
         `{
-        let a = subgroupMatrixLoad<${left}, row_major>(&inputTile, ((rowBase + ${row}u + ky) * ${haloWidth}u + ${pixel * size}u + kx) * ${size}u, ${size}u);
+        let a = ${load(left, 'inputTile', `((rowBase + ${row}u + ky) * ${haloWidth}u + ${pixel * size}u + kx) * ${size}u`, `${size}u`)};
         ${Array.from({ length: outputFragments }, (_, fragment) =>
-          `acc${row}_${pixel}_${fragment} = subgroupMatrixMultiplyAccumulate(a, b${fragment}, acc${row}_${pixel}_${fragment});`
+          `acc${row}_${pixel}_${fragment} = ${multiplyAdd}(a, b${fragment}, acc${row}_${pixel}_${fragment});`
         ).join('\n        ')}
       }`
       );
@@ -1793,7 +1814,7 @@ function createSubgroupMatrixConvShader(
     for (let fragment = 0; fragment < outputFragments; fragment++) {
       epilogues.push(`{
     ${Array.from({ length: pixelFragments }, (_, pixel) =>
-      `subgroupMatrixStore<row_major>(&resultTile, resultBase + ${pixel * size * size}u, acc${row}_${pixel}_${fragment}, ${size}u);`
+      store('resultTile', `resultBase + ${pixel * size * size}u`, `acc${row}_${pixel}_${fragment}`, `${size}u`)
     ).join('\n    ')}
     workgroupBarrier();
     let outputY = tileY + rowBase + ${row}u;
@@ -1859,9 +1880,13 @@ function createSubgroupMatrixConvShader(
   const imageHeight = decoder ? 'params.outputHeight' : 'params.inputHeight';
   const needsF16 = precision === 'fp16' || outputPrecision === 'fp16' ||
     component === 'f16' || result === 'f16';
-  return /* wgsl */ `${needsF16 ? 'enable f16;\n' : ''}enable subgroups;
+  // Naga provides subgroups without (and rejects) `enable subgroups`.
+  const extensions = naga
+    ? 'enable wgpu_cooperative_matrix;'
+    : `enable subgroups;
 enable chromium_experimental_subgroup_matrix;
-diagnostic(off, chromium_experimental.subgroup_matrix_uniformity);
+diagnostic(off, chromium_experimental.subgroup_matrix_uniformity);`;
+  return /* wgsl */ `${needsF16 ? 'enable f16;\n' : ''}${extensions}
 ${params}
 
 var<workgroup> inputTile: array<${component}, ${haloRows * haloWidth * size}>;
@@ -2375,7 +2400,7 @@ export class NativeUNetCore {
     const config = this.subgroupMatrix!;
     return {
       key: `subgroup-matrix/${this.precision}/${outputPrecision}/` +
-        `${config.componentType}-${config.resultType}-${config.size}-sg${config.subgroupSize}/` +
+        `${config.dialect}/${config.componentType}-${config.resultType}-${config.size}-sg${config.subgroupSize}/` +
         `n${this.subgroupMatrixOutputFragments}/${key}`,
       kernel: 'subgroup-matrix',
       code: createSubgroupMatrixConvShader(

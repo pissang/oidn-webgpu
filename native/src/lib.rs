@@ -244,9 +244,10 @@ impl Program {
 }
 
 /// Device capabilities passed to the planner (config words 5..).
-fn capability_words(device: &wgpu::Device, adapter_info: &wgpu::AdapterInfo) -> Vec<u32> {
+fn capability_words(device: &wgpu::Device, adapter: &wgpu::Adapter) -> Vec<u32> {
     let features = device.features();
     let limits = device.limits();
+    let info = adapter.get_info();
     let mut bits = 0;
     if features.contains(wgpu::Features::SHADER_F16) {
         bits |= 1;
@@ -254,17 +255,41 @@ fn capability_words(device: &wgpu::Device, adapter_info: &wgpu::AdapterInfo) -> 
     if features.contains(wgpu::Features::SUBGROUP) {
         bits |= 2;
     }
-    vec![
+    let mut matrices = Vec::new();
+    if features.contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX) {
+        bits |= 8;
+        let scalar = |scalar| match scalar {
+            wgpu::CooperativeScalarType::F32 => Some(0),
+            wgpu::CooperativeScalarType::F16 => Some(1),
+            _ => None,
+        };
+        for properties in adapter.cooperative_matrix_properties() {
+            if let (Some(component), Some(result)) = (scalar(properties.ab_type), scalar(properties.cr_type)) {
+                matrices.push([component, result, properties.m_size, properties.n_size, properties.k_size]);
+            }
+        }
+    }
+    // wgpu reports Metal's possible range (4-64); Apple GPUs always run
+    // 32-wide simdgroups, which the matrix kernels rely on.
+    let (subgroup_min, subgroup_max) =
+        if info.backend == wgpu::Backend::Metal && info.name.starts_with("Apple") {
+            (32, 32)
+        } else {
+            (info.subgroup_min_size, info.subgroup_max_size)
+        };
+    let mut words = vec![
         bits,
         limits.max_compute_workgroup_storage_size,
         limits.max_compute_invocations_per_workgroup,
         limits.max_compute_workgroup_size_x,
         limits.max_compute_workgroup_size_y,
         limits.max_compute_workgroups_per_dimension,
-        adapter_info.subgroup_min_size,
-        adapter_info.subgroup_max_size,
-        0,
-    ]
+        subgroup_min,
+        subgroup_max,
+        matrices.len() as u32,
+    ];
+    words.extend(matrices.into_iter().flatten());
+    words
 }
 
 /// One planned network for a fixed input size, ready to encode.
@@ -290,12 +315,12 @@ impl Network {
     /// space and allow `STORAGE` use.
     pub fn new(
         device: &wgpu::Device,
-        adapter_info: &wgpu::AdapterInfo,
+        adapter: &wgpu::Adapter,
         tza: &[u8],
         config: &NetworkConfig,
         inputs: Option<&[wgpu::Buffer]>,
     ) -> Result<Self> {
-        Self::create(device, adapter_info, tza, config, inputs, false)
+        Self::create(device, adapter, tza, config, inputs, false)
     }
 
     /// Like [`Network::new`], but compiles the shaders without runtime bounds
@@ -310,24 +335,24 @@ impl Network {
     /// kernel bug here can read or write arbitrary GPU memory.
     pub unsafe fn new_unchecked(
         device: &wgpu::Device,
-        adapter_info: &wgpu::AdapterInfo,
+        adapter: &wgpu::Adapter,
         tza: &[u8],
         config: &NetworkConfig,
         inputs: Option<&[wgpu::Buffer]>,
     ) -> Result<Self> {
-        Self::create(device, adapter_info, tza, config, inputs, true)
+        Self::create(device, adapter, tza, config, inputs, true)
     }
 
     fn create(
         device: &wgpu::Device,
-        adapter_info: &wgpu::AdapterInfo,
+        adapter: &wgpu::Adapter,
         tza: &[u8],
         config: &NetworkConfig,
         inputs: Option<&[wgpu::Buffer]>,
         unchecked: bool,
     ) -> Result<Self> {
         let mut words = vec![1, config.width, config.height, config.precision as u32, config.kernel as u32];
-        words.extend(capability_words(device, adapter_info));
+        words.extend(capability_words(device, adapter));
         let started = std::time::Instant::now();
         let program = Program::parse(&record(tza, &words)?)?;
         let planning_ms = started.elapsed().as_secs_f64() * 1e3;

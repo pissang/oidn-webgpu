@@ -15,7 +15,8 @@ import { RecordingDevice, type RecordedBuffer } from './recordingDevice.js';
  *   0 version (1), 1 width, 2 height,
  *   3 precision (0 auto, 1 fp32, 2 fp16),
  *   4 kernel (0 auto, 1 implicit-gemm, 2 direct, 3 subgroup-matrix),
- *   5 features (1 shader-f16, 2 subgroups, 4 chromium-experimental-subgroup-matrix),
+ *   5 features (1 shader-f16, 2 subgroups, 4 chromium-experimental-subgroup-matrix,
+ *     8 wgpu-cooperative-matrix),
  *   6 maxComputeWorkgroupStorageSize, 7 maxComputeInvocationsPerWorkgroup,
  *   8 maxComputeWorkgroupSizeX, 9 maxComputeWorkgroupSizeY,
  *   10 maxComputeWorkgroupsPerDimension, 11 subgroupMinSize, 12 subgroupMaxSize,
@@ -52,6 +53,7 @@ export function recordNetwork(tza: Uint8Array, config: Uint8Array): Uint8Array {
   if (words[5] & 1) features.push('shader-f16');
   if (words[5] & 2) features.push('subgroups');
   if (words[5] & 4) features.push('chromium-experimental-subgroup-matrix');
+  if (words[5] & 8) features.push('wgpu-cooperative-matrix');
   const configs: { componentType: string; resultComponentType: string; M: number; N: number; K: number }[] = [];
   for (let index = 0; index < words[13]; index++) {
     const base = 14 + index * 5;
