@@ -38,7 +38,7 @@ Benchmarks and GPU checks: [docs/development.md#benchmarks-and-gpu-checks](docs/
 
 ## Rules
 
-1. **Shared core affects native.** `src/tza.ts`, `modelSpec.ts`, `graphOptimizer.ts`, `nativeUNetCore.ts`, `finalRgbShader.ts`, `gpuTypes.ts`, `hdrTransfer.ts`, `tileScheduler.ts`, `resourceTracker.ts` and `src/native/*` are compiled into the native library. After editing them, run both `npm test` and the native unit tests.
+1. **Shared core affects native.** `src/tza.ts`, `modelSpec.ts`, `graphOptimizer.ts`, `nativeUNetCore.ts`, `finalRgbShader.ts`, `gpuTypes.ts`, `hdrTransfer.ts`, `sanitize.ts`, `tileScheduler.ts`, `resourceTracker.ts` and `src/native/*` are compiled into the native library. After editing them, run both `npm test` and the native unit tests.
 2. **Keep shared code scriptc-compatible.** No DOM or browser globals; GPU access only through the `OIDNGPU*` types in `src/gpuTypes.ts`. Async GPU code goes in browser-only files (`src/nativeUNet.ts`, `src/UNet.ts`).
 3. **Wire formats change in pairs.** The config and program formats documented at the top of `src/native/program.ts` are parsed by `native/src/lib.rs`. Change both sides and bump the format version.
 4. **The C header is an ABI.** `native/include/oidn_webgpu.h` must match `native/src/capi.rs`: function signatures, struct layout and enum values. Follow the header's versioning (`OIDNW_API_VERSION` and `oidnw_api_version()`): a minor bump may only add; removals and layout changes need a major bump. `native/tests/abi.c` checks defaults and error reporting.

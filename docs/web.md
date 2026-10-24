@@ -67,6 +67,7 @@ All images are RGBA, row-major, top row first, with the same width and height.
 - GPU HDR color is used at scale 1. Pre-scale the whole image yourself (for example by exposure) if its values are far from 1.
 - The GPU output buffer is reused by the next execution and freed by `dispose()`. Copy it if you need it longer.
 - GPU inputs are supported with `hdr: true` and `aux: true` models.
+- Inputs are sanitized like OIDN: NaN becomes 0, then color is clamped to [0, 1] (LDR) or [0, FLT_MAX] after scaling (HDR), and albedo and normals to [0, 1]. The network output is sanitized the same way before the inverse transfer, so output is never NaN or negative and LDR output is at most 1. Extreme HDR input (for example +inf) can still produce +inf output.
 
 ## Run: `tileExecute`
 

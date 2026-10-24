@@ -38,7 +38,7 @@ The browser and native runtimes share one TypeScript core. The native build comp
 
 | Compiled into the native core (shared) | Browser-only |
 | --- | --- |
-| `src/tza.ts`, `src/modelSpec.ts`, `src/graphOptimizer.ts`, `src/nativeUNetCore.ts`, `src/finalRgbShader.ts`, `src/gpuTypes.ts`, `src/hdrTransfer.ts`, `src/tileScheduler.ts`, `src/resourceTracker.ts`, `src/native/*` | `src/main.ts`, `src/UNet.ts`, `src/nativeUNet.ts`, `src/process.ts`, `src/backend.ts`, `src/webnnUNet.ts`, `src/WGPUComputePass.ts`, `src/WGPUFullQuadPass.ts`, `src/hdr.ts` |
+| `src/tza.ts`, `src/modelSpec.ts`, `src/graphOptimizer.ts`, `src/nativeUNetCore.ts`, `src/finalRgbShader.ts`, `src/gpuTypes.ts`, `src/hdrTransfer.ts`, `src/sanitize.ts`, `src/tileScheduler.ts`, `src/resourceTracker.ts`, `src/native/*` | `src/main.ts`, `src/UNet.ts`, `src/nativeUNet.ts`, `src/process.ts`, `src/backend.ts`, `src/webnnUNet.ts`, `src/WGPUComputePass.ts`, `src/WGPUFullQuadPass.ts`, `src/hdr.ts` |
 
 Consequences:
 
@@ -108,7 +108,7 @@ Browser scripts drive headless Chrome through `playwright-core`. All of them hon
 | `oidn-webgpu-bench --weights W --width N --height N` | Native network timing and output dumps (`cargo run --release --manifest-path native/Cargo.toml --bin oidn-webgpu-bench -- ...`). |
 | `node benchmarks/mac-performance.mjs --oidn-library /path/to/libOpenImageDenoise.dylib` | Pinned 0.5.0/current Chrome, Chrome subgroup matrix, `oidn-web(native wgpu)` and official OIDN Metal; Small/Base/Large at 512², 1080p and 2560x1440. Builds both revisions and native benchmark automatically. |
 | `cargo run --release --manifest-path native/Cargo.toml --bin oidn-webgpu-denoise-bench -- --weights W --width N --height N` | Native full-image GPU-buffer latency, including preprocessing and output conversion. Runtime checks off by default; `--runtime-checks` enables them. |
-| `node scripts/*GpuCheck.mjs` | Kernel correctness checks in Chrome against CPU references. |
+| `node scripts/*GpuCheck.mjs` | Correctness checks in Chrome: kernels against CPU references, and input/output sanitizing (`sanitizeGpuCheck.mjs`). |
 
 Each script's header comment lists its options.
 

@@ -99,6 +99,7 @@ cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- 
 - **Color:** linear RGB. LDR in [0, 1]; HDR nonnegative. Pass the averaged color, not an unnormalized sample sum. Output keeps the color's alpha.
 - **Albedo:** linear RGB in [0, 1]. Alpha is ignored.
 - **Normal:** world- or view-space shading normals with signed components in [-1, 1]; unit length is not required. Like OIDN, the library clamps them to [-1, 1] and encodes them as `n * 0.5 + 0.5` for the network. Remap normals stored in [0, 1] first ([OIDN conventions](https://www.openimagedenoise.org/documentation.html#normals)); the browser package takes the [0, 1] form instead. Alpha is ignored.
+- **Sanitizing:** like OIDN, NaN becomes 0 and values are clamped to the ranges above (HDR color to [0, FLT_MAX] after `input_scale`). The network output is sanitized before the inverse transfer: output is never NaN or negative, LDR output is at most 1, and extreme HDR input (for example +inf) can produce +inf.
 
 ### Options
 
