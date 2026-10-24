@@ -2853,6 +2853,7 @@ export class NativeUNetCore {
           finalRgbSharedMemoryBytes(this.precision, inputBlocks, true) <=
             this._device.limits.maxComputeWorkgroupStorageSize);
       if (
+        kernel !== 'subgroup-matrix' &&
         isFinal && this._model.convChannels.get(node.id)!.outputChannels === 3 &&
         (this.kernelSetting === 'auto' || this.kernelSetting === 'implicit-gemm' ||
           this.kernelSetting === 'subgroup-matrix') &&
@@ -3119,9 +3120,13 @@ export class NativeUNetCore {
    * Output fragments per workgroup for a subgroup-matrix layer: the default
    * unless that leaves fewer than SUBGROUP_MATRIX_MIN_WORKGROUPS workgroups,
    * where one fragment keeps more of the GPU busy (low-resolution layers).
+   * Never more fragments than the output channels fill (the final RGB layer).
    */
   private _subgroupMatrixFragmentsFor(shape: ModelValueShape) {
-    const fragments = this.subgroupMatrixOutputFragments;
+    const fragments = Math.min(
+      this.subgroupMatrixOutputFragments,
+      Math.ceil(blocksForChannels(shape.channels) * 4 / this.subgroupMatrix!.size)
+    );
     if (this._subgroupMatrixFixedFragments || fragments === 1) return fragments;
     const workgroups = Math.ceil(shape.width / SUBGROUP_MATRIX_TILE_WIDTH) *
       Math.ceil(shape.height / SUBGROUP_MATRIX_TILE_HEIGHT) *
@@ -3187,7 +3192,9 @@ export class NativeUNetCore {
       return this.subgroupsAvailable ? 'subgroup' : 'direct';
     }
     if (this.kernelSetting === 'subgroup-matrix') {
-      if (isFinal) return 'direct';
+      // The 64-thread final RGB kernel is far below matrix throughput on
+      // native M4 Max; Chrome keeps it until measured there.
+      if (isFinal) return this.subgroupMatrix?.dialect === 'naga' ? 'subgroup-matrix' : 'direct';
       return this.subgroupMatrix ? 'subgroup-matrix' : 'implicit-gemm';
     }
     if (!isFinal) return 'implicit-gemm';

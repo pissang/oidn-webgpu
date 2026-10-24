@@ -18,6 +18,7 @@ All notable changes to this project are documented in this file.
 - Default FP16 GEMM denoising is faster on the tested Apple M4 Max, with increased first-time initialization cost. Outputs differ slightly from the previous FP16 path; `gemm: { decoderSubPixel: false }` restores its decoder calculation. FP32 defaults are unchanged.
 - Native denoising uses less temporary GPU memory. Native FP16 GEMM also runs faster with shader runtime checks enabled on the tested Apple M4 Max.
 - Native cooperative-matrix denoising has lower execution latency on the tested Apple M4 Max. Large also uses less temporary GPU memory. Shader compilation may take longer.
+- Native cooperative-matrix denoising also computes the final RGB convolution with matrices and FP32 accumulation. Outputs differ slightly from the previous native release and are closer to FP32 results.
 - GPU profiles now sum network time across all tiles of a completed image, rather than reporting only its first tile. Image preprocessing and output conversion are excluded.
 
 ### Fixed
@@ -53,6 +54,8 @@ All oidn-web paths use FP16 weights and activations with their default accumulat
 Against `0878cca`, which already includes sanitizing, Large native 720p latency decreased from 39.65 to 37.69 ms (4.9%). It remains 9.0% slower than OIDN Metal in this comparison.
 
 A later Large native 720p optimization reduced latency from 37.68 to 37.21 ms (1.2%) and temporary GPU memory from 322.6 to 280.2 MB (13.1%), using the same device and timing protocol. The table above shows the earlier measurements.
+
+Running the final RGB convolution on cooperative matrices then reduced native 720p latency from 8.59 to 8.47 ms for Small (1.5%), 14.68 to 14.55 ms for Base (0.9%) and 37.68 to 36.33 ms for Large (3.6%), with the same protocol and baseline and current runs alternated.
 
 Input sizes: `720p` = 1280 x 720, `1080p` = 1920 x 1080, `2k` = 2560 x 1440. No outlier samples are removed; the Large 2k case had substantial variation (for example, 296.20–384.50 ms for the 0.5.0 baseline). These local timings depend on GPU load, power state, browser, model and image size. They do not measure image quality, first-use latency or interactive tiled execution.
 
