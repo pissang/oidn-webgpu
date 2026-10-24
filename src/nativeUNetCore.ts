@@ -2049,6 +2049,15 @@ function subgroupMatrixChunkLoop(
   }`;
 }
 
+/** Fixed native tap offsets preserve the chunk/tap reduction order. */
+function subgroupMatrixTapLoop(config: NativeSubgroupMatrixConfig, body: string) {
+  // Explicit taps reduce native matrix latency on M4 Max. Keep the browser
+  // shader's loop form and both paths' original accumulation order.
+  return config.dialect === 'naga'
+    ? Array.from({ length: 9 }, (_, tap) => `{ let tap = ${tap}u; ${body} }`).join('\n')
+    : `for (var tap = 0u; tap < 9u; tap++) { ${body} }`;
+}
+
 /**
  * 3x3 convolution as an implicit GEMM on subgroup matrices. Each workgroup
  * computes 8 rows x 32 pixels x (fragments x S) output channels. For every
@@ -2108,6 +2117,11 @@ function createSubgroupMatrixConvShader(
       );
     }
   }
+  const tapBody = `let ky = tap / 3u;
+      let kx = tap % 3u;
+      ${rightLoads}
+      ${multiplies.join('\n      ')}`;
+  const taps = subgroupMatrixTapLoop(config, tapBody);
   const epilogues: string[] = [];
   for (let row = 0; row < 2; row++) {
     for (let fragment = 0; fragment < outputFragments; fragment++) {
@@ -2225,12 +2239,7 @@ fn main(
         value = weights[((tap * ${inputBlocks}u + inputChannel / 4u) * ${outputBlocks}u + outputBlock) * 4u + inputChannel % 4u];
       }`
     }
-  ], /* wgsl */ `for (var tap = 0u; tap < 9u; tap++) {
-      let ky = tap / 3u;
-      let kx = tap % 3u;
-      ${rightLoads}
-      ${multiplies.join('\n      ')}
-    }`, threads, valueType, component, doubleBuffer)}
+  ], taps, threads, valueType, component, doubleBuffer)}
 
   ${epilogues.join('\n  ')}
 }
@@ -2444,6 +2453,11 @@ function createSubgroupMatrixSubpixelShader(
     }`);
     }
   }
+  const skipTapBody = `let ky = tap / 3u;
+      let kx = tap % 3u;
+      ${rightLoads('tap')}
+      ${multiplyRows((row, segment) => `((phaseY + ${row * 2}u + ky) * ${haloWidth}u + phaseX + kx + ${segment * size * 2}u) * ${size}u`, `${size * 2}u`)}`;
+  const skipTaps = subgroupMatrixTapLoop(config, skipTapBody);
   const epilogues: string[] = [];
   for (let row = 0; row < rows; row++) {
     for (let fragment = 0; fragment < outputFragments; fragment++) {
@@ -2514,12 +2528,7 @@ fn main(
   ${subgroupMatrixChunkLoop(skipChunks, [
     inputStage(haloRows, haloWidth, skipRead),
     weightStage(9, skipBlocks, SUBPIXEL_MATRICES * upBlocks * outputBlocks * 4)
-  ], /* wgsl */ `for (var tap = 0u; tap < 9u; tap++) {
-      let ky = tap / 3u;
-      let kx = tap % 3u;
-      ${rightLoads('tap')}
-      ${multiplyRows((row, segment) => `((phaseY + ${row * 2}u + ky) * ${haloWidth}u + phaseX + kx + ${segment * size * 2}u) * ${size}u`, `${size * 2}u`)}
-    }`, threads, valueType, component, doubleBuffer)}
+  ], skipTaps, threads, valueType, component, doubleBuffer)}
 
   ${epilogues.join('\n  ')}
 }
