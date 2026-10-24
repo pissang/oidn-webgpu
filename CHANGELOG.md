@@ -25,7 +25,7 @@ All notable changes to this project are documented in this file.
 
 ### Performance on Apple M4 Max
 
-Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`); current oidn-web results use optimization commit `cd1ff2f`, before the input/output sanitizing changes.
+Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`); current oidn-web results use optimization commit `cd1ff2f`, before the input/output sanitizing changes. The 720p rows were measured separately; 1080p and 2k retain the earlier measurements.
 
 Each cell shows **median milliseconds per image**, from 5 warmups and 21 measured executions. Parentheses show the **latency reduction relative to 0.5.0**, calculated as `(0.5.0 time - measured time) / 0.5.0 time x 100%`. Every execution processes one whole image and synchronizes before the next. Inputs and outputs stay in GPU-resident RGBA32F buffers. Timings include HDR preprocessing, network execution, output conversion and host synchronization; they exclude device creation, model preparation, uploads and output readback. These are wall latencies, not GPU timestamp measurements.
 
@@ -39,17 +39,17 @@ All oidn-web paths use FP16 weights and activations with their default accumulat
 
 | Model | Input | oidn-web 0.5.0 (Chrome) | oidn-web (Chrome) | oidn-web (Chrome subgroup matrix) | oidn-web(native wgpu) | OIDN Metal |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Small | 512 | 4.90 | 4.30 (↓12.2%) | 3.80 (↓22.4%) | 2.87 (↓41.4%) | 3.71 (↓24.2%) |
-| Small | 1080p | 34.60 | 30.30 (↓12.4%) | 26.30 (↓24.0%) | 19.25 (↓44.4%) | 19.15 (↓44.7%) |
-| Small | 2k | 61.00 | 53.00 (↓13.1%) | 45.80 (↓24.9%) | 33.71 (↓44.7%) | 33.10 (↓45.7%) |
-| Base | 512 | 8.50 | 7.10 (↓16.5%) | 6.20 (↓27.1%) | 4.69 (↓44.8%) | 5.10 (↓40.0%) |
-| Base | 1080p | 64.10 | 53.60 (↓16.4%) | 47.00 (↓26.7%) | 38.13 (↓40.5%) | 38.40 (↓40.1%) |
-| Base | 2k | 123.80 | 102.30 (↓17.4%) | 90.50 (↓26.9%) | 72.31 (↓41.6%) | 73.39 (↓40.7%) |
-| Large | 512 | 22.30 | 18.40 (↓17.5%) | 17.70 (↓20.6%) | 13.96 (↓37.4%) | 11.87 (↓46.8%) |
-| Large | 1080p | 170.70 | 145.00 (↓15.1%) | 134.50 (↓21.2%) | 111.10 (↓34.9%) | 96.04 (↓43.7%) |
-| Large | 2k | 335.00 | 307.00 (↓8.4%) | 262.70 (↓21.6%) | 216.71 (↓35.3%) | 212.30 (↓36.6%) |
+| Small | 720p | 15.50 ms | 13.40 ms (↓13.5%) | 11.80 ms (↓23.9%) | 8.86 ms (↓42.8%) | 8.61 ms (↓44.4%) |
+| Small | 1080p | 34.60 ms | 30.30 ms (↓12.4%) | 26.30 ms (↓24.0%) | 19.25 ms (↓44.4%) | 19.15 ms (↓44.7%) |
+| Small | 2k | 61.00 ms | 53.00 ms (↓13.1%) | 45.80 ms (↓24.9%) | 33.71 ms (↓44.7%) | 33.10 ms (↓45.7%) |
+| Base | 720p | 27.80 ms | 22.60 ms (↓18.7%) | 20.00 ms (↓28.1%) | 14.99 ms (↓46.1%) | 15.69 ms (↓43.6%) |
+| Base | 1080p | 64.10 ms | 53.60 ms (↓16.4%) | 47.00 ms (↓26.7%) | 38.13 ms (↓40.5%) | 38.40 ms (↓40.1%) |
+| Base | 2k | 123.80 ms | 102.30 ms (↓17.4%) | 90.50 ms (↓26.9%) | 72.31 ms (↓41.6%) | 73.39 ms (↓40.7%) |
+| Large | 720p | 63.30 ms | 53.70 ms (↓15.2%) | 50.00 ms (↓21.0%) | 39.56 ms (↓37.5%) | 34.58 ms (↓45.4%) |
+| Large | 1080p | 170.70 ms | 145.00 ms (↓15.1%) | 134.50 ms (↓21.2%) | 111.10 ms (↓34.9%) | 96.04 ms (↓43.7%) |
+| Large | 2k | 335.00 ms | 307.00 ms (↓8.4%) | 262.70 ms (↓21.6%) | 216.71 ms (↓35.3%) | 212.30 ms (↓36.6%) |
 
-Input sizes: `512` = 512 x 512, `1080p` = 1920 x 1080, `2k` = 2560 x 1440. No outlier samples are removed; the Large 2k case had substantial variation (for example, 296.20–384.50 ms for the 0.5.0 baseline). These local timings depend on GPU load, power state, browser, model and image size. They do not measure image quality, first-use latency or interactive tiled execution.
+Input sizes: `720p` = 1280 x 720, `1080p` = 1920 x 1080, `2k` = 2560 x 1440. No outlier samples are removed; the Large 2k case had substantial variation (for example, 296.20–384.50 ms for the 0.5.0 baseline). These local timings depend on GPU load, power state, browser, model and image size. They do not measure image quality, first-use latency or interactive tiled execution.
 
 The [Mac benchmark suite](docs/development.md#benchmarks-and-gpu-checks) can reproduce these cases and retains every timing sample, P95, model hash, source revision, selected kernel and resource count in its local JSON report.
 
