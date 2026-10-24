@@ -1,154 +1,254 @@
 # oidn-webgpu native
 
-Experimental native GPU denoising through wgpu on Metal, Vulkan or Direct3D 12. Rust hosts can share their GPU device and image buffers; the C API creates a device and accepts CPU images. The API and results may change between versions. GPU denoising has only been verified on macOS with Apple silicon; package checks in CI do not validate GPU execution on Windows or Linux.
+Experimental native GPU denoising through [wgpu](https://wgpu.rs) on Metal, Vulkan or Direct3D 12. It runs the same WGSL kernels as the browser package.
 
-## Rust: install
+**Status:** the API and results may change between versions. GPU denoising has only been verified on macOS with Apple silicon. CI builds and checks packages for Windows and Linux but does not run them on a GPU.
 
-Add a git dependency, or point to a local checkout's `native` directory:
+- [Choose an API](#choose-an-api)
+- [Rust API](#rust-api)
+- [C API](#c-api)
+- [Precompiled packages](#precompiled-packages)
+- [Build configuration](#build-configuration)
+- [Performance](#performance)
+
+## Choose an API
+
+| API | Use when | GPU device | Images | Header / type |
+| --- | --- | --- | --- | --- |
+| Rust `Denoiser` | Your Rust host already renders with wgpu `=30.0.1` | The host's | Host `wgpu::Buffer`s, RGBA f32 | `oidn_webgpu::Denoiser` |
+| C filter | Any language; images are in CPU memory | Created by the library | CPU arrays, RGBA f32 | [`include/oidn_webgpu.h`](include/oidn_webgpu.h) |
+| C core planner | A non-wgpu host that executes GPU programs itself | The host's | Host-defined | [`include/oidn_webgpu_core.h`](include/oidn_webgpu_core.h) |
+
+Weights are not bundled. Choose a `.tza` file from the [weights table](https://github.com/pissang/oidn-webgpu#choose-weights) and ship it with your application.
+
+## Rust API
+
+### Install
 
 ```toml
 [dependencies]
-oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git" }
-# Local alternative:
+oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
+# Local checkout:
 # oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
 ```
 
-Pin a git revision containing this API for reproducible builds. The crate is not published on crates.io.
+- The crate is not on crates.io. Pin `rev` for reproducible builds.
+- A source build needs stable Rust, a C toolchain, Node 22+ and npm. `cargo build` installs the pinned scriptc compiler (the first build needs the npm registry) and builds the core static library. To skip Node, use a [precompiled core](#build-configuration).
 
-Source builds require stable Rust, a system C toolchain, Node 22+ and npm. `cargo build` automatically installs the pinned scriptc compiler and builds the core static library; no separate npm command or prebuilt `.native-build` directory is required. The first build needs access to the npm registry. Installed build tools stay in Cargo's build directory. Set `OIDN_WEBGPU_SCRIPTC` to an existing compiler to skip its installation, or `OIDN_WEBGPU_NODE` to select the Node executable.
+### wgpu version
 
-To use a precompiled core instead, set `OIDN_WEBGPU_CORE_ARCHIVE` to the absolute path of `liboidn_webgpu_core.a` (or `oidn_webgpu_core.lib` on MSVC) before running Cargo. This path requires neither Node nor npm. The archive must match the target OS, architecture, ABI and this source revision. Cross compilation requires a core archive built for the target; automatic core builds support native host/target builds only.
-
-### wgpu compatibility
-
-This crate currently pins `wgpu = "=30.0.1"`. A host sharing `Device`, `Buffer` or `CommandEncoder` must resolve to the same wgpu crate, including its source. An independently loaded C library with CPU images has no such requirement. A precompiled core archive does not remove this Rust type requirement.
-
-You can use the crate's re-export instead of adding a separate wgpu dependency:
+The crate pins `wgpu = "=30.0.1"`. A host that passes `Device`, `Buffer` or `CommandEncoder` must resolve to the same wgpu crate and source; a different release or a git fork produces incompatible types. A precompiled core does not change this. Use the re-export to avoid a mismatch:
 
 ```rust
 use oidn_webgpu::wgpu;
 ```
 
-If your host already depends on wgpu, keep its requirements compatible with `=30.0.1`. A different wgpu release or a separate git fork produces incompatible GPU types.
-
-## Rust: share host GPU buffers
-
-Load the model once, create a denoiser on the host's device, and prepare the image size and bindings before the first interactive frame:
+### Usage
 
 ```rust
 use oidn_webgpu::{DenoiseBuffers, DenoiseParams, Denoiser, DenoiserOptions, Model};
 
-let model = Model::from_tza(weights)?;
-let mut denoiser = Denoiser::new(device, adapter, &model, DenoiserOptions::default())?;
+// Once.
+let model = Model::from_tza(&weights)?;
+let mut denoiser = Denoiser::new(&device, &adapter, &model, DenoiserOptions::default())?;
+
+// Per image size (may block for shader compilation).
 let mut prepared = denoiser.prepare([width, height], DenoiseBuffers {
-    color: color.into(),
-    albedo: Some(albedo.into()),
-    normal: Some(normal.into()),
-    output: output.into(),
+    color: (&color).into(),
+    albedo: Some((&albedo).into()),
+    normal: Some((&normal).into()),
+    output: (&output).into(),
 })?;
 
+// Per frame.
 let mut encoder = device.create_command_encoder(&Default::default());
-// Encode the host's render/normalization pass here, ending the pass first.
+// ... the host's render pass writes color/albedo/normal ...
 prepared.encode(&mut encoder, DenoiseParams { input_scale: exposure })?;
-// Encode a display or other consumer pass here.
+// ... a display pass reads output ...
 queue.submit([encoder.finish()]);
 ```
 
-`encode` only appends commands: it does not submit, wait for the GPU or read images back to CPU. Input/output buffers are shared with the host; intermediate GPU processing still uses its own workspace. Submit executions of one prepared instance in encode order on the device's queue. Prepare separate instances for independent workspaces.
+| Step | Call | Cost and behavior |
+| --- | --- | --- |
+| Load | `Model::from_tza(&[u8])` | Validates the TZA file on the CPU. Clones share CPU weights and per-device GPU weights. |
+| Bind | `Denoiser::new(&device, &adapter, &model, options)` | Cheap. `adapter` must be the device's adapter. |
+| Prepare | `denoiser.prepare([w, h], buffers)` | May block for shader compilation. Allocates a workspace for that size. Call again when the size changes; matching pipelines and weights are reused. |
+| Encode | `prepared.encode(&mut encoder, params)` | Appends commands only: no submit, wait or readback. |
+| Rebind | `prepared.rebind(buffers)` | Swaps image buffers at the same size, keeping pipelines and workspace. Already encoded commands keep their old bindings. |
+| Inspect | `prepared.info()` | `DenoiseInfo`: precision, `kernels` actually used (including fallbacks), `tile_count`, `workspace_bytes`, `shared_weight_bytes`, `planning_ms`, `prepare_ms`, `runtime_checks`. |
 
-`prepare` may block for shader compilation and allocates a workspace for that size. Call it again when dimensions change; the denoiser reuses matching pipelines and immutable GPU weights. Denoisers created from the same `Model` or its clones share compatible weights on the same device; every prepared instance has its own workspace. Loading the TZA again as a separate `Model` creates a separate cache. Active caches also retain packed weight data in CPU memory.
-
-Use `prepared.rebind(buffers)` when only image buffers change; this preserves the pipelines and workspace. Already encoded commands retain their previous bindings. Prepared instances may outlive the denoiser and retain their image buffer handles; do not explicitly destroy buffers while pending GPU work uses them.
-
-Use `prepared.info()` to query the actual activation/weight precision, convolution paths (including fallbacks), tile count, preparation/planning time, per-instance workspace bytes and shared weight bytes. Image buffers and output remain f32. Reported buffer sizes exclude driver overhead and small transient parameter uploads; shared weight bytes must not be added once per instance when estimating total memory.
-
-`Result<T>` uses the typed `Error`. `BufferTooSmall` and `LimitExceeded` include `required` and `available` bytes, and a device-limit error identifies the limit. Invalid per-frame parameters are reported before commands are encoded. Encoding success does not mean GPU completion; execution and device-loss errors follow the host's wgpu handling. The experimental low-level `Network` API uses the separate `PlanResult<T>` with string errors.
-
-The [complete host-buffer example](examples/host_buffers.rs) creates a device, generates noisy color and AOVs on the GPU, denoises in the same command encoder, then exports the final image. From the repository root:
+[`examples/host_buffers.rs`](examples/host_buffers.rs) is a complete program: it creates a device, renders inputs on the GPU, denoises in the same encoder and writes the result as tightly packed little-endian RGBA f32. From the repository root:
 
 ```bash
-cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- \
-  weights/rt_hdr_alb_nrm_small.tza output.f32 256 192 128
+cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- weights/rt_hdr_alb_nrm_small.tza output.f32 256 192 128
 ```
 
-The output is tightly packed little-endian RGBA f32. The example reads back only to save the final file; a renderer can consume the output directly on the GPU.
+### Device setup
 
-### Image and device requirements
+- Before requesting a device, add `Denoiser::required_features()`, `Denoiser::recommended_features(&adapter)` and `Denoiser::required_limits()`. Large images may need higher buffer limits.
+- The library uses only the features and limits enabled on an existing device; it cannot enable more later.
+- Precision is FP16 when the device enables `SHADER_F16`, otherwise FP32. Image buffers are always f32.
+- Kernels: cooperative-matrix kernels when the host enables `EXPERIMENTAL_COOPERATIVE_MATRIX` (which also requires accepting wgpu's experimental feature contract), otherwise implicit GEMM. On Windows and Linux the cooperative-matrix kernels need Vulkan; DX12 uses implicit GEMM.
 
-- Every image is tightly packed RGBA f32 with `STORAGE` usage, unmapped and on the denoiser's device. `ImageBuffer { buffer, offset }` binds exactly `width * height * 16` bytes starting at the byte offset; `(&buffer).into()` selects offset zero. The offset must satisfy the device's `min_storage_buffer_offset_alignment` and the range must fit the allocation. A host allocation may be larger than the image's binding limit when the bound image range fits.
-- Input ranges may share an allocation if they do not overlap. Output must use a different allocation from all inputs, even for disjoint ranges, because wgpu tracks conflicting storage usages for the whole buffer. Textures, strides and in-place GPU output are not supported.
-- Color and albedo are linear RGB. LDR color and albedo use [0, 1]; HDR color is nonnegative. Pass averaged color rather than an unnormalized sample sum. Output keeps the color's alpha; auxiliary alpha is ignored.
-- Normals are shading normals in world or view space, with signed components in [-1, 1]. Accumulated normals need not have unit length. Normals encoded in [0, 1] must be remapped before use, consistent with [OIDN's input conventions](https://www.openimagedenoise.org/documentation.html#normals).
-- `Model::input_count()` reports 1 (color), 2 (color/albedo) or 3 (color/albedo/normal). Supply exactly those images. Choose weights trained for your HDR/LDR and auxiliary inputs; use `_small` weights for the smaller, faster network. Weights are separate from the crate and C package; see the [repository weights](https://github.com/pissang/oidn-webgpu/tree/main/weights).
-- Preparation options default to HDR, PU transfer and whole-image execution. Select `Transfer::Log` for RTLightmap HDR weights. Supply `DenoiseParams` to every `encode`; its default `input_scale` is 1. Scale must be positive and finite, is applied before HDR transfer and undone on output, and is ignored for LDR. You can change it every frame without preparing again. Multiple executions in one command buffer retain their own parameter values. Exposure is not estimated automatically.
-- `max_tile_size` limits the output tile edge, rounded down to a multiple of 16. Zero disables tiling; positive values must be in 16..=16384. Tiling reduces intermediate memory but not full-size image buffers. Dimensions must be in 1..=16384 and fit the enabled device buffer limits.
-- Before requesting a device, use `Denoiser::required_features()`, `recommended_features(&adapter)` and `required_limits()` to select baseline settings. Higher buffer limits may be needed for your image sizes. Existing devices use only their enabled features and limits; the library cannot enable more afterward.
-- Auto uses cooperative-matrix kernels when the host enables `EXPERIMENTAL_COOPERATIVE_MATRIX`, otherwise implicit GEMM. Cooperative matrices also require accepting wgpu's experimental feature contract when requesting the device. Windows/Linux require Vulkan for these kernels; DX12 uses implicit GEMM.
+### Image contract
 
-The safe Rust constructor enables shader bounds checks and workgroup initialization. These checks have made convolutions about 4x slower on Metal in existing measurements. `unsafe Denoiser::new_unchecked` disables them and requires the caller to uphold its documented kernel safety contract. Preparation and rebinding return typed errors for invalid images, model failures, insufficient buffer limits and captured GPU validation/allocation failures. GPU execution and device-loss reporting follow the host's wgpu error handling.
+- **Layout:** tightly packed RGBA f32, `STORAGE` usage, unmapped, on the denoiser's device. Textures, row strides and in-place output are not supported.
+- **Range binding:** `ImageBuffer { buffer, offset }` binds exactly `width * height * 16` bytes from `offset`; `(&buffer).into()` uses offset 0. The offset must be a multiple of `min_storage_buffer_offset_alignment` and the range must fit in the buffer. The buffer itself may be larger than the binding limit as long as the bound range fits.
+- **Aliasing:** input ranges may share a buffer if they do not overlap. Output must be a different buffer from every input, because wgpu tracks storage usage per buffer.
+- **Which images:** supply exactly the images `Model::input_count()` reports: 1 = color, 2 = color + albedo, 3 = color + albedo + normal.
+- **Color:** linear RGB. LDR in [0, 1]; HDR nonnegative. Pass the averaged color, not an unnormalized sample sum. Output keeps the color's alpha.
+- **Albedo:** linear RGB in [0, 1]. Alpha is ignored.
+- **Normal:** world- or view-space shading normals with signed components in [-1, 1]; unit length is not required. Like OIDN, the library clamps them to [-1, 1] and encodes them as `n * 0.5 + 0.5` for the network. Remap normals stored in [0, 1] first ([OIDN conventions](https://www.openimagedenoise.org/documentation.html#normals)); the browser package takes the [0, 1] form instead. Alpha is ignored.
 
-## C: build and use
+### Options
 
-With Node 22+, npm, stable Rust and a C toolchain installed:
+`DenoiserOptions` is fixed per `Denoiser`. The struct is `#[non_exhaustive]`: start from `default()` and assign fields.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `hdr` | `true` | HDR color. `false` for LDR weights. |
+| `transfer` | `Transfer::Pu` | `Transfer::Log` for RTLightmap HDR weights. |
+| `max_tile_size` | `0` | Output tile edge, rounded down to a multiple of 16. `0` runs the whole image; otherwise 16..=16384. Tiling reduces workspace memory, not image buffers. |
+
+`DenoiseParams` is passed to every `encode`. It may change every frame without preparing again, and several executions in one command buffer keep their own values.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `input_scale` | `1.0` | Positive, finite. Multiplies HDR color before the transfer and is undone on output. Ignored for LDR. Exposure is not estimated automatically. |
+
+Image dimensions must be in 1..=16384 and fit the device's buffer limits.
+
+### Memory and lifetime
+
+- Each prepared instance owns its workspace. Prepare separate instances for independent workloads.
+- Denoisers made from the same `Model` (or its clones) share immutable GPU weights per device. Loading the same TZA again as a new `Model` creates a separate cache. Active caches also keep packed weights in CPU memory.
+- When estimating memory, count `shared_weight_bytes` once, not per instance. Reported sizes exclude driver overhead and small transient uploads.
+- Prepared instances may outlive the `Denoiser` and keep their image buffer handles. Do not destroy buffers that pending GPU work still uses.
+- Submit executions of one prepared instance in encode order on the device's queue.
+
+### Errors
+
+- `Result<T>` uses the typed `Error`: `InvalidArgument`, `Model`, `UnsupportedDevice`, `Gpu`, `BufferTooSmall { image, required, available }` and `LimitExceeded { resource, limit, required, available }`.
+- `prepare` and `rebind` return errors for invalid images, model failures, insufficient limits and captured GPU validation or allocation failures. `encode` returns invalid `DenoiseParams` before recording any command.
+- A successful `encode` does not mean the GPU succeeded. Execution errors and device loss go through the host's wgpu error handling.
+- The low-level experimental `Network` API uses `PlanResult<T>` with string errors.
+
+### Runtime checks
+
+`Denoiser::new` compiles shaders with bounds checks and workgroup initialization. `unsafe Denoiser::new_unchecked` disables them and can be faster; the difference depends on the GPU, model and convolution path. The caller must uphold its documented safety contract.
+
+## C API
+
+### Get the library
+
+Download a [precompiled package](#precompiled-packages), or build one from the repository root (needs Node 22+, npm, stable Rust and a C toolchain):
 
 ```bash
 npm run native:build
 ```
 
-The compiler is installed automatically. The package is written to `.native-build/package`; pass `-- --output DIR` to choose another destination.
+The package is written to `.native-build/package`; pass `-- --output DIR` to choose another directory.
 
-| Path | Use |
-| --- | --- |
-| `include/oidn_webgpu.h` | Standalone CPU-image API |
-| `lib/liboidn_webgpu.dylib`, `.so` or `oidn_webgpu.dll` (+ `.dll.lib`) | Standalone denoiser |
-| `include/oidn_webgpu_core.h` | Advanced GPU planner API |
-| `lib/liboidn_webgpu_core.a` or `oidn_webgpu_core.lib` | Planner, also usable with the Rust archive override |
-| `bin/oidn-webgpu-bench` | Network benchmark |
-| `examples/denoise.c`, `examples/plan.c` | Complete C examples |
-| `examples/host_buffers.rs` | Complete Rust GPU-buffer host example |
-| `manifest.json`, `SHA256SUMS` | Source/platform identity and file checksums |
+### Usage
 
 ```c
+#include "oidn_webgpu.h"
+
+char error[1024];
 oidnw_device *device;
 oidnw_device_create(OIDNW_BACKEND_AUTO, &device, error, sizeof error);
+
 oidnw_filter_desc desc;
 oidnw_filter_desc_default(&desc);
 oidnw_filter *filter;
 oidnw_filter_create(device, tza, tza_size, &desc, &filter, error, sizeof error);
-oidnw_filter_prepare(filter, width, height, error, sizeof error);
+
+oidnw_filter_prepare(filter, width, height, error, sizeof error); /* optional warm-up */
 oidnw_filter_execute(filter, width, height, color, albedo, normal, output, error, sizeof error);
+
 oidnw_filter_destroy(filter);
 oidnw_device_destroy(device);
 ```
 
-Check status codes after each call; [denoise.c](examples/denoise.c) shows error handling. Link with `-loidn_webgpu` and distribute the platform shared library and chosen TZA weights with your application. Images are tightly packed RGBA f32. Execution blocks until CPU output is available, and output may alias an input. The filter caches a workspace for its last image size; changing size creates a new workspace and reuses weights and matching pipelines. Tiling is off by default. `oidnw_filter_prepare` is optional: it allocates and compiles for a size before the first image, without processing an image. Repeating that size reuses resources; `execute` still prepares automatically if needed. Concurrent prepare/execute on one filter returns `OIDNW_ERROR_BUSY`.
+Check every `int32_t` status (`OIDNW_OK` = 0); [`examples/denoise.c`](examples/denoise.c) shows full error handling. Link with `-loidn_webgpu` and ship the shared library and your TZA weights.
 
-`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; the header's `OIDNW_API_VERSION` is currently 1.0.0 (`0x00010000`). Dynamic loaders can compare the major version for ABI compatibility before resolving optional functions. Libraries predating this query have no version symbol, so feature detection must handle a missing symbol.
+### Behavior
 
-The C API defaults to unchecked shaders; set `OIDNW_FILTER_RUNTIME_CHECKS` to enable checks. `quality` controls accumulation precision, while the weights select the model size. See the [header](include/oidn_webgpu.h) for option and lifetime contracts.
+- Images are tightly packed RGBA f32 in CPU memory, all the same size. Pass `NULL` for albedo or normal when the model does not read them (`oidnw_filter_input_count`). Output keeps the color's alpha and may alias an input.
+- Color, albedo and normal follow the [Rust image contract](#image-contract): albedo in [0, 1], normals signed in [-1, 1].
+- `oidnw_filter_execute` blocks until the output is written.
+- The filter caches a workspace for its last image size. A new size creates a new workspace and reuses weights and matching pipelines.
+- `oidnw_filter_prepare` is optional. It allocates and compiles for a size without denoising; `execute` prepares automatically when needed.
+- Handles are not thread-safe. Concurrent prepare/execute on one filter returns `OIDNW_ERROR_BUSY`. One device may be shared by filters on different threads. Destroy filters before their device.
+- `OIDNW_ERROR_GPU` means execution or readback failed: destroy and recreate the filter.
 
-Non-wgpu hosts that need their own GPU device may use the [core planner](include/oidn_webgpu_core.h) and implement program execution themselves. Rust/wgpu hosts should use `Denoiser` to share their buffers.
+### `oidnw_filter_desc`
 
-## Download precompiled packages
+Initialize with `oidnw_filter_desc_default`, then override fields.
 
-Download an artifact from a successful [Native packages workflow run](https://github.com/pissang/oidn-webgpu/actions/workflows/native.yml), signing in to GitHub to access the download. Artifacts are retained for 30 days and contain a `.tar.gz` package plus its `.sha256` checksum. Extract the downloaded artifact, then extract the tar archive. Each platform package includes the C shared library, Windows import library where applicable, core static library, headers and examples. Weights are not included. These are Actions artifacts, not GitHub Release assets.
-
-| Platform / architecture | Rust target / ABI | Build environment |
+| Field | Default | Meaning |
 | --- | --- | --- |
-| macOS ARM64 (Apple silicon) | `aarch64-apple-darwin` | macOS 15 |
-| macOS x86_64 (Intel) | `x86_64-apple-darwin` | macOS 15 |
-| Windows x86_64 | `x86_64-pc-windows-msvc` | Windows Server 2022 / MSVC |
-| Linux x86_64 | `x86_64-unknown-linux-gnu` | Ubuntu 24.04 / glibc |
+| `hdr` | nonzero | HDR color. Set 0 for LDR weights. |
+| `transfer` | `OIDNW_TRANSFER_PU` | `OIDNW_TRANSFER_LOG` for RTLightmap HDR weights. |
+| `quality` | `OIDNW_QUALITY_HIGH` | Accumulation precision. `FAST` uses f16 accumulation in subgroup-matrix kernels. Model size comes from the weights. |
+| `kernel` | `OIDNW_KERNEL_AUTO` | Subgroup-matrix kernels when the device has cooperative matrices, otherwise implicit GEMM. |
+| `max_tile_size` | `0` | Output tile edge, rounded down to a multiple of 16; 0 = whole image. |
+| `input_scale` | `1.0` | Scale applied to HDR color before the transfer. |
+| `flags` | `0` | `OIDNW_FILTER_RUNTIME_CHECKS` enables shader bounds checks. The C API runs unchecked by default. |
 
-Other architectures and Linux musl are not supplied. The build environment is not a guarantee of compatibility with older operating systems; `manifest.json` records the actual OS and, on Linux, glibc version used for each package.
+`OIDNW_BACKEND_VULKAN` is required for cooperative-matrix kernels on Windows and Linux. `oidnw_device_info` reports the adapter name, backend and enabled `OIDNW_FEATURE_*` bits. The [header](include/oidn_webgpu.h) documents every option and lifetime rule.
 
-Package names include the native crate version, complete Rust target triple and full source commit SHA. For example: `oidn-webgpu-native-0.1.0-aarch64-apple-darwin-<40-character-commit>.tar.gz`. `manifest.json` records the same identity, compiler versions and file hashes; `SHA256SUMS` also covers the manifest. Local packages made from modified sources carry a `-dirty` suffix and `source.dirty = true`, so their commit alone does not reproduce the contents.
+### Versioning
 
-C users can consume the shared library without installing Node or Rust. Rust users should pin the Cargo git dependency's `rev` to `source.commit` from the manifest, then set `OIDN_WEBGPU_CORE_ARCHIVE` to the extracted package's absolute `lib/` archive path. This skips Node/scriptc and still compiles the Rust layer with Cargo. Match the package target to the application's target; the shared-wgpu version requirement still applies. Precompiled Rust `rlib` files are not provided.
+`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 1.0.0 (`0x00010000`). Dynamic loaders should compare the major version before resolving optional functions. Libraries older than this query lack the symbol, so treat a missing symbol as an unknown version.
 
-## Measured performance
+### Core planner
 
-Only an Apple M4 Max has been measured. The following network-only timings exclude oidn-webgpu's input/output processing, which OIDN includes:
+Hosts with their own non-wgpu GPU executor can link the planner-only static library and replay its programs; see [`include/oidn_webgpu_core.h`](include/oidn_webgpu_core.h) and [`examples/plan.c`](examples/plan.c). Rust/wgpu hosts should use `Denoiser` instead.
+
+## Precompiled packages
+
+Download an artifact from a successful [Native packages workflow run](https://github.com/pissang/oidn-webgpu/actions/workflows/native.yml). GitHub sign-in is required, artifacts are kept for 30 days, and they are not GitHub Release assets. Each artifact contains a `.tar.gz` and its `.sha256`: extract the artifact, then the tarball.
+
+| Target | Rust triple | Built on |
+| --- | --- | --- |
+| macOS ARM64 | `aarch64-apple-darwin` | macOS 15 |
+| macOS x86_64 | `x86_64-apple-darwin` | macOS 15 |
+| Windows x86_64 | `x86_64-pc-windows-msvc` | Windows Server 2022, MSVC |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` | Ubuntu 24.04, glibc |
+
+Other architectures and Linux musl are not provided. The build host does not guarantee compatibility with older systems; `manifest.json` records the actual OS and, on Linux, the glibc version.
+
+| Package path | Contents |
+| --- | --- |
+| `include/oidn_webgpu.h` | C filter API |
+| `include/oidn_webgpu_core.h` | Core planner API |
+| `lib/liboidn_webgpu.dylib`, `.so`, or `oidn_webgpu.dll` + `oidn_webgpu.dll.lib` | C filter shared library |
+| `lib/liboidn_webgpu_core.a` or `oidn_webgpu_core.lib` | Core planner static library; also the Rust core override |
+| `bin/oidn-webgpu-bench` | Network benchmark |
+| `examples/denoise.c`, `examples/plan.c`, `examples/host_buffers.rs` | Complete examples |
+| `manifest.json`, `SHA256SUMS` | Source commit, target, compiler versions, file hashes |
+
+Package names contain the crate version, target triple and full source commit, for example `oidn-webgpu-native-0.1.0-aarch64-apple-darwin-<commit>.tar.gz`. Packages built from modified sources have a `-dirty` suffix and `source.dirty = true` in the manifest, so their commit alone does not reproduce the contents.
+
+- **C:** use the shared library directly; Node and Rust are not needed.
+- **Rust:** pin the Cargo `rev` to `source.commit` from `manifest.json` and set `OIDN_WEBGPU_CORE_ARCHIVE` to the package's core library. Cargo still compiles the Rust layer, and the [wgpu version](#wgpu-version) rule still applies. Precompiled `rlib` files are not provided.
+
+## Build configuration
+
+Environment variables read by `cargo build`:
+
+| Variable | Effect |
+| --- | --- |
+| `OIDN_WEBGPU_CORE_ARCHIVE` | Absolute path to a prebuilt `liboidn_webgpu_core.a` / `oidn_webgpu_core.lib`. Skips Node and scriptc. Must match the target OS, architecture, ABI and source revision. Required for cross compilation. |
+| `OIDN_WEBGPU_SCRIPTC` | Path to an existing scriptc compiler; skips installing it. |
+| `OIDN_WEBGPU_NODE` | Node executable used for the core build. |
+
+Without `OIDN_WEBGPU_CORE_ARCHIVE`, the core is built automatically, for native builds only (host = target). Installed build tools stay in Cargo's build directory.
+
+## Performance
+
+Network-only GPU time on an Apple M4 Max, the only measured device. oidn-webgpu numbers exclude input/output processing, which the OIDN numbers include.
 
 | Model | Size | OIDN 2.5.1 Metal | oidn-webgpu native |
 | --- | --- | ---: | ---: |
@@ -157,4 +257,4 @@ Only an Apple M4 Max has been measured. The following network-only timings exclu
 | `rt_hdr_alb_nrm_small` | 512x512 | 2.53 ms | 2.67 ms |
 | `rt_hdr_alb_nrm_small` | 1920x1080 | 18.8 ms | 19.6 ms |
 
-These are existing unchecked network measurements, not end-to-end timings for the new safe Rust API. The C example previously took about 23 ms per 1024x1024 image including three input uploads and output readback. First preparation includes planning and shader compilation; there is no persistent on-disk pipeline cache.
+These are unchecked network measurements, not end-to-end timings of the safe Rust API. The C example took about 23 ms per 1024x1024 image, including three input uploads and output readback. First preparation includes planning and shader compilation; there is no on-disk pipeline cache.

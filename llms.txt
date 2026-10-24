@@ -1,0 +1,28 @@
+# oidn-webgpu
+
+> Open Image Denoise (OIDN) on WebGPU: GPU denoising of path-traced images in browsers (npm package `oidn-webgpu`) and natively through wgpu (experimental Rust and C APIs). One TypeScript core plans the same WGSL kernels for every runtime.
+
+- Browser entry points: `initUNetFromURL(url, { device }?, options?)` or `initUNetFromBuffer(...)`, then `unet.tileExecute({ color, albedo?, normal?, done, progress?, error? })`, which returns an abort function.
+- Weights (`.tza`) are not bundled. Choose them by inputs: `rt_ldr*` or `rt_hdr*`; `_alb_nrm` / `_calb_cnrm` add albedo + normal; `_small` / `_large` trade speed for quality.
+- Normals: browser inputs are [0, 1]-encoded (`n * 0.5 + 0.5`); native inputs are signed [-1, 1], like OIDN.
+- Native APIs are experimental and GPU execution is only verified on macOS with Apple silicon. Rust hosts must use wgpu `=30.0.1`.
+
+## Docs
+
+- [README](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/README.md): overview, runtimes, browser quick start, weights table
+- [Browser guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/web.md): options, input formats, `tileExecute` contract, GPU pipelines, tiling, precision, profiling
+- [Native guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/README.md): Rust `Denoiser` and C filter APIs, image contract, precompiled packages, build configuration
+- [Development guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/development.md): architecture, shared core vs. browser-only code, commands, benchmarks, CI
+- [AGENTS.md](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/AGENTS.md): repository map and rules for changing the code
+
+## API sources
+
+- [src/main.ts](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/src/main.ts): public exports and `UNetOptions`
+- [src/UNet.ts](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/src/UNet.ts): `UNet`, `tileExecute`, `prepareForImage`, profiling
+- [native/src/denoiser.rs](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/src/denoiser.rs): Rust `Model`, `Denoiser`, `PreparedDenoise`, `Error`
+- [native/include/oidn_webgpu.h](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu.h): C filter API and its contracts
+
+## Optional
+
+- [CHANGELOG](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/CHANGELOG.md): release notes and migration steps
+- [Examples](https://github.com/pissang/oidn-webgpu/tree/main/examples): browser demo pages (LDR, HDR, auxiliary images, GPU buffers)

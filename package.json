@@ -26,6 +26,11 @@
     "native:build": "node scripts/native-build.mjs"
   },
   "author": "pissang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pissang/oidn-webgpu.git"
+  },
+  "homepage": "https://github.com/pissang/oidn-webgpu#readme",
   "license": "MIT",
   "dependencies": {
     "@petamoriken/float16": "^3.8.7"
