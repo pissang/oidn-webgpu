@@ -7,6 +7,7 @@ import {
 } from '../nativeUNetCore.js';
 import { parseTZA } from '../tza.js';
 import { RecordingDevice, type RecordedBuffer } from './recordingDevice.js';
+import { recordDenoiseExecution } from './denoise.js';
 
 /**
  * Records the native U-Net for one input size as a replayable program.
@@ -26,8 +27,9 @@ import { RecordingDevice, type RecordedBuffer } from './recordingDevice.js';
  *   accumulation (0 f32, 1 f16), sub-pixel decoders (0 on, 1 off).
  *
  * Program (little-endian u32 words, strings and byte blobs padded to 4 bytes):
- *   magic 0x4e44494f ("OIDN"), version 1,
+ *   magic 0x4e44494f ("OIDN"), version 2,
  *   input count, input buffer ids..., output buffer id,
+ *   output external (1 when the host may supply the output buffer),
  *   output width, output height, output channels,
  *   buffers: count, then size, usage, data length (0 = zero-filled), data, label
  *   shaders: count, then code
@@ -45,10 +47,55 @@ import { RecordingDevice, type RecordedBuffer } from './recordingDevice.js';
  * holds RGBA f32 pixels in the same space.
  */
 export function recordNetwork(tza: Uint8Array, config: Uint8Array): Uint8Array {
-  const words = new Uint32Array(config.buffer, config.byteOffset, config.byteLength / 4);
-  if (words[0] !== 1) throw new Error(`Unsupported native config version ${words[0]}`);
+  const { words, device, model, executor } = createNativeExecutor(tza, config);
   const width = words[1];
   const height = words[2];
+  const inputs: RecordedBuffer[] = [];
+  for (let index = 0; index < model.inputChannels / 3; index++) {
+    inputs.push(device.createBuffer({
+      label: `oidn/external/input${index}`,
+      size: width * height * 16,
+      usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
+    }) as RecordedBuffer);
+  }
+  // The first execution creates the per-shape resources; the second records
+  // exactly what every later execution submits.
+  executor.execute(inputs, width, height);
+  device.operations = [];
+  const output = executor.execute(inputs, width, height) as RecordedBuffer;
+  return serializeProgram(device, inputs, output, false, width, height, model.outputChannels);
+}
+
+/**
+ * Records a whole denoising of one image size: tiles, input processing,
+ * the network and output processing (see `denoise.ts`). Config: the network
+ * config with width and height of the image, followed after the
+ * subgroup-matrix options by:
+ *   hdr (0/1), HDR transfer (0 PU, 1 log), maximum tile edge (0 = whole image),
+ *   input scale (f32 bits; 0 = 1).
+ * Inputs are color, then albedo and normal for auxiliary models, as RGBA f32
+ * images; the external output is an RGBA f32 image (color alpha preserved).
+ */
+export function recordDenoise(tza: Uint8Array, config: Uint8Array): Uint8Array {
+  const { words, device, model, executor, next } = createNativeExecutor(tza, config);
+  const width = words[1];
+  const height = words[2];
+  const scaleBits = new Uint32Array([words[next + 3]]);
+  const inputScale = words[next + 3] === 0 ? 1 : new Float32Array(scaleBits.buffer)[0];
+  const recorded = recordDenoiseExecution(device, executor, model, {
+    width,
+    height,
+    hdr: words[next] === 1,
+    transfer: words[next + 1] === 1 ? 'log' : 'pu',
+    maxTileSize: words[next + 2],
+    inputScale
+  });
+  return serializeProgram(device, recorded.inputs, recorded.output, true, width, height, 4);
+}
+
+function createNativeExecutor(tza: Uint8Array, config: Uint8Array) {
+  const words = new Uint32Array(config.buffer, config.byteOffset, config.byteLength / 4);
+  if (words[0] !== 1) throw new Error(`Unsupported native config version ${words[0]}`);
   const precisions: NativeUNetPrecisionSetting[] = ['auto', 'fp32', 'fp16'];
   const kernels: NativeUNetKernelSetting[] = ['auto', 'implicit-gemm', 'direct', 'subgroup-matrix'];
   const features: string[] = [];
@@ -98,20 +145,7 @@ export function recordNetwork(tza: Uint8Array, config: Uint8Array): Uint8Array {
       subPixel: words[options + 2] !== 1
     }
   });
-  const inputs: RecordedBuffer[] = [];
-  for (let index = 0; index < model.inputChannels / 3; index++) {
-    inputs.push(device.createBuffer({
-      label: `oidn/external/input${index}`,
-      size: width * height * 16,
-      usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
-    }) as RecordedBuffer);
-  }
-  // The first execution creates the per-shape resources; the second records
-  // exactly what every later execution submits.
-  executor.execute(inputs, width, height);
-  device.operations = [];
-  const output = executor.execute(inputs, width, height) as RecordedBuffer;
-  return serializeProgram(device, inputs, output, width, height, model.outputChannels);
+  return { words, device, model, executor, next: options + 3 };
 }
 
 class ProgramWriter {
@@ -157,16 +191,18 @@ function serializeProgram(
   device: RecordingDevice,
   inputs: readonly RecordedBuffer[],
   output: RecordedBuffer,
+  outputExternal: boolean,
   width: number,
   height: number,
   outputChannels: number
 ) {
   const writer = new ProgramWriter();
   writer.u32(0x4e44494f);
-  writer.u32(1);
+  writer.u32(2);
   writer.u32(inputs.length);
   for (const input of inputs) writer.u32(input.id);
   writer.u32(output.id);
+  writer.u32(outputExternal ? 1 : 0);
   writer.u32(width);
   writer.u32(height);
   writer.u32(outputChannels);
@@ -231,6 +267,17 @@ function serializeProgram(
 export function recordNetworkPacket(tza: Uint8Array, config: Uint8Array): Uint8Array {
   try {
     return recordNetwork(tza, config);
+  } catch (error) {
+    const writer = new ProgramWriter();
+    writer.u32(0x4f525245);
+    writer.string(error instanceof Error ? error.message : String(error));
+    return writer.finish();
+  }
+}
+
+export function recordDenoisePacket(tza: Uint8Array, config: Uint8Array): Uint8Array {
+  try {
+    return recordDenoise(tza, config);
   } catch (error) {
     const writer = new ProgramWriter();
     writer.u32(0x4f525245);

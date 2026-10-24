@@ -15,7 +15,19 @@
     {
       "export": "recordNetworkPacket",
       "symbol": "oidn_core_record_network",
-      "params": ["bytes", "bytes"],
+      "params": [
+        "bytes",
+        "bytes"
+      ],
+      "returns": "bytes"
+    },
+    {
+      "export": "recordDenoisePacket",
+      "symbol": "oidn_core_record_denoise",
+      "params": [
+        "bytes",
+        "bytes"
+      ],
       "returns": "bytes"
     }
   ]

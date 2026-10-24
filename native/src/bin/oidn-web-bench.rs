@@ -10,7 +10,7 @@
 //! `--input` holds interleaved f32 pixels with the model's input channels in
 //! the network's transfer space (as for the browser `executeCPU`); `--output`
 //! receives interleaved RGB f32 pixels in the same space.
-use oidn_web_native::{Kernel, Network, NetworkConfig, Precision};
+use oidn_web::{Kernel, Network, NetworkConfig, Precision};
 use std::time::{Duration, Instant};
 
 fn main() -> Result<(), String> {

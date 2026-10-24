@@ -1,51 +1,13 @@
 import { WGPUComputePass } from './WGPUComputePass';
 import {
+  hdrForwardWGSL,
+  hdrInverseWGSL,
   hdrTransferFuncCPU,
   hdrTransferFuncInverseCPU,
   type HDRTransfer
 } from './hdrTransfer';
 export { hdrTransferFuncCPU, hdrTransferFuncInverseCPU } from './hdrTransfer';
 export type { HDRTransfer } from './hdrTransfer';
-
-const a = 1.41283765e3;
-const b = 1.64593172;
-const c = 4.31384981e-1;
-const d = -2.94139609e-3;
-const e = 1.92653254e-1;
-const f = 6.26026094e-3;
-const g = 9.98620152e-1;
-const y0 = 1.5794576e-6;
-const y1 = 3.22087631e-2;
-const x0 = 2.23151711e-3;
-const x1 = 3.70974749e-1;
-
-function PUForward(y: number) {
-  if (y <= y0) {
-    y = a * y;
-  } else if (y <= y1) {
-    y = b * Math.pow(y, c) + d;
-  } else {
-    y = e * Math.log(y + f) + g;
-  }
-  return y;
-}
-
-function PUInverse(x: number) {
-  if (x <= x0) {
-    x = x / a;
-  } else if (x <= x1) {
-    x = Math.pow((x - d) / b, 1 / c);
-  } else {
-    x = Math.exp((x - g) / e) - f;
-  }
-  return x;
-}
-const yMax = 65504;
-const xMax = PUForward(yMax);
-const normScale = 1 / xMax;
-const rcpNormScale = xMax;
-const logXMax = Math.log(yMax + 1);
-const logNormScale = 1 / logXMax;
 
 export class Tile {
   constructor(
@@ -83,23 +45,6 @@ export function avgLogLum({
   // https://github.com/RenderKit/oidn/blob/713ec7838ba650f99e0a896549c0dca5eeb3652d/training/color.py#L173
   return key / Math.pow(2, averageLuminance);
 }
-
-const constsCode = `
-const a = ${a};
-const b = ${b};
-const c = ${c};
-const d = ${d};
-const e = ${e};
-const f = ${f};
-const g = ${g};
-const y0 =${y0};
-const y1 =${y1};
-const x0 =${x0};
-const x1 =${x1};
-
-const normScale = ${normScale};
-const rcpNormScale = ${rcpNormScale};
-`;
 
 export class GPUDataProcess {
   private _inputPassAux;
@@ -227,26 +172,7 @@ out_color[outIdx] = textureLoad(in_color, globalId.xy, 0);
 
     this._isInputTexture = isInputTexture;
     const isHDR = this._isHDR;
-    const hdrForwardCode = this._hdrTransfer === 'log'
-      ? `fn HDRForward(y: f32) -> f32 { return log(y + 1.0) * logNormScale; }`
-      : `fn HDRForward(y: f32) -> f32 {
-  if (y <= y0) { return a * y * normScale; }
-  else if (y <= y1) { return (b * pow(y, c) + d) * normScale; }
-  else { return (e * log(y + f) + g) * normScale; }
-}`;
-    const hdrInverseCode = this._hdrTransfer === 'log'
-      ? `fn HDRInverse(x: f32) -> f32 { return exp(x * logXMax) - 1.0; }`
-      : `fn HDRInverse(x: f32) -> f32 {
-  let y = x * rcpNormScale;
-  if (y <= x0) { return y / a; }
-  else if (y <= x1) { return pow((y - d) / b, 1 / c); }
-  else { return exp((y - g) / e) - f; }
-}`;
-    const commonCSDefine = /* wgsl */ `
-${constsCode}
-const logXMax = ${logXMax};
-const logNormScale = ${logNormScale};
-${hdrForwardCode}`;
+    const commonCSDefine = hdrForwardWGSL(this._hdrTransfer);
     function readInputCode(inputName: string) {
       return isInputTexture
         ? `textureLoad(in_${inputName}, vec2u(inputPosition), 0)`
@@ -294,11 +220,7 @@ ${commonCSMain}
 `
     });
     this._outputPass.setCSCode({
-      csDefine: /* wgsl */ `
-${constsCode}
-const logXMax = ${logXMax};
-${hdrInverseCode}
-`,
+      csDefine: hdrInverseWGSL(this._hdrTransfer),
       csMain: /* wgsl */ `
 let x = i32(globalId.x);
 let y = i32(globalId.y);

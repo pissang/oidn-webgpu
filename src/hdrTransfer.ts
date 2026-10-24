@@ -86,3 +86,53 @@ export function hdrTransferFuncInverseCPU({
   }
   return newData;
 }
+
+const transferConstantsWGSL = `
+const a = ${a};
+const b = ${b};
+const c = ${c};
+const d = ${d};
+const e = ${e};
+const f = ${f};
+const g = ${g};
+const y0 =${y0};
+const y1 =${y1};
+const x0 =${x0};
+const x1 =${x1};
+
+const normScale = ${puNormScale};
+const rcpNormScale = ${puRcpNormScale};
+`;
+
+/** WGSL declarations of `fn HDRForward(y: f32) -> f32` for the input pass. */
+export function hdrForwardWGSL(transfer: HDRTransfer) {
+  const forwardCode = transfer === 'log'
+    ? `fn HDRForward(y: f32) -> f32 { return log(y + 1.0) * logNormScale; }`
+    : `fn HDRForward(y: f32) -> f32 {
+  if (y <= y0) { return a * y * normScale; }
+  else if (y <= y1) { return (b * pow(y, c) + d) * normScale; }
+  else { return (e * log(y + f) + g) * normScale; }
+}`;
+  return /* wgsl */ `
+${transferConstantsWGSL}
+const logXMax = ${logXMax};
+const logNormScale = ${logNormScale};
+${forwardCode}`;
+}
+
+/** WGSL declarations of `fn HDRInverse(x: f32) -> f32` for the output pass. */
+export function hdrInverseWGSL(transfer: HDRTransfer) {
+  const inverseCode = transfer === 'log'
+    ? `fn HDRInverse(x: f32) -> f32 { return exp(x * logXMax) - 1.0; }`
+    : `fn HDRInverse(x: f32) -> f32 {
+  let y = x * rcpNormScale;
+  if (y <= x0) { return y / a; }
+  else if (y <= x1) { return pow((y - d) / b, 1 / c); }
+  else { return exp((y - g) / e) - f; }
+}`;
+  return /* wgsl */ `
+${transferConstantsWGSL}
+const logXMax = ${logXMax};
+${inverseCode}
+`;
+}

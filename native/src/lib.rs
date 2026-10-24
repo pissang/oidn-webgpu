@@ -1,11 +1,14 @@
 //! Experimental native runtime for oidn-web.
 //!
-//! The TypeScript core (`src/native/program.ts`, compiled by scriptc) plans the
-//! network for one input size and records it as a program: buffers with their
-//! initial data, WGSL shaders, pipelines, bind groups and the commands of one
-//! execution. This crate creates those resources on a wgpu device once and
-//! encodes the recorded commands for every execution, so the network shares
-//! the caller's device and buffers without any copy through the CPU.
+//! The TypeScript core (`src/native/program.ts`, compiled by scriptc) plans a
+//! denoising (or the bare network) for one image size and records it as a
+//! program: buffers with their initial data, WGSL shaders, pipelines, bind
+//! groups and the commands of one execution. This crate creates those
+//! resources on a wgpu device once and encodes the recorded commands for every
+//! execution. The C API (`capi`, `include/oidn_web.h`) builds a standalone
+//! denoiser on it.
+
+pub mod capi;
 
 use std::sync::{Mutex, Once};
 
@@ -13,6 +16,14 @@ unsafe extern "C" {
     fn oidn_core_init();
     fn oidn_core_reset();
     fn oidn_core_record_network(
+        tza: *const u8,
+        tza_length: usize,
+        config: *const u8,
+        config_length: usize,
+        output: *mut *const u8,
+        size: *mut usize,
+    );
+    fn oidn_core_record_denoise(
         tza: *const u8,
         tza_length: usize,
         config: *const u8,
@@ -54,6 +65,20 @@ pub struct NetworkConfig {
     pub f16_accumulation: bool,
     /// Sub-pixel decomposition of the subgroup-matrix decoders.
     pub sub_pixel: bool,
+    /// Records a whole denoising (tiles, input and output processing) of a
+    /// `width` x `height` RGBA f32 image instead of the bare network.
+    pub denoise: Option<DenoiseConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DenoiseConfig {
+    pub hdr: bool,
+    /// HDR transfer: PU (false) or log (true, RTLightmap models).
+    pub log_transfer: bool,
+    /// Maximum output tile edge; 0 denoises the whole image as one tile.
+    pub max_tile_size: u32,
+    /// Scale applied to HDR color before the transfer (1 when 0).
+    pub input_scale: f32,
 }
 
 impl NetworkConfig {
@@ -66,6 +91,7 @@ impl NetworkConfig {
             double_buffer: None,
             f16_accumulation: false,
             sub_pixel: true,
+            denoise: None,
         }
     }
 }
@@ -73,7 +99,7 @@ impl NetworkConfig {
 /// The scriptc runtime keeps process-global state; one recording at a time.
 static CORE: Mutex<()> = Mutex::new(());
 
-fn record(tza: &[u8], config: &[u32]) -> Result<Vec<u8>> {
+fn record(tza: &[u8], config: &[u32], denoise: bool) -> Result<Vec<u8>> {
     static INIT: Once = Once::new();
     let _guard = CORE.lock().map_err(|_| "oidn-web core lock poisoned")?;
     INIT.call_once(|| unsafe { oidn_core_init() });
@@ -81,7 +107,8 @@ fn record(tza: &[u8], config: &[u32]) -> Result<Vec<u8>> {
     let mut pointer = std::ptr::null();
     let mut size = 0usize;
     let bytes = unsafe {
-        oidn_core_record_network(
+        let entry = if denoise { oidn_core_record_denoise } else { oidn_core_record_network };
+        entry(
             tza.as_ptr(),
             tza.len(),
             config_bytes.as_ptr(),
@@ -157,6 +184,7 @@ enum Operation {
 struct Program {
     inputs: Vec<usize>,
     output: usize,
+    output_external: bool,
     width: u32,
     height: u32,
     output_channels: u32,
@@ -176,7 +204,7 @@ impl Program {
             magic => return Err(format!("unexpected oidn-web program magic {magic:#x}")),
         }
         let version = reader.u32()?;
-        if version != 1 {
+        if version != 2 {
             return Err(format!("unsupported oidn-web program version {version}"));
         }
         let input_count = reader.u32()?;
@@ -184,6 +212,7 @@ impl Program {
             .map(|_| reader.u32().map(|id| id as usize))
             .collect::<Result<_>>()?;
         let output = reader.u32()? as usize;
+        let output_external = reader.u32()? == 1;
         let width = reader.u32()?;
         let height = reader.u32()?;
         let output_channels = reader.u32()?;
@@ -251,6 +280,7 @@ impl Program {
         Ok(Self {
             inputs,
             output,
+            output_external,
             width,
             height,
             output_channels,
@@ -312,6 +342,41 @@ fn capability_words(device: &wgpu::Device, adapter: &wgpu::Adapter) -> Vec<u32> 
     words
 }
 
+/// Planner config words (see `src/native/program.ts`).
+fn config_words(device: &wgpu::Device, adapter: &wgpu::Adapter, config: &NetworkConfig) -> Vec<u32> {
+    let mut words = vec![1, config.width, config.height, config.precision as u32, config.kernel as u32];
+    words.extend(capability_words(device, adapter));
+    words.push(match config.double_buffer {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    });
+    words.push(config.f16_accumulation as u32);
+    words.push(!config.sub_pixel as u32);
+    if let Some(denoise) = &config.denoise {
+        words.push(denoise.hdr as u32);
+        words.push(denoise.log_transfer as u32);
+        words.push(denoise.max_tile_size);
+        words.push(denoise.input_scale.to_bits());
+    }
+    words
+}
+
+fn plan(device: &wgpu::Device, adapter: &wgpu::Adapter, tza: &[u8], config: &NetworkConfig) -> Result<Program> {
+    Program::parse(&record(tza, &config_words(device, adapter, config), config.denoise.is_some())?)
+}
+
+/// Plans `config` without creating GPU resources and returns the number of
+/// input images (color, albedo, normal) of the model.
+pub fn plan_inputs(
+    device: &wgpu::Device,
+    adapter: &wgpu::Adapter,
+    tza: &[u8],
+    config: &NetworkConfig,
+) -> Result<usize> {
+    Ok(plan(device, adapter, tza, config)?.inputs.len())
+}
+
 /// One planned network for a fixed input size, ready to encode.
 pub struct Network {
     buffers: Vec<wgpu::Buffer>,
@@ -340,7 +405,7 @@ impl Network {
         config: &NetworkConfig,
         inputs: Option<&[wgpu::Buffer]>,
     ) -> Result<Self> {
-        Self::create(device, adapter, tza, config, inputs, false)
+        Self::create(device, adapter, tza, config, inputs, None, false)
     }
 
     /// Like [`Network::new`], but compiles the shaders without runtime bounds
@@ -360,7 +425,28 @@ impl Network {
         config: &NetworkConfig,
         inputs: Option<&[wgpu::Buffer]>,
     ) -> Result<Self> {
-        Self::create(device, adapter, tza, config, inputs, true)
+        Self::create(device, adapter, tza, config, inputs, None, true)
+    }
+
+    /// Plans with `config` (which must request a denoising) and binds the
+    /// caller's image buffers: `inputs` (color, then albedo and normal for
+    /// auxiliary models) and `output`, each `width * height` RGBA f32 pixels
+    /// with `STORAGE` use. `unchecked` has the contract of
+    /// [`Network::new_unchecked`].
+    ///
+    /// # Safety
+    ///
+    /// When `unchecked` is true, as for [`Network::new_unchecked`].
+    pub unsafe fn with_buffers(
+        device: &wgpu::Device,
+        adapter: &wgpu::Adapter,
+        tza: &[u8],
+        config: &NetworkConfig,
+        inputs: &[wgpu::Buffer],
+        output: &wgpu::Buffer,
+        unchecked: bool,
+    ) -> Result<Self> {
+        Self::create(device, adapter, tza, config, Some(inputs), Some(output), unchecked)
     }
 
     fn create(
@@ -369,19 +455,14 @@ impl Network {
         tza: &[u8],
         config: &NetworkConfig,
         inputs: Option<&[wgpu::Buffer]>,
+        output: Option<&wgpu::Buffer>,
         unchecked: bool,
     ) -> Result<Self> {
-        let mut words = vec![1, config.width, config.height, config.precision as u32, config.kernel as u32];
-        words.extend(capability_words(device, adapter));
-        words.push(match config.double_buffer {
-            None => 0,
-            Some(false) => 1,
-            Some(true) => 2,
-        });
-        words.push(config.f16_accumulation as u32);
-        words.push(!config.sub_pixel as u32);
         let started = std::time::Instant::now();
-        let program = Program::parse(&record(tza, &words)?)?;
+        let program = plan(device, adapter, tza, config)?;
+        if output.is_some() && !program.output_external {
+            return Err("the network program has no external output".into());
+        }
         let planning_ms = started.elapsed().as_secs_f64() * 1e3;
         if let Some(inputs) = inputs {
             if inputs.len() != program.inputs.len() {
@@ -400,6 +481,11 @@ impl Network {
                 if let Some(position) = program.inputs.iter().position(|&input| input == id) {
                     if let Some(inputs) = inputs {
                         return inputs[position].clone();
+                    }
+                }
+                if id == program.output {
+                    if let Some(output) = output {
+                        return output.clone();
                     }
                 }
                 let usage = wgpu::BufferUsages::from_bits_truncate(description.usage);

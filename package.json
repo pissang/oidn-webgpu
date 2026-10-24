@@ -22,7 +22,8 @@
     "prepare": "npm run build:lib",
     "prepublishOnly": "npm run build && npm run build:lib",
     "build:lib": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc",
-    "watch:lib": "tsc --watch"
+    "watch:lib": "tsc --watch",
+    "native:build": "node scripts/native-build.mjs"
   },
   "author": "pissang",
   "license": "MIT",

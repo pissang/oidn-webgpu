@@ -21,6 +21,12 @@ fn main() {
     std::fs::copy(&archive, output.join(name)).unwrap();
     println!("cargo:rustc-link-search=native={}", output.display());
     println!("cargo:rustc-link-lib=static=oidn_web_core");
+    // Relocatable shared library names for the C API package.
+    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") => println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/liboidn_web.dylib"),
+        Ok("linux") => println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,liboidn_web.so"),
+        _ => {}
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         for library in ["ws2_32", "bcrypt", "crypt32", "iphlpapi", "userenv", "ntdll", "advapi32"] {
             println!("cargo:rustc-link-lib={library}");
