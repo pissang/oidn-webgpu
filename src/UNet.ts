@@ -28,7 +28,6 @@ import {
   type NativeUNetPrecisionSetting
 } from './nativeUNet';
 import { WebNNUNetExecutor } from './webnnUNet';
-import type { OIDNGPUDevice } from './gpuTypes';
 
 export type UNetEngineSetting = 'auto' | 'wgsl' | 'webnn';
 
@@ -164,8 +163,7 @@ class UNet {
       );
     } else {
       this._nativeExecutor = new NativeUNetExecutor(
-        // GPUDevice structurally provides the subset in OIDNGPUDevice.
-        this._device as unknown as OIDNGPUDevice,
+        this._device,
         validatedModel,
         {
           precision: opts.precision,
@@ -500,12 +498,11 @@ class UNet {
         denoiseAlpha
       );
 
-      // A browser device returns its own GPUBuffer through the structural type.
       nativeOutputBuffer = await (this._webNNExecutor ?? this._nativeExecutor!).execute(
         this._aux ? [color, albedo!, normal!] : [color],
         srcTileWidth,
         srcTileHeight
-      ) as GPUBuffer;
+      );
     }
 
     let outBuffer: GPUBuffer;

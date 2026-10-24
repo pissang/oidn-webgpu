@@ -11,14 +11,13 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - Experimental native denoising through Rust and C APIs on Metal, Vulkan or Direct3D 12. Rust hosts can share GPU buffers; the C API accepts CPU images. See the [native guide](native/README.md).
-- Experimental `kernel: 'subgroup-matrix'` acceleration and `subgroupMatrix` tuning options. Browser use requires `chromium-experimental-subgroup-matrix`; native use requires wgpu cooperative-matrix support.
+- Experimental `kernel: 'subgroup-matrix'` acceleration and `subgroupMatrix` tuning options. Browser use requires `chromium-experimental-subgroup-matrix`; native use requires wgpu cooperative-matrix support. On native hosts the kernel also computes the final RGB convolution with matrices.
 
 ### Changed
 
 - Default FP16 GEMM denoising is faster on the tested Apple M4 Max, with increased first-time initialization cost. Outputs differ slightly from the previous FP16 path; `gemm: { decoderSubPixel: false }` restores its decoder calculation. FP32 defaults are unchanged.
 - Native denoising uses less temporary GPU memory. Native FP16 GEMM also runs faster with shader runtime checks enabled on the tested Apple M4 Max.
 - Native cooperative-matrix denoising has lower execution latency on the tested Apple M4 Max. Large also uses less temporary GPU memory. Shader compilation may take longer.
-- Native cooperative-matrix denoising also computes the final RGB convolution with matrices and FP32 accumulation. Outputs differ slightly from the previous native release and are closer to FP32 results.
 - GPU profiles now sum network time across all tiles of a completed image, rather than reporting only its first tile. Image preprocessing and output conversion are excluded.
 
 ### Fixed

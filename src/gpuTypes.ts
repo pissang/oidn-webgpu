@@ -1,6 +1,7 @@
 /**
  * The WebGPU subset used by the native WGSL runtime, as structural types and
- * spec-defined flag values. A browser GPUDevice satisfies these interfaces;
+ * spec-defined flag values. A browser GPUDevice implements these operations,
+ * but its branded TypeScript types need the conversion in nativeUNet.ts;
  * they also let an embedder supply its own device (for example one that
  * records the work for replay in a native wgpu host) without lib.dom or
  * WebGPU globals.

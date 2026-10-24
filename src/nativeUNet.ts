@@ -9,15 +9,44 @@ import {
   type OIDNGPUMappableBuffer,
   type OIDNGPUQuerySet
 } from './gpuTypes.js';
+import type { ValidatedUNetModel } from './modelSpec';
 import {
   createInputPackShader,
   NativeUNetCore,
+  resolveNativeUNetPrecision as resolveCorePrecision,
+  selectSubgroupMatrixConfig as selectCoreSubgroupMatrixConfig,
   type CachedExecution,
+  type NativeSubgroupMatrixConfig,
   type NativeUNetExecutionProfile,
+  type NativeUNetOptions,
+  type NativeUNetPrecision,
+  type NativeUNetPrecisionSetting,
   type NativePipelineSpec
 } from './nativeUNetCore.js';
 
+// The browser declarations below shadow the core's OIDNGPUDevice signatures.
 export * from './nativeUNetCore.js';
+
+// A GPUDevice provides every OIDNGPUAsyncDevice operation at runtime, but its
+// branded WebGPU types (GPUBindGroup, Iterable<GPUCommandBuffer>) are not
+// structurally assignable, so the browser API converts at this boundary.
+function asOIDNDevice(device: GPUDevice) {
+  return device as unknown as OIDNGPUAsyncDevice;
+}
+
+export function resolveNativeUNetPrecision(
+  device: GPUDevice,
+  requested?: NativeUNetPrecisionSetting
+): NativeUNetPrecision {
+  return resolveCorePrecision(asOIDNDevice(device), requested);
+}
+
+export function selectSubgroupMatrixConfig(
+  device: GPUDevice,
+  accumulation?: 'f32' | 'f16'
+): NativeSubgroupMatrixConfig | undefined {
+  return selectCoreSubgroupMatrixConfig(asOIDNDevice(device), accumulation);
+}
 
 const pendingPipelinesByDevice = new WeakMap<
   OIDNGPUDevice,
@@ -30,6 +59,23 @@ const pendingPipelinesByDevice = new WeakMap<
  */
 export class NativeUNetExecutor extends NativeUNetCore {
   private _lastExecutionProfile?: Promise<NativeUNetExecutionProfile>;
+
+  constructor(
+    device: GPUDevice,
+    model: ValidatedUNetModel,
+    options?: NativeUNetOptions
+  ) {
+    super(asOIDNDevice(device), model, options);
+  }
+
+  // Inputs and outputs are buffers of the browser device, so they are GPUBuffers.
+  override execute(
+    inputBuffers: readonly GPUBuffer[],
+    width: number,
+    height: number
+  ): GPUBuffer {
+    return super.execute(inputBuffers, width, height) as unknown as GPUBuffer;
+  }
 
   private get _asyncDevice() {
     return this._device as OIDNGPUAsyncDevice;
@@ -195,7 +241,7 @@ export class NativeUNetExecutor extends NativeUNetCore {
       );
     }
 
-    const output = this.execute(execution.cpuInputBuffers, width, height);
+    const output = super.execute(execution.cpuInputBuffers, width, height);
     const encoder = this._device.createCommandEncoder({
       label: `oidn/cpu-readback/${width}x${height}`
     });
