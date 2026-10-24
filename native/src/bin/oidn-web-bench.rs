@@ -4,6 +4,7 @@
 //!     [--kernel implicit-gemm|direct|auto] [--precision fp16|fp32]
 //!     [--batch 50] [--rounds 5]
 //!     [--input tensor.f32] [--output denoised.f32] [--unchecked]
+//!     [--backend vulkan|metal|dx12]
 //!
 //! `--input` holds interleaved f32 pixels with the model's input channels in
 //! the network's transfer space (as for the browser `executeCPU`); `--output`
@@ -33,7 +34,17 @@ fn main() -> Result<(), String> {
     };
     let tza = std::fs::read(&weights).map_err(|e| format!("{weights}: {e}"))?;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    // Cooperative matrices need Vulkan on Windows, where wgpu prefers DX12.
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    if let Some(backend) = option("--backend") {
+        descriptor.backends = match backend.as_str() {
+            "vulkan" => wgpu::Backends::VULKAN,
+            "metal" => wgpu::Backends::METAL,
+            "dx12" => wgpu::Backends::DX12,
+            other => return Err(format!("unknown backend {other}")),
+        };
+    }
+    let instance = wgpu::Instance::new(descriptor);
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
