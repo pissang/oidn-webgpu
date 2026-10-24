@@ -94,19 +94,20 @@ function markdown() {
     `${report.environment.cpu}; macOS ${report.environment.macOS} (${report.environment.osBuild}); ${report.environment.chrome}; ${report.date}.`, '',
     `Baseline: \`${report.baselineCommit}\`; current: \`${report.currentCommit}\`.`, '',
     `Median ms per image, ${options.warmup} warmups and ${options.runs} measured synchronized executions. GPU-resident RGBA32F HDR color/albedo/normal; inputScale=1. Includes preprocessing and output conversion; excludes uploads, readback and preparation.`, '',
+    'Percentages show lower latency relative to 0.5.0: (baseline − measured) / baseline × 100%. P95, preparation timings and every sample remain in the JSON report.', '',
     'All oidn-web paths use FP16. Ordinary Chrome has no unsafe WebGPU flag. Matrix Chrome uses `--enable-unsafe-webgpu`. Native runtime checks are disabled (C API default). OIDN uses the same TZA files: Small/fast, Base/high, Large/high with cleanAux=true.', '',
-    `| Model | Resolution | ${labels.join(' | ')} |`,
+    `| Model | Input | ${labels.join(' | ')} |`,
     `| --- | --- | ${labels.map(() => '---:').join(' | ')} |`];
   for (const entry of report.cases) {
-    lines.push(`| ${entry.model} | ${entry.width}×${entry.height} | ${labels.map((label) => entry.results.find((r) => r.label === label)?.summary?.medianMs.toFixed(2) ?? '—').join(' | ')} |`);
-  }
-  lines.push('', '## Timing spread and preparation', '',
-    'Preparation is reported separately and is affected by driver caches. Browser preparation includes local weight fetching; native/OIDN preparation starts after weights and images are loaded. These initialization columns are not equivalent cold-start benchmarks.', '',
-    '| Model | Resolution | Runtime | Median ms | P95 ms | Min ms | Preparation ms |',
-    '| --- | --- | --- | ---: | ---: | ---: | ---: |');
-  for (const entry of report.cases) for (const result of entry.results) {
-    const s = result.summary;
-    lines.push(`| ${entry.model} | ${entry.width}×${entry.height} | ${result.label} | ${s?.medianMs.toFixed(2) ?? '—'} | ${s?.p95Ms.toFixed(2) ?? '—'} | ${s?.minMs.toFixed(2) ?? '—'} | ${result.initializationMs?.toFixed(2) ?? '—'} |`);
+    const baselineMs = entry.results.find((result) => result.label === labels[0])?.summary?.medianMs;
+    const values = labels.map((label, index) => {
+      const ms = entry.results.find((result) => result.label === label)?.summary?.medianMs;
+      if (ms == null) return '—';
+      if (index === 0 || !baselineMs) return ms.toFixed(2);
+      const reduction = (baselineMs - ms) / baselineMs * 100;
+      return `${ms.toFixed(2)} (${reduction >= 0 ? '↓' : '↑'}${Math.abs(reduction).toFixed(1)}%)`;
+    });
+    lines.push(`| ${entry.model} | ${entry.size} | ${values.join(' | ')} |`);
   }
   lines.push('', '## Model identity', '', '| Model | Weights | SHA-256 |', '| --- | --- | --- |');
   for (const [name, model] of Object.entries(report.models)) lines.push(`| ${name} | ${model.weights} | ${model.sha256} |`);

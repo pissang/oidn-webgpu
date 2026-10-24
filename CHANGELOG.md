@@ -21,9 +21,9 @@ All notable changes to this project are documented in this file.
 
 ### Performance on Apple M4 Max
 
-Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`); current oidn-web results use optimization commit `cd1ff2f`.
+Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`); current oidn-web results use optimization commit `cd1ff2f`, before the input/output sanitizing changes.
 
-Each cell is **median / P95 milliseconds per image**, from 5 warmups and 21 measured executions. Every execution processes one whole image and synchronizes before the next. Inputs and outputs stay in GPU-resident RGBA32F buffers. Timings include HDR preprocessing, network execution, output conversion and host synchronization; they exclude device creation, model preparation, uploads and output readback. These are wall latencies, not GPU timestamp measurements.
+Each cell shows **median milliseconds per image**, from 5 warmups and 21 measured executions. Parentheses show the **latency reduction relative to 0.5.0**, calculated as `(0.5.0 time - measured time) / 0.5.0 time x 100%`. Every execution processes one whole image and synchronizes before the next. Inputs and outputs stay in GPU-resident RGBA32F buffers. Timings include HDR preprocessing, network execution, output conversion and host synchronization; they exclude device creation, model preparation, uploads and output readback. These are wall latencies, not GPU timestamp measurements.
 
 All oidn-web paths use FP16 weights and activations with their default accumulation settings. Ordinary Chrome runs without the unsafe WebGPU flag; Chrome subgroup matrix requires `--enable-unsafe-webgpu`. `oidn-web(native wgpu)` uses Metal cooperative matrices with shader runtime checks disabled, matching the C API default. All paths receive the same HDR color/albedo gradients and constant surface normals, use `inputScale=1`, and load the same TZA weights for each model.
 
@@ -35,19 +35,19 @@ All oidn-web paths use FP16 weights and activations with their default accumulat
 
 | Model | Input | oidn-web 0.5.0 (Chrome) | oidn-web (Chrome) | oidn-web (Chrome subgroup matrix) | oidn-web(native wgpu) | OIDN Metal |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Small | 512 x 512 | 4.90 / 5.00 | 4.30 / 4.40 | 3.80 / 3.80 | 2.87 / 3.60 | 3.71 / 3.86 |
-| Small | 1920 x 1080 | 34.60 / 34.80 | 30.30 / 30.50 | 26.30 / 26.50 | 19.25 / 19.48 | 19.15 / 19.53 |
-| Small | 2560 x 1440 | 61.00 / 61.80 | 53.00 / 54.70 | 45.80 / 46.10 | 33.71 / 33.87 | 33.10 / 33.16 |
-| Base | 512 x 512 | 8.50 / 8.70 | 7.10 / 7.20 | 6.20 / 6.30 | 4.69 / 4.74 | 5.10 / 5.21 |
-| Base | 1920 x 1080 | 64.10 / 67.40 | 53.60 / 55.30 | 47.00 / 48.20 | 38.13 / 38.18 | 38.40 / 38.61 |
-| Base | 2560 x 1440 | 123.80 / 125.10 | 102.30 / 103.40 | 90.50 / 91.70 | 72.31 / 73.28 | 73.39 / 75.06 |
-| Large | 512 x 512 | 22.30 / 22.40 | 18.40 / 19.10 | 17.70 / 17.90 | 13.96 / 14.23 | 11.87 / 12.42 |
-| Large | 1920 x 1080 | 170.70 / 172.90 | 145.00 / 147.30 | 134.50 / 136.80 | 111.10 / 114.04 | 96.04 / 98.25 |
-| Large | 2560 x 1440 | 335.00 / 383.60 | 307.00 / 336.50 | 262.70 / 268.40 | 216.71 / 221.56 | 212.30 / 219.66 |
+| Small | 512 | 4.90 | 4.30 (↓12.2%) | 3.80 (↓22.4%) | 2.87 (↓41.4%) | 3.71 (↓24.2%) |
+| Small | 1080p | 34.60 | 30.30 (↓12.4%) | 26.30 (↓24.0%) | 19.25 (↓44.4%) | 19.15 (↓44.7%) |
+| Small | 2k | 61.00 | 53.00 (↓13.1%) | 45.80 (↓24.9%) | 33.71 (↓44.7%) | 33.10 (↓45.7%) |
+| Base | 512 | 8.50 | 7.10 (↓16.5%) | 6.20 (↓27.1%) | 4.69 (↓44.8%) | 5.10 (↓40.0%) |
+| Base | 1080p | 64.10 | 53.60 (↓16.4%) | 47.00 (↓26.7%) | 38.13 (↓40.5%) | 38.40 (↓40.1%) |
+| Base | 2k | 123.80 | 102.30 (↓17.4%) | 90.50 (↓26.9%) | 72.31 (↓41.6%) | 73.39 (↓40.7%) |
+| Large | 512 | 22.30 | 18.40 (↓17.5%) | 17.70 (↓20.6%) | 13.96 (↓37.4%) | 11.87 (↓46.8%) |
+| Large | 1080p | 170.70 | 145.00 (↓15.1%) | 134.50 (↓21.2%) | 111.10 (↓34.9%) | 96.04 (↓43.7%) |
+| Large | 2k | 335.00 | 307.00 (↓8.4%) | 262.70 (↓21.6%) | 216.71 (↓35.3%) | 212.30 (↓36.6%) |
 
-2K means 2560 x 1440. P95 uses the nearest-rank method. No outlier samples are removed; the Large 2K case had substantial variation (for example, 296.20–384.50 ms for the 0.5.0 baseline). These local timings depend on GPU load, power state, browser, model and image size. They do not measure image quality, first-use latency or interactive tiled execution.
+Input sizes: `512` = 512 x 512, `1080p` = 1920 x 1080, `2k` = 2560 x 1440. No outlier samples are removed; the Large 2k case had substantial variation (for example, 296.20–384.50 ms for the 0.5.0 baseline). These local timings depend on GPU load, power state, browser, model and image size. They do not measure image quality, first-use latency or interactive tiled execution.
 
-The [Mac benchmark suite](docs/development.md#benchmarks-and-gpu-checks) can reproduce these cases and retains every timing sample, model hash, source revision, selected kernel and resource count in its local JSON report.
+The [Mac benchmark suite](docs/development.md#benchmarks-and-gpu-checks) can reproduce these cases and retains every timing sample, P95, model hash, source revision, selected kernel and resource count in its local JSON report.
 
 ## [0.5.0] - 2026-10-09
 
