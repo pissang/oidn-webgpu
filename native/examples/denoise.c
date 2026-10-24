@@ -6,7 +6,8 @@
  *   ./denoise weights.tza width height color.f32 albedo.f32 normal.f32 output.f32
  *     [quality 0-2] [max_tile_size] [runs] [kernel 0-3]
  *
- * albedo/normal may be "-" for models without them. Prints the time of the
+ * Images are raw RGBA f32; albedo is in [0, 1] and normals are signed
+ * [-1, 1]. albedo/normal may be "-" for models without them. Prints the time of the
  * first and following executions after explicit preparation.
  */
 #include <stdio.h>

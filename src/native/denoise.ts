@@ -30,15 +30,17 @@ function alignUp(value: number, alignment: number) {
  * Input processing of one tile for buffer images: clamp-to-edge reads of the
  * tile's input rectangle, the HDR transfer of the color, and RGBA f32 network
  * inputs. Matches the browser runtime's GPU input pass (without the alpha
- * denoising mode).
+ * denoising mode), except that normals are signed [-1, 1] as in OIDN.
  */
 function inputShader(sourceCount: number, hdr: boolean, transfer: HDRTransfer) {
   const names = ['color', 'albedo', 'normal'].slice(0, sourceCount);
   const bindings = names.map((name, index) => `
 @group(0) @binding(${index}) var<storage, read> in_${name}: array<vec4f>;
 @group(0) @binding(${sourceCount + index}) var<storage, read_write> out_${name}: array<vec4f>;`).join('');
-  const copies = names.slice(1).map((name) =>
-    `out_${name}[outIdx] = vec4f(in_${name}[inIdx].rgb, 0.0);`).join('\n  ');
+  // Like OIDN, callers pass signed [-1, 1] normals; the network reads n * 0.5 + 0.5.
+  const copies = names.slice(1).map((name) => name === 'normal'
+    ? 'out_normal[outIdx] = vec4f(clamp(in_normal[inIdx].rgb, vec3f(-1.0), vec3f(1.0)) * 0.5 + 0.5, 0.0);'
+    : `out_${name}[outIdx] = vec4f(in_${name}[inIdx].rgb, 0.0);`).join('\n  ');
   return /* wgsl */ `${hdrForwardWGSL(transfer)}
 struct Params {
   imageSize: vec2i,

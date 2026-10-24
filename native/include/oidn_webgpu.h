@@ -142,8 +142,9 @@ int32_t oidnw_filter_prepare(const oidnw_filter *filter, uint32_t width, uint32_
   char *error, size_t capacity);
 /* Denoises one image. All images are width x height RGBA f32 pixels, tightly
  * packed, in the same row order; albedo and normal are required as the model
- * reads them (otherwise ignored, may be NULL). The output keeps the color's
- * alpha and may alias any input. Blocks until the result is written.
+ * reads them (otherwise ignored, may be NULL). Albedo is linear [0, 1];
+ * normals are signed [-1, 1], as in Open Image Denoise. The output keeps the
+ * color's alpha and may alias any input. Blocks until the result is written.
  * Changing the size plans and allocates for the new size (cached until the
  * next size change). */
 int32_t oidnw_filter_execute(oidnw_filter *filter, uint32_t width, uint32_t height,

@@ -123,7 +123,14 @@ try {
   const paths = {};
   for (const name of ['color', 'albedo', 'normal']) {
     paths[name] = path.join(temporary, `${name}.f32`);
-    await writeFile(paths[name], Buffer.from(result[name], 'base64'));
+    let bytes = Buffer.from(result[name], 'base64');
+    if (name === 'normal') {
+      // The browser reads [0, 1]-encoded normals; the native API reads signed [-1, 1] normals.
+      const normal = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      for (let i = 0; i < normal.length; i++) normal[i] = normal[i] * 2 - 1;
+      bytes = Buffer.from(normal.buffer);
+    }
+    await writeFile(paths[name], bytes);
   }
   const outputPath = path.join(temporary, 'native.f32');
   execFileSync(denoise, [
