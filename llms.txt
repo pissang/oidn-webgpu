@@ -12,7 +12,7 @@
 - [README](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/README.md): overview, runtimes, browser quick start, weights table
 - [Browser guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/web.md): options, input formats, `tileExecute` contract, GPU pipelines, tiling, precision, profiling
 - [Native guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/README.md): Rust `Denoiser` and C filter APIs, image contract, precompiled packages, build configuration
-- [Development guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/development.md): architecture, shared core vs. browser-only code, commands, benchmarks, CI
+- [Development guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/development.md): architecture, shared core vs. browser-only code, commands, benchmarks, native Metal profiling, CI
 - [AGENTS.md](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/AGENTS.md): repository map and rules for changing the code
 
 ## API sources

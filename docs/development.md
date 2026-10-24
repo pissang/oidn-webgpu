@@ -118,12 +118,64 @@ Default inputs are `720p` (1280x720), `1080p` (1920x1080) and `2k` (2560x1440). 
 
 The suite writes raw samples, model and binary hashes, source revisions, selected kernels, resource sizes and a Markdown report to `benchmarks/results/mac-performance.{json,md}`. Its metric is synchronized latency for one GPU-resident RGBA32F HDR image with albedo and normal. It includes preprocessing, network execution and output conversion, and excludes uploads, readback, device creation and preparation. Default protocol: 3 warmups, 7 measured images, whole-image processing, `inputScale=1`. Native runtime checks are disabled to match the C API default. Official OIDN loads the same TZA weights; Small uses fast quality, Base uses high, and Large uses high with clean auxiliary images. This is a timing comparison, not an image-quality comparison.
 
-To repeat the M4 Max table in the changelog, use OIDN 2.5.1 and the same revision and sample counts:
+The changelog combines separate runs. Repeat the earlier Chrome and 1080p/2k comparison with OIDN 2.5.1 and:
 
 ```bash
 OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-performance.mjs \
   --current-ref cd1ff2f --warmup 5 --runs 21
 ```
+
+For a new 720p comparison at the native optimization revision (including fresh Chrome measurements), use:
+
+```bash
+OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-performance.mjs \
+  --current-ref 921236e --models small,base,large --sizes 720p --warmup 5 --runs 21
+```
+
+### Native Metal profiling
+
+On macOS with Xcode installed, Instruments' Metal System Trace records CPU/GPU scheduling and Metal activity. Run from the repository root:
+
+```bash
+cargo build --release --manifest-path native/Cargo.toml --bins
+mkdir -p benchmarks/results
+xcrun xctrace record --template 'Metal System Trace' \
+  --output benchmarks/results/large-native.trace --time-limit 12s --launch -- \
+  "$PWD/native/target/release/oidn-webgpu-denoise-bench" \
+  --weights "$PWD/weights/rt_hdr_calb_cnrm_large.tza" \
+  --width 1280 --height 720 --warmup 5 --runs 100
+```
+
+Xcode 27's `gpucapture` and `gpudebug` also capture and replay compute workloads for per-dispatch costs and shader statistics such as register use and spills. Start a longer run in one terminal:
+
+```bash
+MTL_CAPTURE_ENABLED=1 native/target/release/oidn-webgpu-denoise-bench \
+  --weights weights/rt_hdr_calb_cnrm_large.tza \
+  --width 1280 --height 720 --warmup 5 --runs 400
+```
+
+In another terminal, list the process, then replace `PID` with its ID:
+
+```bash
+xcrun gpucapture list
+xcrun gpucapture start --pid PID --count 64 \
+  --output "$PWD/benchmarks/results/large-native.gputrace" \
+  --disable-backtrace-recording
+xcrun gpudebug --gputrace benchmarks/results/large-native.gputrace
+```
+
+At the `gpudebug>` prompt:
+
+```text
+profile run --exec serial
+profile embed
+go /performance/shaders
+list --all
+info comp0
+exit --terminate
+```
+
+Capture enough command buffers to include complete network executions; a single buffer can contain only initialization, preprocessing or output conversion. Shader indices depend on the trace, and one pipeline can serve multiple layers. Replay costs help locate hotspots; they do not replace the synchronized full-image latency benchmark. Capture/replay adds overhead and can save hundreds of MiB, so run it separately from timing comparisons. Metal timestamp queries returned zero or invalid samples in local tests; validate them before using them as GPU timings.
 
 ## CI and native packages
 
