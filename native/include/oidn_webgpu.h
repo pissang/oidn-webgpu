@@ -1,14 +1,14 @@
-#ifndef OIDN_WEB_H
-#define OIDN_WEB_H
+#ifndef OIDN_WEBGPU_H
+#define OIDN_WEBGPU_H
 /*
- * oidn-web native: an experimental standalone Open Image Denoise `RT` filter
- * running the oidn-web WGSL kernels on the platform GPU API (Metal, Vulkan or
- * Direct3D 12 through wgpu). Library: liboidn_web.dylib / liboidn_web.so /
- * oidn_web.dll. The API and its results may change between versions.
+ * oidn-webgpu native: an experimental standalone Open Image Denoise `RT` filter
+ * running the oidn-webgpu WGSL kernels on the platform GPU API (Metal, Vulkan or
+ * Direct3D 12 through wgpu). Library: liboidn_webgpu.dylib / liboidn_webgpu.so /
+ * oidn_webgpu.dll. The API and its results may change between versions.
  *
  * The filter takes and returns images in CPU memory, like Open Image
  * Denoise's host buffers. Hosts that already render on the GPU can instead
- * plan the work with oidn_web_core.h and replay it on their own device.
+ * plan the work with oidn_webgpu_core.h and replay it on their own device.
  *
  * Conventions:
  * - Functions returning int32_t return OIDNW_OK or an oidnw_status. `error`

@@ -593,7 +593,7 @@ function markdownReport(report) {
         `Profiled GPU total: ${formatNumber(result.executionProfile.totalMs)} ms\n\n` +
         `| Node | GPU ms |\n| --- | ---: |\n${hotLayers}`;
     });
-  return `# oidn-web benchmark\n\n` +
+  return `# oidn-webgpu benchmark\n\n` +
     `- Current: \`${report.currentCommit}\`\n` +
     (report.baselineCommit
       ? `- ${baselineKind[0].toUpperCase()}${baselineKind.slice(1)} baseline: \`${report.baselineCommit}\`\n`

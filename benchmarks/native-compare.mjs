@@ -27,7 +27,7 @@ const browserPrecision = option('--browser-precision', 'fp16');
 const chrome = option('--chrome', process.env.CHROME_PATH) ??
   ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium']
     .find((candidate) => existsSync(candidate));
-const bench = path.join(root, 'native/target/release', process.platform === 'win32' ? 'oidn-web-bench.exe' : 'oidn-web-bench');
+const bench = path.join(root, 'native/target/release', process.platform === 'win32' ? 'oidn-webgpu-bench.exe' : 'oidn-webgpu-bench');
 
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'oidn-native-compare-'));
 try {

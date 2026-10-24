@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Breaking changes
+
+- The package is renamed from `oidn-web` to `oidn-webgpu`. Replace the dependency and imports (`import { initUNetFromURL } from 'oidn-webgpu'`); the API is unchanged.
+
+### Added
+
+- Experimental native runtime with a C API (`native/`): the WGSL kernels run through wgpu on Metal, Vulkan or Direct3D 12, planned by the TypeScript core compiled with scriptc. Build with `npm run native:build`.
+- Experimental `kernel: 'subgroup-matrix'` using `chromium-experimental-subgroup-matrix` (or wgpu cooperative matrices natively), with sub-pixel decoder convolutions and `subgroupMatrix` tuning options.
+
 ## [0.5.0] - 2026-10-09
 
 oidn-web 0.5.0 simplifies device setup, makes tiled execution always settle, and switches FP16 convolutions to implicit GEMM. It contains breaking changes for TypeScript callers that pass `adapterInfo`, for code that constructs `UNet` directly, and for code that relies on square tiles or per-frame tile pacing.

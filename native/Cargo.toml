@@ -1,14 +1,14 @@
 [package]
-name = "oidn-web-native"
+name = "oidn-webgpu-native"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Experimental native wgpu runtime for oidn-web, driven by its scriptc-compiled TypeScript core"
+description = "Experimental native wgpu runtime for oidn-webgpu, driven by its scriptc-compiled TypeScript core"
 publish = false
 
 [lib]
-name = "oidn_web"
-# rlib for Rust tools, cdylib/staticlib for the C API (include/oidn_web.h).
+name = "oidn_webgpu"
+# rlib for Rust tools, cdylib/staticlib for the C API (include/oidn_webgpu.h).
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]

@@ -1,15 +1,15 @@
-#ifndef OIDN_WEB_CORE_H
-#define OIDN_WEB_CORE_H
+#ifndef OIDN_WEBGPU_CORE_H
+#define OIDN_WEBGPU_CORE_H
 /*
- * oidn-web native planner: the oidn-web TypeScript core compiled by scriptc
- * into a static library (liboidn_web_core.a / oidn_web_core.lib) with no GPU
+ * oidn-webgpu native planner: the oidn-webgpu TypeScript core compiled by scriptc
+ * into a static library (liboidn_webgpu_core.a / oidn_webgpu_core.lib) with no GPU
  * dependency. It plans a denoising for one image size and device and returns
  * it as a program that the host replays with its own GPU API, sharing its
  * device and image buffers without copies. native/src/lib.rs replays programs
  * with wgpu and is the reference implementation.
  *
  * The functions use process-global state and are not thread-safe: serialize
- * all calls. Call oidn_core_init once before the first recording.
+ * all calls. Call oidnw_core_init once before the first recording.
  *
  * The scriptc runtime is localized to this archive, so it links beside other
  * scriptc libraries.
@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-void oidn_core_init(void);
+void oidnw_core_init(void);
 
 /*
  * Records the whole denoising of one image: tiles, input processing (HDR
@@ -43,7 +43,7 @@ void oidn_core_init(void);
  *        2 on), accumulation (0 f32, 1 f16), sub-pixel decoders (0 on, 1 off),
  *     then 4 denoising words: hdr (0/1), transfer (0 PU, 1 log),
  *        maximum tile edge (0 = whole image), input scale (f32 bits, 0 = 1).
- *   program/program_size: receives the program, valid until oidn_core_reset.
+ *   program/program_size: receives the program, valid until oidnw_core_reset.
  *
  * Program: little-endian u32 words; strings and byte blobs are a u32 length
  * followed by the bytes padded to 4. Magic 0x4e44494f ("OIDN") then:
@@ -73,21 +73,21 @@ void oidn_core_init(void);
  * wgpu's `wgpu_cooperative_matrix` (feature bit 8) or Chrome's
  * `chromium_experimental_subgroup_matrix` (bit 4) spelling.
  */
-void oidn_core_record_denoise(const uint8_t *weights, size_t weights_size,
+void oidnw_core_record_denoise(const uint8_t *weights, size_t weights_size,
   const uint8_t *config, size_t config_size,
   const uint8_t **program, size_t *program_size);
 
 /* Records only the U-Net for one input size (same config without the 4
  * denoising words): inputs are RGBA f32 tensors in the network's transfer
  * space and the output buffer is internal (output external = 0). */
-void oidn_core_record_network(const uint8_t *weights, size_t weights_size,
+void oidnw_core_record_network(const uint8_t *weights, size_t weights_size,
   const uint8_t *config, size_t config_size,
   const uint8_t **program, size_t *program_size);
 
 /* Releases the last returned program. */
-void oidn_core_reset(void);
+void oidnw_core_reset(void);
 /* Frees unreachable scriptc heap memory. */
-void oidn_core_collect(void);
+void oidnw_core_collect(void);
 
 #ifdef __cplusplus
 }

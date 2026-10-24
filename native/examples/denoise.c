@@ -1,8 +1,8 @@
 /*
- * Denoises raw RGBA f32 images with the oidn-web C API.
+ * Denoises raw RGBA f32 images with the oidn-webgpu C API.
  *
  *   cc -O2 -I native/include native/examples/denoise.c \
- *     -L native/target/release -loidn_web -Wl,-rpath,native/target/release -o denoise
+ *     -L native/target/release -loidn_webgpu -Wl,-rpath,native/target/release -o denoise
  *   ./denoise weights.tza width height color.f32 albedo.f32 normal.f32 output.f32
  *     [quality 0-2] [max_tile_size] [runs] [kernel 0-3]
  *
@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "oidn_web.h"
+#include "oidn_webgpu.h"
 
 static void *read_file(const char *path, size_t *size) {
   FILE *file = fopen(path, "rb");

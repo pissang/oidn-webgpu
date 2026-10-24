@@ -2,13 +2,13 @@
  * Plans a denoising with the planner-only library and prints the program's
  * size and resource counts, for hosts that replay programs on their own GPU.
  *
- *   cc -O2 -I native/include native/examples/plan.c .native-build/liboidn_web_core.a -o plan
+ *   cc -O2 -I native/include native/examples/plan.c .native-build/liboidn_webgpu_core.a -o plan
  *   ./plan weights.tza width height
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "oidn_web_core.h"
+#include "oidn_webgpu_core.h"
 
 static uint32_t word(const uint8_t *data, size_t index) {
   uint32_t value;
@@ -39,10 +39,10 @@ int main(int argc, char **argv) {
     0, 0, 0,    /* subgroup-matrix options */
     1, 0, 0, 0  /* hdr, PU transfer, whole image, input scale 1 */
   };
-  oidn_core_init();
+  oidnw_core_init();
   const uint8_t *program = NULL;
   size_t program_size = 0;
-  oidn_core_record_denoise(weights, size, (const uint8_t *)config, sizeof config, &program, &program_size);
+  oidnw_core_record_denoise(weights, size, (const uint8_t *)config, sizeof config, &program, &program_size);
   if (!program || program_size < 8 || word(program, 0) != 0x4e44494fu) {
     fprintf(stderr, "planning failed: %.*s\n", program_size > 8 ? (int)word(program, 1) : 0,
       program_size > 8 ? (const char *)program + 8 : "");
@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
   uint32_t inputs = word(program, 2);
   size_t index = 3 + inputs + 1 + 1 + 3;
   printf("program %zu bytes, %u inputs, %u buffers\n", program_size, inputs, word(program, index));
-  oidn_core_reset();
+  oidnw_core_reset();
   free(weights);
   return 0;
 }

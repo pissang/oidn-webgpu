@@ -1,4 +1,4 @@
-// End-to-end check of the native C API (native/include/oidn_web.h) against
+// End-to-end check of the native C API (native/include/oidn_webgpu.h) against
 // the browser runtime: both denoise examples/test (HDR color, albedo,
 // normal) as RGBA f32 GPU buffers, and the outputs are compared.
 //

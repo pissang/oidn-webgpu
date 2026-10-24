@@ -1,11 +1,11 @@
-//! Experimental native runtime for oidn-web.
+//! Experimental native runtime for oidn-webgpu.
 //!
 //! The TypeScript core (`src/native/program.ts`, compiled by scriptc) plans a
 //! denoising (or the bare network) for one image size and records it as a
 //! program: buffers with their initial data, WGSL shaders, pipelines, bind
 //! groups and the commands of one execution. This crate creates those
 //! resources on a wgpu device once and encodes the recorded commands for every
-//! execution. The C API (`capi`, `include/oidn_web.h`) builds a standalone
+//! execution. The C API (`capi`, `include/oidn_webgpu.h`) builds a standalone
 //! denoiser on it.
 
 pub mod capi;
@@ -13,9 +13,9 @@ pub mod capi;
 use std::sync::{Mutex, Once};
 
 unsafe extern "C" {
-    fn oidn_core_init();
-    fn oidn_core_reset();
-    fn oidn_core_record_network(
+    fn oidnw_core_init();
+    fn oidnw_core_reset();
+    fn oidnw_core_record_network(
         tza: *const u8,
         tza_length: usize,
         config: *const u8,
@@ -23,7 +23,7 @@ unsafe extern "C" {
         output: *mut *const u8,
         size: *mut usize,
     );
-    fn oidn_core_record_denoise(
+    fn oidnw_core_record_denoise(
         tza: *const u8,
         tza_length: usize,
         config: *const u8,
@@ -101,13 +101,13 @@ static CORE: Mutex<()> = Mutex::new(());
 
 fn record(tza: &[u8], config: &[u32], denoise: bool) -> Result<Vec<u8>> {
     static INIT: Once = Once::new();
-    let _guard = CORE.lock().map_err(|_| "oidn-web core lock poisoned")?;
-    INIT.call_once(|| unsafe { oidn_core_init() });
+    let _guard = CORE.lock().map_err(|_| "oidn-webgpu core lock poisoned")?;
+    INIT.call_once(|| unsafe { oidnw_core_init() });
     let config_bytes: Vec<u8> = config.iter().flat_map(|word| word.to_le_bytes()).collect();
     let mut pointer = std::ptr::null();
     let mut size = 0usize;
     let bytes = unsafe {
-        let entry = if denoise { oidn_core_record_denoise } else { oidn_core_record_network };
+        let entry = if denoise { oidnw_core_record_denoise } else { oidnw_core_record_network };
         entry(
             tza.as_ptr(),
             tza.len(),
@@ -117,11 +117,11 @@ fn record(tza: &[u8], config: &[u32], denoise: bool) -> Result<Vec<u8>> {
             &mut size,
         );
         if pointer.is_null() {
-            oidn_core_reset();
-            return Err("oidn-web core returned no program".into());
+            oidnw_core_reset();
+            return Err("oidn-webgpu core returned no program".into());
         }
         let bytes = std::slice::from_raw_parts(pointer, size).to_vec();
-        oidn_core_reset();
+        oidnw_core_reset();
         bytes
     };
     Ok(bytes)
@@ -138,7 +138,7 @@ impl<'a> Reader<'a> {
         let word = self
             .bytes
             .get(self.offset..end)
-            .ok_or("truncated oidn-web program")?;
+            .ok_or("truncated oidn-webgpu program")?;
         self.offset = end;
         Ok(u32::from_le_bytes(word.try_into().unwrap()))
     }
@@ -148,7 +148,7 @@ impl<'a> Reader<'a> {
         let data = self
             .bytes
             .get(self.offset..self.offset + length)
-            .ok_or("truncated oidn-web program")?;
+            .ok_or("truncated oidn-webgpu program")?;
         self.offset += (length + 3) & !3;
         Ok(data)
     }
@@ -201,11 +201,11 @@ impl Program {
         match reader.u32()? {
             PROGRAM_MAGIC => {}
             ERROR_MAGIC => return Err(reader.string()?),
-            magic => return Err(format!("unexpected oidn-web program magic {magic:#x}")),
+            magic => return Err(format!("unexpected oidn-webgpu program magic {magic:#x}")),
         }
         let version = reader.u32()?;
         if version != 2 {
-            return Err(format!("unsupported oidn-web program version {version}"));
+            return Err(format!("unsupported oidn-webgpu program version {version}"));
         }
         let input_count = reader.u32()?;
         let inputs = (0..input_count)
@@ -264,7 +264,7 @@ impl Program {
                                 destination_offset: reader.u32()? as u64,
                                 size: reader.u32()? as u64,
                             },
-                            kind => return Err(format!("unknown oidn-web command {kind}")),
+                            kind => return Err(format!("unknown oidn-webgpu command {kind}")),
                         });
                     }
                     operations.push(Operation::Submit(commands));
@@ -274,7 +274,7 @@ impl Program {
                     offset: reader.u32()? as u64,
                     data: reader.bytes()?.to_vec(),
                 }),
-                kind => return Err(format!("unknown oidn-web operation {kind}")),
+                kind => return Err(format!("unknown oidn-webgpu operation {kind}")),
             }
         }
         Ok(Self {
@@ -510,7 +510,7 @@ impl Network {
             .iter()
             .map(|code| {
                 let descriptor = wgpu::ShaderModuleDescriptor {
-                    label: Some("oidn-web"),
+                    label: Some("oidn-webgpu"),
                     source: wgpu::ShaderSource::Wgsl(code.as_str().into()),
                 };
                 if unchecked {
@@ -531,7 +531,7 @@ impl Network {
             .iter()
             .map(|(shader, entry_point)| {
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("oidn-web"),
+                    label: Some("oidn-webgpu"),
                     layout: None,
                     module: &modules[*shader],
                     entry_point: Some(entry_point),
@@ -561,7 +561,7 @@ impl Network {
                     })
                     .collect::<Vec<_>>();
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("oidn-web"),
+                    label: Some("oidn-webgpu"),
                     layout: &pipelines[group.pipeline].get_bind_group_layout(group.group),
                     entries: &entries,
                 })
@@ -616,7 +616,7 @@ impl Network {
                                 let pass = pass.get_or_insert_with(|| {
                                     encoder
                                         .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                            label: Some("oidn-web"),
+                                            label: Some("oidn-webgpu"),
                                             timestamp_writes: None,
                                         })
                                         .forget_lifetime()

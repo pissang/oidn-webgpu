@@ -1,5 +1,5 @@
 {
-  "name": "oidn-web-native-toolchain",
+  "name": "oidn-webgpu-native-toolchain",
   "private": true,
   "version": "0.0.0",
   "engines": { "node": ">=22" },

@@ -1,4 +1,4 @@
-//! C API of the standalone denoiser; documented in `include/oidn_web.h`.
+//! C API of the standalone denoiser; documented in `include/oidn_webgpu.h`.
 
 use crate::{DenoiseConfig, Kernel, Network, NetworkConfig, Precision};
 use std::ffi::c_char;
@@ -173,7 +173,7 @@ pub unsafe extern "C" fn oidnw_device_create(
             }))
             .map_err(|failure| Failure(OIDNW_ERROR_UNAVAILABLE, format!("no GPU adapter: {failure}")))?;
             let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("oidn-web"),
+                label: Some("oidn-webgpu"),
                 required_features: adapter.features() & wanted_features(),
                 required_limits: adapter.limits(),
                 // SAFETY: cooperative matrices are an experimental wgpu feature
@@ -328,11 +328,11 @@ fn create_execution(filter: &OidnwFilter, width: u32, height: u32) -> Outcome<Ex
         })
     };
     let inputs = (0..filter.sources)
-        .map(|_| storage("oidn-web input", wgpu::BufferUsages::COPY_DST))
+        .map(|_| storage("oidn-webgpu input", wgpu::BufferUsages::COPY_DST))
         .collect::<Vec<_>>();
-    let output = storage("oidn-web output", wgpu::BufferUsages::COPY_SRC);
+    let output = storage("oidn-webgpu output", wgpu::BufferUsages::COPY_SRC);
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("oidn-web readback"),
+        label: Some("oidn-webgpu readback"),
         size,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,

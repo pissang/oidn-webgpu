@@ -1,7 +1,9 @@
-# Open Image Denoise on the Web
+# oidn-webgpu
 
-This library brings the state-of-the-art AI-based denoising library [Open Image Denoise](https://github.com/RenderKit/oidn) to the web.
-Currently it's only available on the browsers support WebGPU.
+This library brings the state-of-the-art AI-based denoising library [Open Image Denoise](https://github.com/RenderKit/oidn) to WebGPU.
+It runs in browsers that support WebGPU, and natively through [wgpu](https://wgpu.rs) with a C API (experimental, see [native/README.md](native/README.md)).
+
+> Formerly published as `oidn-web`; versions up to 0.5.0 remain available under that name.
 
 It's used in the [Vector to 3D](https://www.figma.com/community/plugin/1264600219316901594/) Figma plugin for high quality rendering and denoising.
 
@@ -35,7 +37,7 @@ shader compilation does not interrupt an interactive denoise.
 ### Install
 
 ```shell
-npm i oidn-web
+npm i oidn-webgpu
 ```
 
 The TZA weights files are not included in the package. You can find them in this repo or [oidn-weights](https://github.com/RenderKit/oidn-weights).
@@ -43,7 +45,7 @@ The TZA weights files are not included in the package. You can find them in this
 ### Denoise a noisy LDR image
 
 ```ts
-import { UNet, initUNetFromURL } from 'oidn-web';
+import { UNet, initUNetFromURL } from 'oidn-webgpu';
 initUNetFromURL('./weights/rt_ldr.tza').then((unet) => {
   // Read the image data.
   const noisyImageData = noisyCanvas
@@ -70,7 +72,7 @@ initUNetFromURL('./weights/rt_ldr.tza').then((unet) => {
 ### Denoise a noisy HDR image
 
 ```ts
-import { UNet, initUNetFromURL } from 'oidn-web';
+import { UNet, initUNetFromURL } from 'oidn-webgpu';
 initUNetFromURL('./weights/rt_hdr.tza', undefined, {
   // It's hdr input.
   hdr: true
@@ -108,7 +110,7 @@ existing default of `1`.
 ### Use auxiliary images
 
 ```ts
-import { UNet, initUNetFromURL } from 'oidn-web';
+import { UNet, initUNetFromURL } from 'oidn-webgpu';
 initUNetFromURL('./weights/rt_hdr_alb_nrm.tza', undefined, {
   aux: true,
   hdr: true
@@ -132,7 +134,7 @@ initUNetFromURL('./weights/rt_hdr_alb_nrm.tza', undefined, {
 
 ### Integrate into your WebGPU Pipeline
 
-If you already have a WebGPU path tracer. You can integrate the oidn-web into your pipeline. It supports input/output gpu buffers to avoid the cost of syncing between CPU and GPU.
+If you already have a WebGPU path tracer. You can integrate oidn-webgpu into your pipeline. It supports input/output gpu buffers to avoid the cost of syncing between CPU and GPU.
 
 `hdr` and `aux` are required in the WebGPU pipeline.
 

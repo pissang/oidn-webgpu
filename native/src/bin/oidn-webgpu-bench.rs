@@ -1,6 +1,6 @@
-//! Benchmarks and checks the native oidn-web network.
+//! Benchmarks and checks the native oidn-webgpu network.
 //!
-//!   oidn-web-bench --weights rt_hdr_alb_nrm.tza --width 512 --height 512
+//!   oidn-webgpu-bench --weights rt_hdr_alb_nrm.tza --width 512 --height 512
 //!     [--kernel implicit-gemm|direct|auto] [--precision fp16|fp32]
 //!     [--batch 50] [--rounds 5]
 //!     [--input tensor.f32] [--output denoised.f32] [--unchecked]
@@ -10,7 +10,7 @@
 //! `--input` holds interleaved f32 pixels with the model's input channels in
 //! the network's transfer space (as for the browser `executeCPU`); `--output`
 //! receives interleaved RGB f32 pixels in the same space.
-use oidn_web::{Kernel, Network, NetworkConfig, Precision};
+use oidn_webgpu::{Kernel, Network, NetworkConfig, Precision};
 use std::time::{Duration, Instant};
 
 fn main() -> Result<(), String> {
@@ -164,7 +164,7 @@ fn main() -> Result<(), String> {
     if let Some(path) = option("--output") {
         let size = (pixels * 16) as u64;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("oidn-web readback"),
+            label: Some("oidn-webgpu readback"),
             size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
