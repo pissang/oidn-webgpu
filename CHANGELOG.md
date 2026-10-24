@@ -26,7 +26,7 @@ All notable changes to this project are documented in this file.
 
 ### Performance on Apple M4 Max
 
-Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`). Chrome results and all 1080p/2k rows retain the earlier measurements against optimization commit `cd1ff2f`, before input/output sanitizing. The 720p native and OIDN columns were remeasured together; native uses `921236e`, which includes sanitizing.
+Measured on 2026-10-24: Apple M4 Max (40 GPU cores), macOS 27.0.1 (26A434), Chrome 155.0.8059.85 and official OIDN 2.5.1 Metal. The release baseline is `v0.5.0` (`6428fc3`). Chrome results and all 1080p/2k rows retain the earlier measurements against optimization commit `738e869`, before input/output sanitizing. The 720p native and OIDN columns were remeasured together; native uses `e768242`, which includes sanitizing.
 
 Each cell shows **median milliseconds per image**, from 5 warmups and 21 measured executions. Parentheses show the **latency reduction relative to 0.5.0**, calculated as `(0.5.0 time - measured time) / 0.5.0 time x 100%`. Every execution processes one whole image and synchronizes before the next. Inputs and outputs stay in GPU-resident RGBA32F buffers. Timings include HDR preprocessing, network execution, output conversion and host synchronization; they exclude device creation, model preparation, uploads and output readback. These are wall latencies, not GPU timestamp measurements.
 
@@ -50,7 +50,7 @@ All oidn-web paths use FP16 weights and activations with their default accumulat
 | Large | 1080p | 170.70 ms | 145.00 ms (↓15.1%) | 134.50 ms (↓21.2%) | 111.10 ms (↓34.9%) | 96.04 ms (↓43.7%) |
 | Large | 2k | 335.00 ms | 307.00 ms (↓8.4%) | 262.70 ms (↓21.6%) | 216.71 ms (↓35.3%) | 212.30 ms (↓36.6%) |
 
-Against `2ca3fbf`, which already includes sanitizing, Large native 720p latency decreased from 39.65 to 37.69 ms (4.9%). It remains 9.0% slower than OIDN Metal in this comparison.
+Against `0878cca`, which already includes sanitizing, Large native 720p latency decreased from 39.65 to 37.69 ms (4.9%). It remains 9.0% slower than OIDN Metal in this comparison.
 
 A later Large native 720p optimization reduced latency from 37.68 to 37.21 ms (1.2%) and temporary GPU memory from 322.6 to 280.2 MB (13.1%), using the same device and timing protocol. The table above shows the earlier measurements.
 

@@ -46,6 +46,7 @@ Benchmarks and GPU checks: [docs/development.md#benchmarks-and-gpu-checks](docs/
 6. **CI has no GPU.** Unit tests use mock devices. For kernel, precision or tiling changes, run the GPU checks on real hardware; if you cannot, say in your summary that GPU execution was not verified.
 7. **Changelog.** User-visible changes go under `[Unreleased]` in `CHANGELOG.md`, with migration notes for breaking changes. Experimental options (`engine: 'webnn'`, `kernel`, `gemm`, `subgroupMatrix`) are not covered by semver.
 8. **Generated files stay out of git:** `lib/`, `dist/`, `.native-build/`, `native/target/`, `benchmarks/results/`. Do not modify files in `weights/`.
+9. **Plans stay local.** Do not add or commit files under `plans/`.
 
 ## Documentation rules
 

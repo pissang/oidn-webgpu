@@ -134,3 +134,6 @@ lib
 # Local browser benchmark output
 benchmarks/results/
 .native-build/
+
+# Local working notes
+/plans/

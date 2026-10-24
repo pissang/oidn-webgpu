@@ -122,14 +122,14 @@ The changelog combines separate runs. Repeat the earlier Chrome and 1080p/2k com
 
 ```bash
 OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-performance.mjs \
-  --current-ref cd1ff2f --warmup 5 --runs 21
+  --current-ref 738e869 --warmup 5 --runs 21
 ```
 
 For a new 720p comparison at the native optimization revision (including fresh Chrome measurements), use:
 
 ```bash
 OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-performance.mjs \
-  --current-ref 921236e --models small,base,large --sizes 720p --warmup 5 --runs 21
+  --current-ref e768242 --models small,base,large --sizes 720p --warmup 5 --runs 21
 ```
 
 ### Native Metal profiling
@@ -198,4 +198,4 @@ No GPU execution runs in CI. The npm unit tests are not run by this workflow; ru
 | `AGENTS.md` | Coding agents | Repository rules |
 | `llms.txt` | LLM tools ([llmstxt.org](https://llmstxt.org)) | Doc index; absolute `main` branch URLs. Update when a doc is added, renamed or re-scoped. |
 | `CHANGELOG.md` | Users upgrading | Every user-visible change, under `[Unreleased]` |
-| `plans/` | Maintainers | Working notes; not user documentation |
+| `plans/` | Maintainers | Local working notes; ignored by Git |
