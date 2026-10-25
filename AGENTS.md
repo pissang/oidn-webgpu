@@ -47,6 +47,7 @@ Benchmarks and GPU checks: [docs/development.md#benchmarks-and-gpu-checks](docs/
 7. **Changelog.** User-visible changes go under `[Unreleased]` in `CHANGELOG.md`, with migration notes for breaking changes. Experimental options (`engine: 'webnn'`, `kernel`, `gemm`, `subgroupMatrix`) are not covered by semver.
 8. **Generated files stay out of git:** `lib/`, `dist/`, `.native-build/`, `native/target/`, `benchmarks/results/`. Do not modify files in `weights/`.
 9. **Plans stay local.** Do not add or commit files under `plans/`.
+10. **Keep validation reports in the conversation.** Do not include testing or validation details in notes, code comments, or commit messages. Report them separately in the conversation.
 
 ## Documentation rules
 
