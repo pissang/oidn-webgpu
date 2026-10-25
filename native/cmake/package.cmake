@@ -7,6 +7,10 @@ foreach(variable OIDNW_PACKAGE_DIR OIDNW_VERSION OIDNW_PLATFORM)
   endif()
 endforeach()
 
+# Config helpers forward arguments through macros, where native Windows
+# backslashes would be parsed again as escapes (for example D:\a\...).
+string(REPLACE "\\" "/" OIDNW_PACKAGE_DIR "${OIDNW_PACKAGE_DIR}")
+
 # All shipped targets are 64-bit. ConfigVersion also checks the consumer's
 # pointer size; the package's target triple selects its CPU architecture.
 set(CMAKE_SIZEOF_VOID_P 8)
