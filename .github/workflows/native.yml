@@ -43,15 +43,20 @@ jobs:
         include:
           - runner: macos-15
             target: aarch64-apple-darwin
+            shell: bash
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+            shell: bash
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
+            shell: pwsh
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            shell: bash
     defaults:
       run:
-        shell: bash
+        # Git Bash prepends its own link.exe, hiding the MSVC linker.
+        shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -100,6 +105,7 @@ jobs:
           overwrite: true
           retention-days: 30
       - name: Summarize download
+        shell: bash
         env:
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
         run: |
