@@ -4,19 +4,6 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Added
-
-- Native registry crates bundle SHA-256 verified cores for the four supported targets and build without Node or Zig. A manually triggered workflow verifies isolated crates on all four platforms, then can publish permanent GitHub Release assets and the crate to crates.io.
-- Native packages include a standalone Rust application for GPU-buffer timing and output validation, with its Git dependency pinned to the package source revision. CI compiles and runs its model inspection mode against the packaged core without a GPU.
-- Windows native packages include a standalone MSVC validation example that checks denoised output, repeated executions and CPU-to-CPU latency using the packaged DLL.
-
-### Fixed
-
-- Native crate metadata declares the licenses of bundled runtime components alongside MIT. Distributions retain the required scriptc runtime and V8 notices and omit unused vendor notices.
-- Browser CPU input preserves normalized `Float32Array` albedo and normal values instead of dividing them by 255. `tileExecute` now accepts floating-point auxiliary images in its TypeScript API; 8-bit auxiliary images still use [0, 255].
-- Windows native packages build and link with MSVC, including planner runtime initialization and the C and Rust interfaces. C consumers use the DLL CRT (`/MD`).
-- Native cooperative-matrix denoising produces finite, repeatable output with shader runtime checks disabled on the tested NVIDIA Vulkan device. Shared-memory staging loops now use a uniform iteration count.
-
 ## [0.6.0] - 2026-10-25
 
 oidn-webgpu 0.6.0 is the first release under the new package name. It adds experimental native Rust and C APIs, sanitizes inputs and outputs like OIDN, and lowers default FP16 latency in Chrome by up to 19% on the measured GPUs. The package name is the only breaking change.
@@ -28,6 +15,8 @@ oidn-webgpu 0.6.0 is the first release under the new package name. It adds exper
 ### Added
 
 - Experimental native denoising through Rust and C APIs on Metal, Vulkan or Direct3D 12. Rust hosts can share GPU buffers; the C API accepts CPU images. See the [native guide](native/README.md).
+- Native releases provide precompiled C packages and a Rust crate with SHA-256 verified cores for Windows x86_64 MSVC, Linux x86_64 GNU, macOS x86_64 and macOS ARM64. The bundled crate builds without Node, npm, Zig or build-time downloads from GitHub.
+- Native packages include standalone Rust and Windows MSVC applications for output validation and timing. The Rust application's Git dependency is pinned to the package source revision.
 - Experimental `kernel: 'subgroup-matrix'` and `subgroupMatrix` tuning options. Browsers need `chromium-experimental-subgroup-matrix`; native hosts need wgpu cooperative-matrix support.
 
 ### Changed
@@ -37,6 +26,10 @@ oidn-webgpu 0.6.0 is the first release under the new package name. It adds exper
 
 ### Fixed
 
+- Browser CPU input preserves normalized `Float32Array` albedo and normal values instead of dividing them by 255. `tileExecute` now accepts floating-point auxiliary images in its TypeScript API; 8-bit auxiliary images still use [0, 255].
+- Windows native packages build and link with MSVC. C consumers use the DLL CRT (`/MD`).
+- Native cooperative-matrix denoising produces finite, repeatable output with shader runtime checks disabled on the tested NVIDIA Vulkan device.
+- Native distributions include the required runtime license notices, and the crate declares the bundled components' licenses alongside MIT.
 - Inputs and network outputs are sanitized like OIDN: NaN becomes 0, and color, albedo and normals are clamped to their valid ranges. Previously NaN or out-of-range input could spread across the image, HDR output could be negative and GPU LDR output could exceed 1.
 - `examples/aux.*` are renamed to `examples/auxiliary.*` so the repository can be checked out on Windows, where `AUX` is a reserved file name.
 
