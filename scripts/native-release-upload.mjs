@@ -32,5 +32,5 @@ export async function uploadRelease({assets,manifest,token,apiBase='https://api.
     const response=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/octet-stream'},body:readFileSync(file)});
     assert(response.ok,`upload ${name}: HTTP ${response.status}`);
   }
-  if(release.draft)await api(`releases/${release.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({draft:false})});
+  if(release.draft)assert(await api(`releases/${release.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({draft:false})}),'cannot publish the draft release');
 }

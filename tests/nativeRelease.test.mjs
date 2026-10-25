@@ -11,7 +11,7 @@ async function fixture(t) {
   const assets=mkdtempSync(path.join(os.tmpdir(),'oidn-release-test-'));
   writeFileSync(path.join(assets,'a.lib'),'first core');writeFileSync(path.join(assets,'b.a'),'second core');
   const manifest={release_tag:'native-v0.1.0',source_commit:'a'.repeat(40),crate_version:'0.1.0'};
-  const state={release:null,tag:null,uploads:0,published:0,failUpload:false};
+  const state={release:null,tag:null,uploads:0,published:0,failUpload:false,failPublish:false};
   const server=createServer(async(req,res)=>{
     const chunks=[];for await(const chunk of req)chunks.push(chunk);
     const body=Buffer.concat(chunks),url=new URL(req.url,'http://localhost');
@@ -30,6 +30,7 @@ async function fixture(t) {
       state.uploads++;state.release.assets.push({name:url.searchParams.get('name'),digest:'sha256:'+createHash('sha256').update(body).digest('hex')});return json(201,{});
     }
     if(req.method==='PATCH'&&url.pathname.endsWith('/releases/1')) {
+      if(state.failPublish)return json(404,{});
       state.published++;state.release.draft=false;state.tag=manifest.source_commit;return json(200,state.release);
     }
     json(500,{unexpected:req.url});
@@ -55,4 +56,7 @@ test('native release resumes an interrupted draft without publishing incomplete 
 });
 test('native release refuses an unrelated existing draft commit',async t=>{
   const f=await fixture(t);f.state.release={id:1,draft:true,assets:[],target_commitish:'other-branch'};await assert.rejects(f.run(),/draft release points/);assert.equal(f.state.uploads,0);
+});
+test('native release reports failure if making the draft public fails',async t=>{
+  const f=await fixture(t);f.state.failPublish=true;await assert.rejects(f.run(),/cannot publish the draft release/);assert.equal(f.state.published,0);assert.equal(f.state.release.draft,true);
 });
