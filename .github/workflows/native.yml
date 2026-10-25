@@ -68,6 +68,13 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
+      # scriptc links the Windows core with `zig cc`; 0.16.0 bundles clang
+      # 21.1.0, the compiler its Windows runtime was built with.
+      - name: Set up Zig
+        if: runner.os == 'Windows'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
       - name: Set up Rust
         run: |
           rustup toolchain install stable --profile minimal --no-self-update

@@ -33,7 +33,7 @@ oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissan
 ```
 
 - The crate is not on crates.io. Pin `rev` for reproducible builds.
-- A source build needs stable Rust, a C toolchain, Node 22+ and npm. `cargo build` installs the pinned scriptc compiler (the first build needs the npm registry) and builds the core static library. To skip Node, use a [precompiled core](#build-configuration).
+- A source build needs stable Rust, a C toolchain, Node 22+ and npm; on Windows also Zig 0.16.0 on `PATH`, which scriptc uses to link the core. `cargo build` installs the pinned scriptc compiler (the first build needs the npm registry) and builds the core static library. To skip Node, use a [precompiled core](#build-configuration).
 
 ### wgpu version
 
@@ -142,7 +142,7 @@ Image dimensions must be in 1..=16384 and fit the device's buffer limits.
 
 ### Get the library
 
-Download a [precompiled package](#precompiled-packages), or build one from the repository root (needs Node 22+, npm, stable Rust and a C toolchain):
+Download a [precompiled package](#precompiled-packages), or build one from the repository root (needs Node 22+, npm, stable Rust and a C toolchain; on Windows also Zig 0.16.0):
 
 ```bash
 npm run native:build

@@ -64,7 +64,7 @@ Consequences:
 
 ## Commands
 
-Run from the repository root. Requirements: Node 22+; for native work also stable Rust and a C toolchain.
+Run from the repository root. Requirements: Node 22+; for native work also stable Rust and a C toolchain (on Windows also Zig 0.16.0 on `PATH`).
 
 | Task | Command | Needs a GPU |
 | --- | --- | --- |
