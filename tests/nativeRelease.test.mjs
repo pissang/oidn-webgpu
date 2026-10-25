@@ -11,15 +11,26 @@ async function fixture(t) {
   const assets=mkdtempSync(path.join(os.tmpdir(),'oidn-release-test-'));
   writeFileSync(path.join(assets,'a.lib'),'first core');writeFileSync(path.join(assets,'b.a'),'second core');
   const manifest={release_tag:'native-v0.1.0',source_commit:'a'.repeat(40),crate_version:'0.1.0'};
-  const state={release:null,tag:null,uploads:0,published:0,failUpload:false,failPublish:false};
+  const state={release:null,tag:null,tagType:'commit',refStatus:null,commitStatus:null,tagCommitLookups:0,uploads:0,published:0,failUpload:false,failPublish:false};
   const server=createServer(async(req,res)=>{
     const chunks=[];for await(const chunk of req)chunks.push(chunk);
     const body=Buffer.concat(chunks),url=new URL(req.url,'http://localhost');
     const json=(status,value)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
     if(req.method==='GET'&&url.pathname.endsWith('/releases/tags/native-v0.1.0'))return json(state.release?200:404,state.release);
+    if(req.method==='GET'&&url.pathname.endsWith('/git/ref/tags/native-v0.1.0')) {
+      if(state.refStatus)return json(state.refStatus,{});
+      return json(state.tag?200:404,state.tag?{ref:`refs/tags/${manifest.release_tag}`,object:{type:state.tagType,sha:state.tagType==='tag'?'c'.repeat(40):state.tag}}:{});
+    }
     if(req.method==='GET'&&url.pathname.includes('/commits/')) {
-      const ref=url.pathname.split('/').at(-1);const sha=ref===manifest.source_commit?ref:state.tag;
-      return json(sha?200:404,sha?{sha}:{});
+      const ref=decodeURIComponent(url.pathname.split('/').at(-1));
+      const versionTag=ref===manifest.release_tag||ref===`refs/tags/${manifest.release_tag}`;
+      if(versionTag) {
+        state.tagCommitLookups++;
+        if(state.commitStatus)return json(state.commitStatus,{});
+      }
+      const sha=ref===manifest.source_commit?ref:state.tag;
+      // GitHub's commit endpoint returns 422 for a missing version tag.
+      return json(sha?200:versionTag?422:404,sha?{sha}:{});
     }
     if(req.method==='POST'&&url.pathname.endsWith('/releases')) {
       const value=JSON.parse(body);assert.equal(value.target_commitish,manifest.source_commit);assert.equal(value.draft,true);
@@ -41,6 +52,30 @@ async function fixture(t) {
 }
 test('native release uploads to a draft and retries without replacing published files',async t=>{
   const f=await fixture(t);await f.run();assert.equal(f.state.uploads,2);assert.equal(f.state.published,1);await f.run();assert.equal(f.state.uploads,2);assert.equal(f.state.published,1);
+});
+test('native release publishes without a pre-existing version tag',async t=>{
+  const f=await fixture(t);await f.run();
+  assert.equal(f.state.tagCommitLookups,0);assert.equal(f.state.tag,f.manifest.source_commit);
+  assert.equal(f.state.uploads,2);assert.equal(f.state.published,1);
+});
+test('native release resolves annotated version tags to their source commit',async t=>{
+  const f=await fixture(t);f.state.tag=f.manifest.source_commit;f.state.tagType='tag';await f.run();
+  assert.equal(f.state.tagCommitLookups,1);assert.equal(f.state.published,1);
+});
+test('native release rejects annotated tags pointing to another source revision',async t=>{
+  const f=await fixture(t);f.state.tag='b'.repeat(40);f.state.tagType='tag';
+  await assert.rejects(f.run(),/another commit/);assert.equal(f.state.uploads,0);assert.equal(f.state.release,null);
+});
+test('native release fails on tag reference lookup errors',async t=>{
+  for(const status of [403,422,500]) {
+    const f=await fixture(t);f.state.refStatus=status;
+    await assert.rejects(f.run(),new RegExp(`HTTP ${status}`));
+    assert.equal(f.state.release,null);assert.equal(f.state.uploads,0);
+  }
+});
+test('native release fails when an existing tag cannot be resolved',async t=>{
+  const f=await fixture(t);f.state.tag=f.manifest.source_commit;f.state.commitStatus=422;
+  await assert.rejects(f.run(),/HTTP 422/);assert.equal(f.state.release,null);assert.equal(f.state.uploads,0);
 });
 test('native release rejects changed content in an existing asset',async t=>{
   const f=await fixture(t);await f.run();writeFileSync(path.join(f.assets,'a.lib'),'modified');await assert.rejects(f.run(),/refusing to replace/);assert.equal(f.state.uploads,2);

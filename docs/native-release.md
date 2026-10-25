@@ -106,7 +106,9 @@ and revokes it on job completion. See the [official action](https://github.com/r
 ### Retry behavior
 
 Publication starts with a draft Release and publishes it after every asset is
-uploaded. A retry reuses matching SHA-256 assets in an existing draft or published
+uploaded. The version tag does not need to exist before publication; an existing
+tag must resolve to the selected source commit, including annotated tags.
+A retry reuses matching SHA-256 assets in an existing draft or published
 Release. It refuses a tag pointing to another commit, differing existing asset
 digests, or additions to an already published Release. It never uses an asset
 overwrite operation. If registry authentication fails after assets are published,

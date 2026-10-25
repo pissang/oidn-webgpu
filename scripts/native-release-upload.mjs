@@ -14,8 +14,11 @@ export async function uploadRelease({assets,manifest,token,apiBase='https://api.
     assert(response.ok,`GitHub API ${route}: HTTP ${response.status}`);return response.json();
   };
   let release=await api(`releases/tags/${encodeURIComponent(tag)}`);
-  const ref=await api(`commits/${encodeURIComponent(tag)}`);
-  if(ref)assert.equal(ref.sha,commit,'release tag already refers to another commit');
+  // A missing commit ref can return 422. The exact Git tag-ref endpoint
+  // returns 404 instead; resolve existing tags to commits to support annotations.
+  const tagRef=await api(`git/ref/tags/${encodeURIComponent(tag)}`);
+  const ref=tagRef?await api(`commits/${encodeURIComponent(`refs/tags/${tag}`)}`):null;
+  if(tagRef)assert.equal(ref?.sha,commit,'release tag already refers to another commit');
   if(!release)release=await api('releases',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag_name:tag,target_commitish:commit,name:`Native ${manifest.crate_version}`,draft:true,prerelease:manifest.crate_version.includes('-'),body:`Source: ${commit}\n\nIncludes independently buildable Rust crate, four native packages and SHA-256 verified planner cores.`})});
   assert(release,'cannot create release');
   if(!ref) {

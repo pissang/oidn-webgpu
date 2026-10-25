@@ -12,7 +12,7 @@
 
 | Runtime | Status | Distribution | Guide |
 | --- | --- | --- | --- |
-| Browser (WebGPU) | Released (0.x) | GitHub Release package archive | [docs/web.md](docs/web.md) |
+| Browser (WebGPU) | Released (0.x) | npm `oidn-webgpu` | [docs/web.md](docs/web.md) |
 | Rust, sharing the host's wgpu device and buffers | Experimental | Cargo Git dependency or bundled release crate | [native/README.md](native/README.md#rust-api) |
 | C, CPU images in and out | Experimental | GitHub Releases or build from source | [native/README.md](native/README.md#c-api) |
 
@@ -21,10 +21,10 @@ Every runtime executes the same WGSL kernels, planned by the same TypeScript cor
 ## Quick start (browser)
 
 ```shell
-npm i https://github.com/pissang/oidn-webgpu/releases/download/v0.6.0/oidn-webgpu-0.6.0.tgz
+npm i oidn-webgpu
 ```
 
-Version 0.6.0 is distributed through GitHub Releases; `oidn-webgpu` is not yet published to the npm registry. Weights are not in the package. Copy a `.tza` file from [`weights/`](weights/) or [oidn-weights](https://github.com/RenderKit/oidn-weights) and serve it with your app.
+Weights are not in the package. Copy a `.tza` file from [`weights/`](weights/) or [oidn-weights](https://github.com/RenderKit/oidn-weights) and serve it with your app.
 
 ```ts
 import { initUNetFromURL } from 'oidn-webgpu';
