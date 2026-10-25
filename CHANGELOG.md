@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Native registry crates bundle SHA-256 verified cores for the four supported targets and build without Node or Zig. A manually triggered workflow verifies isolated crates on all four platforms, then can publish permanent GitHub Release assets and the crate to crates.io.
 - Native packages include a standalone Rust application for GPU-buffer timing and output validation, with its Git dependency pinned to the package source revision. CI compiles and runs its model inspection mode against the packaged core without a GPU.
 - Windows native packages include a standalone MSVC validation example that checks denoised output, repeated executions and CPU-to-CPU latency using the packaged DLL.
 

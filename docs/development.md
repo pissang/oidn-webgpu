@@ -180,7 +180,7 @@ Capture enough command buffers to include complete network executions; a single 
 2. verifies the archive without a GPU: `node scripts/native-package-check.mjs <archive>` (checksum, C ABI test `native/tests/abi.c`, C examples, planner run, the packaged standalone Rust application linked to the packaged core and run with `--inspect-model`). Its Cargo manifest pins the package source commit; CI substitutes that same local checkout to stay offline. On Windows it also compiles the packaged `examples/validate_windows.c`; run GPU validation separately as described in the [native guide](../native/README.md);
 3. uploads the `.tar.gz` and `.sha256` as an artifact.
 
-No GPU execution runs in CI. The npm unit tests are not run by this workflow; run `npm test` locally.
+The workflow also runs native unit/core-integrity tests and runs `npm test` on Linux. It assembles a crate containing all four verified cores, then runs isolated `cargo publish --dry-run` and Rust application checks on every target. No GPU execution runs in CI. The [native release guide](native-release.md) describes permanent assets and the manually triggered publication workflow.
 
 Windows builds use PowerShell to keep Git Bash's `link.exe` out of the MSVC linker search. The pinned scriptc 0.3.2 Windows runtime uses MinGW CRT spellings and GNU `.ctors` initialization. `scripts/native-core-msvc.mjs` registers those constructors with the MSVC CRT and adds compatibility objects compiled from `native/toolchain/msvc-compat.c` and Zig's public-domain MinGW directory implementation. The manifest records the Zig version. Package checks cover the Windows 128-bit division ABI against JavaScript BigInt, CRT aliases, directory access and planner execution; unresolved runtime symbols or skipped constructors must fail those checks.
 
@@ -191,6 +191,7 @@ Windows builds use PowerShell to keep Git Bash's `link.exe` out of the MSVC link
 | `README.md` | Everyone; npm package page | Runtimes, weights table, doc index |
 | `docs/web.md` | Browser API users | `src/main.ts`, `src/UNet.ts`, `src/tileScheduler.ts` |
 | `native/README.md` | Rust and C users; also shipped as the package README | `native/src/denoiser.rs`, `native/include/oidn_webgpu.h`, `scripts/native-build.mjs` |
+| `docs/native-release.md` | Maintainers releasing native packages and the crate | `.github/workflows/native*.yml`, `scripts/native-release.mjs`, `native/build.rs` |
 | `docs/development.md` | Contributors | Scripts, CI, architecture |
 | `AGENTS.md` | Coding agents | Repository rules |
 | `llms.txt` | LLM tools ([llmstxt.org](https://llmstxt.org)) | Doc index; absolute `main` branch URLs. Update when a doc is added, renamed or re-scoped. |

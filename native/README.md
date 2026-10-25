@@ -32,7 +32,8 @@ oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissan
 # oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
 ```
 
-- Version releases do not publish a crate to crates.io: `native/Cargo.toml` sets `publish = false`, and the native workflow uploads binary packages without running `cargo publish`. Use a Git or local path dependency; pin `rev` for reproducible builds.
+- The manually triggered native release workflow can publish `oidn-webgpu-native` to crates.io. Until its first publication, use the Git/path dependency above. After publication, use `oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.0" }`.
+- A registry crate bundles the four supported platform cores and verifies the selected core's SHA-256 before linking. It needs Rust and a platform linker, with no Node, npm, Zig or build-time GitHub download. See [release preparation](https://github.com/pissang/oidn-webgpu/blob/main/docs/native-release.md).
 - A source build needs stable Rust, a C toolchain, Node 22+ and npm; on Windows also Zig 0.16.0 on `PATH`, which scriptc uses to link the core. `cargo build` installs the pinned scriptc compiler (the first build needs the npm registry) and builds the core static library. To skip Node, use a [precompiled core](#build-configuration).
 
 ### wgpu version
@@ -271,7 +272,7 @@ On Windows, use MSVC's DLL CRT (`/MD`). The core archive includes the compatibil
 
 ## Precompiled packages
 
-Download an artifact from a successful [Native packages workflow run](https://github.com/pissang/oidn-webgpu/actions/workflows/native.yml). GitHub sign-in is required, artifacts are kept for 30 days, and they are not GitHub Release assets. Each artifact contains a `.tar.gz` and its `.sha256`: extract the artifact, then the tarball.
+Published native versions are available from [GitHub Releases](https://github.com/pissang/oidn-webgpu/releases) under `native-v<VERSION>`, with raw core archives, a core manifest, native packages, a `.crate` and `SHA256SUMS`. Release assets have no automatic expiry. PR and validation builds remain available as 30-day artifacts from the [Native packages workflow](https://github.com/pissang/oidn-webgpu/actions/workflows/native.yml); artifact downloads require GitHub sign-in. A native package contains a `.tar.gz` and its `.sha256`: extract the artifact, then the tarball.
 
 | Target | Rust triple | Built on |
 | --- | --- | --- |
@@ -305,11 +306,11 @@ Environment variables read by `cargo build`:
 
 | Variable | Effect |
 | --- | --- |
-| `OIDN_WEBGPU_CORE_ARCHIVE` | Absolute path to a prebuilt `liboidn_webgpu_core.a` / `oidn_webgpu_core.lib`. Skips Node and scriptc. Must match the target OS, architecture, ABI and source revision. Required for cross compilation. |
+| `OIDN_WEBGPU_CORE_ARCHIVE` | Absolute path to a prebuilt `liboidn_webgpu_core.a` / `oidn_webgpu_core.lib`. Skips Node and scriptc. Must match the target OS, architecture, ABI and source revision; a registry crate also checks it against the bundled manifest. Useful for source cross compilation. |
 | `OIDN_WEBGPU_SCRIPTC` | Path to an existing scriptc compiler; skips installing it. |
 | `OIDN_WEBGPU_NODE` | Node executable used for the core build. |
 
-Without `OIDN_WEBGPU_CORE_ARCHIVE`, the core is built automatically, for native builds only (host = target). Installed build tools stay in Cargo's build directory.
+Without `OIDN_WEBGPU_CORE_ARCHIVE`, a registry crate selects and verifies its bundled core using Cargo's target triple, including supported cross-compilation targets. A Git/path source checkout instead builds the core automatically, for native builds only (host = target). Installed build tools stay in Cargo's build directory.
 
 ## Performance
 

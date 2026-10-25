@@ -5,7 +5,7 @@
 - Browser entry points: `initUNetFromURL(url, { device }?, options?)` or `initUNetFromBuffer(...)`, then `unet.tileExecute({ color, albedo?, normal?, done, progress?, error? })`, which returns an abort function.
 - Weights (`.tza`) are not bundled. Choose them by inputs: `rt_ldr*` or `rt_hdr*`; `_alb_nrm` / `_calb_cnrm` add albedo + normal; `_small` / `_large` trade speed for quality.
 - Normals: browser inputs are [0, 1]-encoded (`n * 0.5 + 0.5`); native inputs are signed [-1, 1], like OIDN.
-- Native APIs are experimental; the native guide records tested GPU configurations and output validation. Rust hosts must use wgpu `=30.0.1`. Version releases do not publish a crate to crates.io; use a pinned Git or local path dependency.
+- Native APIs are experimental; the native guide records tested GPU configurations and output validation. Rust hosts must use wgpu `=30.0.1`. Registry crates bundle platform cores; the manual native release workflow publishes GitHub Release assets and the crate after all checks.
 
 ## Docs
 
@@ -13,6 +13,7 @@
 - [Browser guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/web.md): options, input formats, `tileExecute` contract, GPU pipelines, tiling, precision, profiling
 - [Native guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/README.md): Rust `Denoiser` and C filter APIs, standalone Cargo application, image contract, precompiled packages, build configuration
 - [Development guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/development.md): architecture, shared core vs. browser-only code, commands, benchmarks, native Metal profiling, CI
+- [Native release guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/native-release.md): versioned core assets, independently buildable crates, manual publication, Trusted Publishing and retries
 - [AGENTS.md](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/AGENTS.md): repository map and rules for changing the code
 
 ## API sources

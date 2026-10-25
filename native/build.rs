@@ -1,4 +1,6 @@
 use std::{env, fs, path::Path, process::Command};
+#[path = "build_support/core.rs"]
+mod core;
 
 fn watch_tree(path: &Path) {
     println!("cargo:rerun-if-changed={}", path.display());
@@ -10,20 +12,41 @@ fn watch_tree(path: &Path) {
 }
 
 fn main() {
-    for name in ["OIDN_WEBGPU_CORE_ARCHIVE", "OIDN_WEBGPU_SCRIPTC", "OIDN_WEBGPU_NODE"] {
+    for name in [
+        "OIDN_WEBGPU_CORE_ARCHIVE",
+        "OIDN_WEBGPU_SCRIPTC",
+        "OIDN_WEBGPU_NODE",
+    ] {
         println!("cargo:rerun-if-env-changed={name}");
     }
     let manifest = std::path::PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.parent().unwrap();
     let output = std::path::PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let name = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-        "oidn_webgpu_core.lib"
-    } else {
-        "liboidn_webgpu_core.a"
-    };
+    let target = env::var("TARGET").unwrap();
+    let name = core::archive_name(&target);
     let destination = output.join(name);
+    let bundled = manifest.join("prebuilt/manifest.json").is_file();
+    let source_checkout = root.join("scripts/native-core-build.mjs").is_file()
+        && root.join("src/native/core-profile.json").is_file();
+    watch_tree(&manifest.join("build_support"));
+    if bundled {
+        watch_tree(&manifest.join("prebuilt"));
+    }
+    assert!(
+        bundled || source_checkout,
+        "crate has no bundled core; use the native release workflow to prepare an independently buildable .crate"
+    );
     if let Some(archive) = env::var_os("OIDN_WEBGPU_CORE_ARCHIVE") {
         let archive = std::path::PathBuf::from(archive);
+        if bundled {
+            core::bundled_core(
+                &manifest,
+                &target,
+                &env::var("CARGO_PKG_VERSION").unwrap(),
+                Some(&archive),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        }
         assert!(
             archive.is_file(),
             "OIDN_WEBGPU_CORE_ARCHIVE does not exist: {}",
@@ -31,6 +54,15 @@ fn main() {
         );
         println!("cargo:rerun-if-changed={}", archive.display());
         fs::copy(&archive, &destination).expect("cannot copy precompiled core archive");
+    } else if bundled {
+        let archive = core::bundled_core(
+            &manifest,
+            &target,
+            &env::var("CARGO_PKG_VERSION").unwrap(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        fs::copy(archive, &destination).expect("cannot copy bundled core archive");
     } else {
         assert_eq!(
             env::var("HOST").unwrap(),
@@ -68,7 +100,9 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", output.display());
     println!("cargo:rustc-link-lib=static=oidn_webgpu_core");
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
-        Ok("macos") => println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/liboidn_webgpu.dylib"),
+        Ok("macos") => {
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/liboidn_webgpu.dylib")
+        }
         Ok("linux") => println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,liboidn_webgpu.so"),
         _ => {}
     }
