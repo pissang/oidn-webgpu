@@ -96,22 +96,22 @@ try {
   }
 
   const consumer = path.join(work, 'consumer');
-  mkdirSync(path.join(consumer, 'src'), { recursive: true });
-  writeFileSync(path.join(consumer, 'Cargo.toml'), `[package]\nname = "oidn-package-consumer"\nversion = "0.0.0"\nedition = "2024"\n[dependencies]\noidn-webgpu = { package = "oidn-webgpu-native", path = ${JSON.stringify(path.join(root, 'native'))} }\n`);
+  mkdirSync(consumer, { recursive: true });
+  const exampleManifest = readFileSync(path.join(directory, 'examples/rust-app/Cargo.toml'), 'utf8');
+  const pinnedSource = `git = "https://github.com/pissang/oidn-webgpu.git", rev = "${manifest.source.commit}"`;
+  assert(exampleManifest.includes(pinnedSource), 'packaged Rust app must pin the package source commit');
+  // CI stays offline, using this exact checkout instead of fetching it again.
+  writeFileSync(path.join(consumer, 'Cargo.toml'), exampleManifest.replace(
+    pinnedSource, `path = ${JSON.stringify(path.join(root, 'native'))}`
+  ));
+  copyFileSync(path.join(directory, 'examples/validate.rs'), path.join(work, 'validate.rs'));
   copyFileSync(path.join(root, 'native/Cargo.lock'), path.join(consumer, 'Cargo.lock'));
-  writeFileSync(path.join(consumer, 'src/main.rs'), `
-use oidn_webgpu::{Model, PreparedDenoise, DenoiseParams, Result, wgpu};
-fn main() {
-    let weights = std::fs::read(std::env::args().nth(1).unwrap()).unwrap();
-    assert_eq!(Model::from_tza(&weights).unwrap().input_count(), 3);
-    let _: fn(&mut PreparedDenoise, &mut wgpu::CommandEncoder, DenoiseParams) -> Result<()> = PreparedDenoise::encode;
-    println!("Rust consumer linked to packaged core: OK");
-}
-`);
-  run('cargo', ['run', '--offline', '--release', '--target', context.target, '--target-dir', context.cargo_target_directory, '--manifest-path', path.join(consumer, 'Cargo.toml'), '--', weights], {
-    OIDN_WEBGPU_CORE_ARCHIVE: core,
-    OIDN_WEBGPU_NODE: path.join(work, 'node-must-not-be-invoked')
+  const modelOutput = execFileSync('cargo', ['run', '--offline', '--release', '--target', context.target, '--target-dir', context.cargo_target_directory, '--manifest-path', path.join(consumer, 'Cargo.toml'), '--', '--inspect-model', weights], {
+    cwd: work, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'],
+    env: { ...process.env, OIDN_WEBGPU_CORE_ARCHIVE: core, OIDN_WEBGPU_NODE: path.join(work, 'node-must-not-be-invoked') }
   });
+  assert.deepEqual(JSON.parse(modelOutput), { modelInputs: 3, gpuRequested: false });
+  console.log('Packaged Rust application linked to core: OK (no GPU requested)');
   console.log(`Verified ${manifest.name}`);
 } finally {
   rmSync(work, { recursive: true, force: true });

@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Native packages include a standalone Rust application for GPU-buffer timing and output validation, with its Git dependency pinned to the package source revision. CI compiles and runs its model inspection mode against the packaged core without a GPU.
 - Windows native packages include a standalone MSVC validation example that checks denoised output, repeated executions and CPU-to-CPU latency using the packaged DLL.
 
 ### Fixed

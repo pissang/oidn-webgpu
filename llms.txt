@@ -5,13 +5,13 @@
 - Browser entry points: `initUNetFromURL(url, { device }?, options?)` or `initUNetFromBuffer(...)`, then `unet.tileExecute({ color, albedo?, normal?, done, progress?, error? })`, which returns an abort function.
 - Weights (`.tza`) are not bundled. Choose them by inputs: `rt_ldr*` or `rt_hdr*`; `_alb_nrm` / `_calb_cnrm` add albedo + normal; `_small` / `_large` trade speed for quality.
 - Normals: browser inputs are [0, 1]-encoded (`n * 0.5 + 0.5`); native inputs are signed [-1, 1], like OIDN.
-- Native APIs are experimental. Their output has been checked for correctness only on macOS with Apple silicon; Windows with NVIDIA (Vulkan) has been timed, not checked. Rust hosts must use wgpu `=30.0.1`.
+- Native APIs are experimental; the native guide records tested GPU configurations and output validation. Rust hosts must use wgpu `=30.0.1`. Version releases do not publish a crate to crates.io; use a pinned Git or local path dependency.
 
 ## Docs
 
 - [README](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/README.md): overview, runtimes, browser quick start, weights table
 - [Browser guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/web.md): options, input formats, `tileExecute` contract, GPU pipelines, tiling, precision, profiling
-- [Native guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/README.md): Rust `Denoiser` and C filter APIs, image contract, precompiled packages, build configuration
+- [Native guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/README.md): Rust `Denoiser` and C filter APIs, standalone Cargo application, image contract, precompiled packages, build configuration
 - [Development guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/development.md): architecture, shared core vs. browser-only code, commands, benchmarks, native Metal profiling, CI
 - [AGENTS.md](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/AGENTS.md): repository map and rules for changing the code
 

@@ -177,7 +177,7 @@ Capture enough command buffers to include complete network executions; a single 
 [`.github/workflows/native.yml`](../.github/workflows/native.yml) runs on pull requests and pushes to `main` that touch `native/`, `src/`, `weights/` or the native scripts, on `v*` / `native-v*` tags, and on manual dispatch. For each target it:
 
 1. builds the core archive and C package: `node scripts/native-build.mjs --target <triple> --archive --require-clean`;
-2. verifies the archive without a GPU: `node scripts/native-package-check.mjs <archive>` (checksum, C ABI test `native/tests/abi.c`, C examples, planner run, a standalone Rust consumer linked to the packaged core). On Windows it also compiles the packaged `examples/validate_windows.c`; run that example separately on a GPU as described in the [native guide](../native/README.md#validate-a-windows-package);
+2. verifies the archive without a GPU: `node scripts/native-package-check.mjs <archive>` (checksum, C ABI test `native/tests/abi.c`, C examples, planner run, the packaged standalone Rust application linked to the packaged core and run with `--inspect-model`). Its Cargo manifest pins the package source commit; CI substitutes that same local checkout to stay offline. On Windows it also compiles the packaged `examples/validate_windows.c`; run GPU validation separately as described in the [native guide](../native/README.md);
 3. uploads the `.tar.gz` and `.sha256` as an artifact.
 
 No GPU execution runs in CI. The npm unit tests are not run by this workflow; run `npm test` locally.

@@ -1,0 +1,15 @@
+[package]
+name = "oidn-webgpu-rust-example"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "oidn-webgpu-rust-example"
+path = "../validate.rs"
+
+[dependencies]
+oidn-webgpu = { package = "oidn-webgpu-native", path = "../.." }
+pollster = "0.4"
+
+[workspace]

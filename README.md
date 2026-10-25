@@ -16,7 +16,7 @@
 | Rust, sharing the host's wgpu device and buffers | Experimental | Cargo git dependency | [native/README.md](native/README.md#rust-api) |
 | C, CPU images in and out | Experimental | Build from source or CI artifacts | [native/README.md](native/README.md#c-api) |
 
-Every runtime executes the same WGSL kernels, planned by the same TypeScript core. Native output has been checked for correctness only on macOS with Apple silicon ([status](native/README.md)).
+Every runtime executes the same WGSL kernels, planned by the same TypeScript core. The [native guide](native/README.md) records tested GPU configurations and output validation.
 
 ## Quick start (browser)
 

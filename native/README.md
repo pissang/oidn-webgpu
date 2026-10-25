@@ -32,7 +32,7 @@ oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissan
 # oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
 ```
 
-- The crate is not on crates.io. Pin `rev` for reproducible builds.
+- Version releases do not publish a crate to crates.io: `native/Cargo.toml` sets `publish = false`, and the native workflow uploads binary packages without running `cargo publish`. Use a Git or local path dependency; pin `rev` for reproducible builds.
 - A source build needs stable Rust, a C toolchain, Node 22+ and npm; on Windows also Zig 0.16.0 on `PATH`, which scriptc uses to link the core. `cargo build` installs the pinned scriptc compiler (the first build needs the npm registry) and builds the core static library. To skip Node, use a [precompiled core](#build-configuration).
 
 ### wgpu version
@@ -82,6 +82,36 @@ queue.submit([encoder.finish()]);
 ```bash
 cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- weights/rt_hdr_alb_nrm_small.tza output.f32 256 192 128
 ```
+
+### Standalone Rust application
+
+[`examples/rust-app/Cargo.toml`](examples/rust-app/Cargo.toml) is an independent Cargo project using [`examples/validate.rs`](examples/validate.rs). It creates a wgpu device and image buffers, denoises generated HDR gradients or raw input files, checks the complete output, and optionally saves RGBA32F. JSON output includes the actual backend, kernels, runtime checks, initialization time, individual GPU execution times and median latency. Uploads, preparation, readback and output validation are excluded from the measured executions.
+
+From the repository root in an x64 Visual Studio Native Tools PowerShell, use a downloaded Windows package's core:
+
+```powershell
+rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+$package = (Resolve-Path .native-build/package).Path
+$env:OIDN_WEBGPU_CORE_ARCHIVE = Join-Path $package 'lib/oidn_webgpu_core.lib'
+$env:OIDN_WEBGPU_NODE = 'C:/node-must-not-run.exe'
+cargo +stable-x86_64-pc-windows-msvc run --release --target x86_64-pc-windows-msvc --manifest-path "$package/examples/rust-app/Cargo.toml" -- --weights weights/rt_hdr_calb_cnrm_large.tza --output .native-build/rust-output.f32 --width 257 --height 259 --backend vulkan --matrix
+```
+
+`$package` may point to any extracted download containing this example. Its Cargo manifest pins a Git dependency to `manifest.json`'s `source.commit`. Windows packages use MSVC, so the command explicitly selects the matching Rust toolchain and target. In a source checkout, `native/examples/rust-app/Cargo.toml` instead depends on the local native crate; its source revision must match a supplied core. Cargo fetches and compiles the Rust wrapper and dependencies, while `OIDN_WEBGPU_CORE_ARCHIVE` skips Node, npm, Zig and rebuilding the planner. Without that override, a source build uses the [normal build requirements](#install).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--weights PATH` | required | TZA weights; choose HDR models for this example |
+| `--output PATH` | no file | Save tightly packed little-endian RGBA32F |
+| `--width N`, `--height N` | `256`, `256` | Image dimensions, 1..=16384 and within device limits |
+| `--backend NAME` | `auto` | `auto`, `vulkan`, `dx12` or `metal` |
+| `--matrix` | off | Enable experimental cooperative matrices; fails if unavailable. Use Vulkan on Windows |
+| `--unchecked` | off | Disable shader runtime checks; the default uses `Denoiser::new` |
+| `--tile N` | `0` | Maximum output tile edge, as in `DenoiserOptions` |
+| `--warmup N`, `--runs N` | `5`, `21` | Warm-ups 0..=10000; measured executions 1..=10000 |
+| `--input-dir DIR` | generated gradients | Load `color.f32`, `albedo.f32`, `normal.f32`; same RGBA32F layout and image conventions as the API |
+
+The example checks finite, nonnegative RGB, preserved input alpha, and byte-identical output across three extra executions. Readbacks for these checks occur after timing. `--inspect-model WEIGHTS.tza` loads the model without requesting a GPU; CI uses this mode to compile and link the actual application against each packaged core. `cargo run --release --manifest-path native/Cargo.toml --example validate -- ...` runs the same source as a crate example.
 
 ### Device setup
 
@@ -261,6 +291,7 @@ Other architectures and Linux musl are not provided. The build host does not gua
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `examples/denoise.c`, `examples/plan.c`, `examples/host_buffers.rs` | Complete examples |
 | `examples/validate_windows.c` | Windows DLL output and latency check |
+| `examples/validate.rs`, `examples/rust-app/Cargo.toml` | Standalone Rust application with a source-pinned dependency |
 | `manifest.json`, `SHA256SUMS` | Source commit, target, compiler versions, file hashes |
 
 Package names contain the crate version, target triple and full source commit, for example `oidn-webgpu-native-0.1.0-aarch64-apple-darwin-<commit>.tar.gz`. Packages built from modified sources have a `-dirty` suffix and `source.dirty = true` in the manifest, so their commit alone does not reproduce the contents.

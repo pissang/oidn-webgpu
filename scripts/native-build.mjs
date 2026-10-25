@@ -8,7 +8,7 @@
 // Requirements: Node 22+, npm, stable Rust, and a C toolchain. The pinned
 // scriptc is installed automatically (or use OIDN_WEBGPU_SCRIPTC).
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { archivePackage, packageContext, writeManifest } from './native-package.mjs';
@@ -55,6 +55,13 @@ copy(path.join(root, 'native/examples/denoise.c'), path.join(output, 'examples/d
 copy(path.join(root, 'native/examples/validate_windows.c'), path.join(output, 'examples/validate_windows.c'));
 copy(path.join(root, 'native/examples/plan.c'), path.join(output, 'examples/plan.c'));
 copy(path.join(root, 'native/examples/host_buffers.rs'), path.join(output, 'examples/host_buffers.rs'));
+copy(path.join(root, 'native/examples/validate.rs'), path.join(output, 'examples/validate.rs'));
+mkdirSync(path.join(output, 'examples/rust-app'), { recursive: true });
+const rustExample = readFileSync(path.join(root, 'native/examples/rust-app/Cargo.toml'), 'utf8');
+if (!rustExample.includes('path = "../.."')) throw new Error('Rust example must depend on the native crate');
+writeFileSync(path.join(output, 'examples/rust-app/Cargo.toml'), rustExample.replace(
+  'path = "../.."', `git = "https://github.com/pissang/oidn-webgpu.git", rev = "${context.source.commit}"`
+));
 copy(path.join(root, 'native/README.md'), path.join(output, 'README.md'));
 copy(path.join(root, 'LICENSE'), path.join(output, 'LICENSE'));
 if (args.includes('--require-clean')) {
