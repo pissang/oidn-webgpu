@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- A macOS Metal interoperability validation example that imports host GPU buffers and checks asynchronous execution without uploading or reading back image pixels.
+
 ### Changed
 
 - Reduce the macOS ARM64 native C shared library from 6.49 MB to 4.38 MB before compression, excluding model weights.

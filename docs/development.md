@@ -127,6 +127,32 @@ OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-per
 
 When one case is slower in every column, OIDN Metal included, remeasure only that case, for example `--models large --sizes 720p`.
 
+### Native Metal interoperability prototype
+
+On macOS, `native/examples/metal_interop.rs` validates importing a host Metal device and private image buffers before the GPU C API is defined. Native Metal kernels produce inputs and consume denoised outputs on separate queues; image pixels stay on the GPU. The CPU inspects only per-pixel validation flags after execution.
+
+The test rotates three image sets through one prepared workspace, with 256-byte offsets and three exposure scales. It compares every output pixel byte-for-byte with serialized executions of the existing Rust API. The producer remains gated until three executions have been submitted (or all executions, for shorter runs); denoising must not signal completion before that gate opens. The example is a correctness test, not a latency benchmark.
+
+```bash
+MTL_DEBUG_LAYER=1 cargo run --release --locked --manifest-path native/Cargo.toml \
+  --example metal_interop -- --frames 1000
+MTL_DEBUG_LAYER=1 native/target/release/examples/metal_interop --frames 1000 --shared-queue
+MTL_DEBUG_LAYER=1 native/target/release/examples/metal_interop --frames 1000 --size 31 --tile 16 --fp32
+```
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `--frames` | integer | `1000` | 1..=100000 executions; validation flags must fit in 256 MiB |
+| `--size` | integer | `16` | Square image edge, 1..=1024 pixels |
+| `--weights` | path | Small HDR color/albedo/normal model | TZA model with three inputs |
+| `--tile` | integer | `0` | Maximum output tile edge; follows `DenoiserOptions` |
+| `--shared-queue` | flag | off | Share the native producer queue; CPU queue access remains serialized by the single submitting thread |
+| `--fp32` | flag | off | Disable FP16 on the imported device |
+| `--staged-waits` | flag | off | Diagnostic mode using HAL's best-effort staged waits instead of strict gating; not an integration contract |
+| `--trace` | flag | off | Print CPU submission timestamps to stderr |
+
+The queues use a command-buffer capacity of 4096, matching wgpu-hal 30.0.1. Metal's default queue capacity can block submission when gated tiled executions accumulate. A host supplying a shared queue must account for this capacity and serialize its own submissions with library queue access and destruction. Strict event synchronization is enabled before any library command encoding. It currently uses HAL's relay-event mechanism; do not mix `CommandEncoder::as_hal_mut` with wgpu command encoding, which wgpu 30 rejects.
+
 ### Native Metal profiling
 
 On macOS with Xcode installed, Instruments' Metal System Trace records CPU/GPU scheduling and Metal activity. The `profiling` profile retains symbols and line tables for CPU stack traces. Run from the repository root:
