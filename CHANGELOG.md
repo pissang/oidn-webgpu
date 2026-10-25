@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Browser CPU input preserves normalized `Float32Array` albedo and normal values instead of dividing them by 255. `tileExecute` now accepts floating-point auxiliary images in its TypeScript API; 8-bit auxiliary images still use [0, 255].
 - Windows native packages build and link with MSVC, including planner runtime initialization and the C and Rust interfaces. C consumers use the DLL CRT (`/MD`).
 - Native cooperative-matrix denoising produces finite, repeatable output with shader runtime checks disabled on the tested NVIDIA Vulkan device. Shared-memory staging loops now use a uniform iteration count.
 

@@ -119,7 +119,7 @@ try {
       })).data);
       results.push(compare(`GPU buffers ${precision}`, await gpu('dirty'), await gpu('sanitized')));
 
-      // CPU input takes 8-bit auxiliary images; only HDR color can be dirty.
+      // Keep auxiliary images sanitized here to isolate HDR color sanitizing.
       // Auto-exposure scales CPU color before sanitizing, as OIDN does, so +inf
       // becomes FLT_MAX while a clean FLT_MAX becomes FLT_MAX * scale: compare
       // without +inf, and only require valid output with it.

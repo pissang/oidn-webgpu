@@ -56,12 +56,12 @@ All images are RGBA, row-major, top row first, with the same width and height.
 | Input | CPU, LDR | CPU, HDR | GPU (`hdr: true`, `aux: true`) |
 | --- | --- | --- | --- |
 | `color` | `ImageData` | `{ data: Float32Array, width, height }`, linear, nonnegative | `{ data: GPUBuffer \| GPUTexture, width, height }` |
-| `albedo` | `ImageData` | `ImageData` | GPU buffer or texture, linear RGB in [0, 1] |
-| `normal` | `ImageData` | `ImageData` | GPU buffer or texture, encoded as `n * 0.5 + 0.5` in [0, 1] |
+| `albedo` | `ImageData` or `{ data: Float32Array, width, height }` | same as CPU LDR | GPU buffer or texture |
+| `normal` | `ImageData` or `{ data: Float32Array, width, height }` | same as CPU LDR | GPU buffer or texture |
 | Output | `ImageData`; alpha set to 255 | `{ data: Float32Array, width, height }`; alpha set to 1 | Library-owned `GPUBuffer`, RGBA f32; alpha copied from `color` |
 
-- CPU 8-bit values are divided by 255.
-- Normals are always [0, 1]-encoded (`n * 0.5 + 0.5`), on both CPU and GPU. That is the standard 8-bit normal-map encoding and exactly what the network reads, so no remap is applied. OIDN and the [native API](../native/README.md#image-contract) instead take signed [-1, 1] normals and encode them internally.
+- CPU 8-bit values are divided by 255. Float32 albedo and normal values are used directly in [0, 1]; each guide can independently use either format. Albedo is linear RGB in [0, 1] after normalization.
+- Normals use [0, 1] encoding (`n * 0.5 + 0.5`) on both CPU and GPU. OIDN and the [native API](../native/README.md#image-contract) instead take signed [-1, 1] normals.
 - CPU HDR color is scaled per tile by its average log luminance before the HDR transfer, and the scale is undone on output.
 - GPU buffers hold tightly packed `vec4<f32>` pixels (16 bytes per pixel) with `STORAGE` usage. Textures are read with `textureLoad` from a float `texture_2d`.
 - GPU HDR color is used at scale 1. Pre-scale the whole image yourself (for example by exposure) if its values are far from 1.

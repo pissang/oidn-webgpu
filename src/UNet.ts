@@ -316,8 +316,8 @@ class UNet {
 
   private _processImageData(
     color: ImageData | HDRImageData,
-    albedo: ImageData | undefined,
-    normal: ImageData | undefined,
+    albedo: ImageData | HDRImageData | undefined,
+    normal: ImageData | HDRImageData | undefined,
     isHDR: boolean
   ) {
     const rawData = color.data;
@@ -341,6 +341,10 @@ class UNet {
 
     const albedoData = albedo?.data;
     const normalData = normal?.data;
+    // Each guide can be an 8-bit image or normalized float RGBA,
+    // independently of the color image's HDR setting and the other guide.
+    const albedoDivisor = albedoData instanceof Float32Array ? 1 : 255;
+    const normalDivisor = normalData instanceof Float32Array ? 1 : 255;
     for (let i = 0; i < rawData.length; i += 4) {
       const i2 = (i / 4) * channels;
 
@@ -351,10 +355,10 @@ class UNet {
           tensorData[i2 + c] = rawData[i + c] / 255;
         }
         if (albedoData) {
-          tensorData[i2 + c + 3] = albedoData[i + c] / 255;
+          tensorData[i2 + c + 3] = albedoData[i + c] / albedoDivisor;
         }
         if (normalData) {
-          tensorData[i2 + c + 6] = normalData[i + c] / 255;
+          tensorData[i2 + c + 6] = normalData[i + c] / normalDivisor;
         }
       }
     }
@@ -558,8 +562,8 @@ class UNet {
     error
   }: {
     color: T;
-    albedo?: ImageData | GPUImageData;
-    normal?: ImageData | GPUImageData;
+    albedo?: ImageData | HDRImageData | GPUImageData;
+    normal?: ImageData | HDRImageData | GPUImageData;
     /**
      * If denoise alpha channel. Otherwise denoise RGB channels.
      */
@@ -634,8 +638,8 @@ class UNet {
     if (!isGPUImageData(color)) {
       rawData = this._processImageData(
         color,
-        albedo as ImageData | undefined,
-        normal as ImageData | undefined,
+        albedo as ImageData | HDRImageData | undefined,
+        normal as ImageData | HDRImageData | undefined,
         hdr
       );
     }
