@@ -1,6 +1,6 @@
 {
   "name": "oidn-webgpu",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Open Image Denoise on WebGPU, in browsers and natively",
   "main": "lib/main.js",
   "types": "lib/main.d.ts",

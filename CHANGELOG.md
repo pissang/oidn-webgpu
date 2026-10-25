@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-25
+
+oidn-webgpu 0.6.0 is the first release under the new package name. It adds experimental native Rust and C APIs, sanitizes inputs and outputs like OIDN, and lowers default FP16 latency in Chrome by up to 19% on the measured GPUs. The package name is the only breaking change.
+
 ### Breaking changes
 
 - The package is renamed from `oidn-web` to `oidn-webgpu`. Replace the dependency and imports (`import { initUNetFromURL } from 'oidn-webgpu'`); the API is unchanged.
@@ -166,6 +170,7 @@ oidn-web 0.4.0 replaces the TensorFlow.js inference stack with a purpose-built, 
 - When supplying an existing `GPUDevice`, request `shader-f16` before creating the device if FP16 inference is desired.
 - Set `dynamicTile: false` to restore fixed-size tiling.
 
-[Unreleased]: https://github.com/pissang/oidn-webgpu/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/pissang/oidn-webgpu/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/pissang/oidn-webgpu/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/pissang/oidn-webgpu/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/pissang/oidn-webgpu/compare/v0.3.5...v0.4.0
