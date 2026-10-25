@@ -13,7 +13,7 @@
 | Runtime | Status | Distribution | Guide |
 | --- | --- | --- | --- |
 | Browser (WebGPU) | Released (0.x) | npm `oidn-webgpu` | [docs/web.md](docs/web.md) |
-| Rust, sharing the host's wgpu device and buffers | Experimental | Cargo Git dependency or bundled release crate | [native/README.md](native/README.md#rust-api) |
+| Rust, sharing the host's wgpu device and buffers | Experimental | crates.io or Cargo Git dependency | [native/README.md](native/README.md#rust-api) |
 | C, CPU images in and out | Experimental | GitHub Releases or build from source | [native/README.md](native/README.md#c-api) |
 
 Every runtime executes the same WGSL kernels, planned by the same TypeScript core. The [native guide](native/README.md) records tested GPU configurations and output validation.

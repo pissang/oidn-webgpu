@@ -28,13 +28,14 @@ Weights are not bundled. Choose a `.tza` file from the [weights table](https://g
 
 ```toml
 [dependencies]
-oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
+oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.0" }
+# Git source:
+# oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
 # Local checkout:
 # oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
 ```
 
-- The manually triggered native release workflow can publish `oidn-webgpu-native` to crates.io. Until its first publication, use the Git/path dependency above. After publication, use `oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.0" }`.
-- A registry crate bundles the four supported platform cores and verifies the selected core's SHA-256 before linking. It needs Rust and a platform linker, with no Node, npm, Zig or build-time GitHub download. See [release preparation](https://github.com/pissang/oidn-webgpu/blob/main/docs/native-release.md).
+- The registry crate bundles cores for the four [supported targets](#precompiled-packages). It needs Rust and a platform linker, with no Node, npm, Zig or build-time GitHub download.
 - A source build needs stable Rust, a C toolchain, Node 22+ and npm; on Windows also Zig 0.16.0 on `PATH`, which scriptc uses to link the core. `cargo build` installs the pinned scriptc compiler (the first build needs the npm registry) and builds the core static library. To skip Node, use a [precompiled core](#build-configuration).
 
 ### wgpu version
