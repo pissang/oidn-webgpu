@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Native cooperative-matrix denoising produces finite, repeatable output with shader runtime checks disabled on the tested NVIDIA Vulkan device. Shared-memory staging loops now use a uniform iteration count.
+
 ## [0.6.0] - 2026-10-25
 
 oidn-webgpu 0.6.0 is the first release under the new package name. It adds experimental native Rust and C APIs, sanitizes inputs and outputs like OIDN, and lowers default FP16 latency in Chrome by up to 19% on the measured GPUs. The package name is the only breaking change.

@@ -1985,11 +1985,17 @@ function subgroupMatrixChunkLoop(
         ${stage.array}[base + 2u] = staged.z;
         ${stage.array}[base + 3u] = staged.w;
       }`;
+  // Keep staging loops' trip counts uniform before the matrix operations.
+  // A localIndex-dependent trip count produces nondeterministic results on
+  // NVIDIA Vulkan with runtime checks disabled, despite the following barrier.
   const direct = (base: (stage: SubgroupMatrixStage) => string) => stages.map((stage) => `
-    for (var i = localIndex; i < ${stage.vectors}u; i += ${threads}u) {
-      var value = ${valueType}(0.0);
-      ${stage.read}
-      ${storeValue(stage, 'value', base(stage))}
+    for (var batch = 0u; batch < ${Math.ceil(stage.vectors / threads)}u; batch++) {
+      let i = localIndex + batch * ${threads}u;
+      if (i < ${stage.vectors}u) {
+        var value = ${valueType}(0.0);
+        ${stage.read}
+        ${storeValue(stage, 'value', base(stage))}
+      }
     }`).join('');
   const bases = (buffer: string) => stages
     .map((stage) => `let ${stage.array}Base = ${buffer} * ${(stage.stride ?? stage.vectors) * 4}u;`)
