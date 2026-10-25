@@ -5,7 +5,7 @@
 - Browser entry points: `initUNetFromURL(url, { device }?, options?)` or `initUNetFromBuffer(...)`, then `unet.tileExecute({ color, albedo?, normal?, done, progress?, error? })`, which returns an abort function.
 - Weights (`.tza`) are not bundled. Choose them by inputs: `rt_ldr*` or `rt_hdr*`; `_alb_nrm` / `_calb_cnrm` add albedo + normal; `_small` / `_large` trade speed for quality.
 - Normals: browser inputs are [0, 1]-encoded (`n * 0.5 + 0.5`); native inputs are signed [-1, 1], like OIDN.
-- Native APIs are experimental and GPU execution is only verified on macOS with Apple silicon. Rust hosts must use wgpu `=30.0.1`.
+- Native APIs are experimental. Their output has been checked for correctness only on macOS with Apple silicon; Windows with NVIDIA (Vulkan) has been timed, not checked. Rust hosts must use wgpu `=30.0.1`.
 
 ## Docs
 

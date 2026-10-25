@@ -21,6 +21,7 @@ All notable changes to this project are documented in this file.
 ### Fixed
 
 - Inputs and network outputs are sanitized like OIDN: NaN becomes 0, and color, albedo and normals are clamped to their valid ranges. Previously NaN or out-of-range input could spread across the image, HDR output could be negative and GPU LDR output could exceed 1.
+- `examples/aux.*` are renamed to `examples/auxiliary.*` so the repository can be checked out on Windows, where `AUX` is a reserved file name.
 
 ### Performance
 
@@ -49,7 +50,7 @@ Measured on 2026-10-24 with the [Mac benchmark suite](docs/development.md#benchm
 
 #### NVIDIA RTX 4060 Laptop
 
-8 GiB, Intel Core i9-13900H, Windows 11 build 26200, driver 566.14, Chrome 156.0.8078.48, OIDN 2.5.1 CUDA, on AC power, revision `b30a515`. Native uses Vulkan cooperative matrices.
+8 GiB, Intel Core i9-13900H, Windows 11 build 26200, driver 566.14, Chrome 156.0.8078.48, OIDN 2.5.1 CUDA, on AC power, revision `b30a515`. Native uses Vulkan cooperative matrices; its output was not checked for correctness on this device.
 
 | Model | Input | 0.5.0 Chrome | Chrome | Native Vulkan | OIDN CUDA |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -113,7 +114,6 @@ Measured with `npm run benchmark -- --direct-gemm-only` in headless Chrome, usin
 - Completed executions release their device-loss listeners.
 - Edge tiles whose size is not a multiple of 16 replicate edge pixels into the padded model input.
 - The npm package no longer includes benchmark results, tests, and scripts.
-- Renamed `examples/aux.*` to `examples/auxiliary.*` so the repository can be checked out on Windows, where `AUX` is a reserved file name.
 
 ### Migration notes
 

@@ -2,7 +2,7 @@
 
 Experimental native GPU denoising through [wgpu](https://wgpu.rs) on Metal, Vulkan or Direct3D 12. It runs the same WGSL kernels as the browser package.
 
-**Status:** the API and results may change between versions. GPU denoising has only been verified on macOS with Apple silicon. CI builds and checks packages for Windows and Linux but does not run them on a GPU.
+**Status:** the API and results may change between versions. Denoised output has been checked for correctness only on macOS with Apple silicon (Metal). On Windows with an NVIDIA RTX 4060 Laptop (Vulkan), native denoising has been timed but its output has not been checked. CI builds and checks packages for Windows and Linux but does not run them on a GPU.
 
 - [Choose an API](#choose-an-api)
 - [Rust API](#rust-api)
@@ -249,13 +249,6 @@ Without `OIDN_WEBGPU_CORE_ARCHIVE`, the core is built automatically, for native 
 
 ## Performance
 
-Network timings on an Apple M4 Max, the only measured device. oidn-webgpu numbers are per-image wall times from batched dispatches and exclude input/output processing, which the OIDN numbers include.
+The [0.6.0 release notes](https://github.com/pissang/oidn-webgpu/blob/main/CHANGELOG.md#060---2026-10-25) compare native denoising with official OIDN 2.5.1 on an Apple M4 Max (Metal) and an NVIDIA RTX 4060 Laptop (Vulkan). Those timings cover one whole image in GPU buffers, including preprocessing and output conversion, with runtime checks disabled; they exclude uploads and readback.
 
-| Model | Size | OIDN 2.5.1 Metal | oidn-webgpu native |
-| --- | --- | ---: | ---: |
-| `rt_hdr_alb_nrm` | 512x512 | 4.64 ms | 4.56 ms |
-| `rt_hdr_alb_nrm` | 1920x1080 | 37.1 ms | 33.3 ms |
-| `rt_hdr_alb_nrm_small` | 512x512 | 2.53 ms | 2.67 ms |
-| `rt_hdr_alb_nrm_small` | 1920x1080 | 18.8 ms | 19.6 ms |
-
-These are unchecked network measurements, not end-to-end timings of the safe Rust API. The C example took about 23 ms per 1024x1024 image, including three input uploads and output readback. First preparation includes planning and shader compilation; there is no on-disk pipeline cache.
+On the M4 Max, the C example takes about 21 ms per 1024x1024 image with `rt_hdr_alb_nrm.tza`, including three input uploads and output readback. First preparation includes planning and shader compilation; there is no on-disk pipeline cache.

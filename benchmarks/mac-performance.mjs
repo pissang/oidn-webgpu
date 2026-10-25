@@ -73,7 +73,7 @@ async function run(command, args, { cwd = root, capture = false, env = process.e
   });
 }
 const git = (...args) => run('git', args, { capture: true });
-const labels = ['oidn-web 0.5.0 (Chrome)', 'oidn-web (Chrome)', 'oidn-web (Chrome subgroup matrix)', 'oidn-web(native wgpu)', 'OIDN Metal'];
+const labels = ['oidn-web 0.5.0 (Chrome)', 'oidn-webgpu (Chrome)', 'oidn-webgpu (Chrome subgroup matrix)', 'oidn-webgpu (native wgpu)', 'OIDN Metal'];
 const report = { date: new Date().toISOString(), baselineCommit: await git('rev-parse', options.baseline),
   currentCommit: await git('rev-parse', options['current-ref']), benchmarkCommit: await git('rev-parse', 'HEAD'),
   benchmarkScriptSha256: sha256(await readFile(fileURLToPath(import.meta.url))),
@@ -96,7 +96,7 @@ function markdown() {
     `Baseline: \`${report.baselineCommit}\`; current: \`${report.currentCommit}\`.`, '',
     `Median ms per image, ${options.warmup} warmups and ${options.runs} measured synchronized executions. GPU-resident RGBA32F HDR color/albedo/normal; inputScale=1. Includes preprocessing and output conversion; excludes uploads, readback and preparation.`, '',
     'Percentages show lower latency relative to 0.5.0: (baseline − measured) / baseline × 100%. P95, preparation timings and every sample remain in the JSON report.', '',
-    'All oidn-web paths use FP16. Ordinary Chrome has no unsafe WebGPU flag. Matrix Chrome uses `--enable-unsafe-webgpu`. Native runtime checks are disabled (C API default). OIDN uses the same TZA files: Small/fast, Base/high, Large/high with cleanAux=true.', '',
+    'All oidn-web and oidn-webgpu paths use FP16. Ordinary Chrome has no unsafe WebGPU flag. Matrix Chrome uses `--enable-unsafe-webgpu`. Native runtime checks are disabled (C API default). OIDN uses the same TZA files: Small/fast, Base/high, Large/high with cleanAux=true.', '',
     `| Model | Input | ${labels.join(' | ')} |`,
     `| --- | --- | ${labels.map(() => '---:').join(' | ')} |`];
   for (const entry of report.cases) {

@@ -16,7 +16,7 @@
 | Rust, sharing the host's wgpu device and buffers | Experimental | Cargo git dependency | [native/README.md](native/README.md#rust-api) |
 | C, CPU images in and out | Experimental | Build from source or CI artifacts | [native/README.md](native/README.md#c-api) |
 
-Every runtime executes the same WGSL kernels, planned by the same TypeScript core. Native GPU execution has only been verified on macOS with Apple silicon.
+Every runtime executes the same WGSL kernels, planned by the same TypeScript core. Native output has been checked for correctness only on macOS with Apple silicon ([status](native/README.md)).
 
 ## Quick start (browser)
 
@@ -78,7 +78,7 @@ The model size (small, default, large) is chosen by the file alone; no option ch
 
 ## Examples and users
 
-- [Basic example](https://oidn-web-example.vercel.app/) ([code](https://github.com/pissang/oidn-web-example/blob/main/src/main.js))
+- [Basic example](https://oidn-web-example.vercel.app/) ([code](https://github.com/pissang/oidn-web-example/blob/main/src/main.js)), built on the earlier `oidn-web` 0.3 package
 - Local examples in [`examples/`](examples/): run `npm run dev` and open `/examples/basic.html`, `hdr.html`, `auxiliary.html` or `gpu.html`.
 - [three-gpu-pathtracer `OIDNDenoiser`](https://github.com/gkjohnson/three-gpu-pathtracer/blob/main/src/webgpu/API.md#oidndenoiser)
 - [Vector to 3D](https://www.figma.com/community/plugin/1264600219316901594/) Figma plugin
