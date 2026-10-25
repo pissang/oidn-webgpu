@@ -6,6 +6,7 @@
 //! The API is experimental. See `examples/host_buffers.rs` for a complete host.
 
 pub mod capi;
+pub mod gpu_capi;
 mod denoiser;
 pub use denoiser::*;
 /// The exact wgpu crate used by the GPU API. Hosts may use this re-export to

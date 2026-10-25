@@ -6,12 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- GPU-resident C API for macOS Metal with host device/buffer/event import, asynchronous submission, external-signal completion queries, bounded in-flight work, binding caches and an Objective-C integration example. C ABI version is 1.1.0. GPU descriptions use fixed layouts and require explicit initialization; headers and libraries must match exactly.
 - A macOS Metal interoperability validation example that imports host GPU buffers and checks asynchronous execution without uploading or reading back image pixels.
-- Windows Vulkan host-device/buffer import and DX12 shared-buffer/fence validation prototypes, plus a reproducible GPU test runner. These source examples precede the GPU C ABI; the C filter API is unchanged.
+- Windows Vulkan host-device/buffer import and DX12 shared-buffer/fence validation prototypes, plus a reproducible GPU test runner. Windows GPU imports remain prototypes; the CPU C filter API is unchanged.
 
 ### Changed
 
-- Reduce the macOS ARM64 native C shared library from 6.49 MB to 4.38 MB before compression, excluding model weights.
+- Reduce the macOS ARM64 native C shared library from 6.49 MB to 4.65 MB before compression, including the new GPU C API and excluding model weights.
 - Clarify that Windows native releases support `x86_64-pc-windows-msvc` only; Windows GNU has no bundled core or precompiled package, and its source builds are not validated.
 
 ## [Native 0.1.1] - 2026-10-25

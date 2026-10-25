@@ -9,6 +9,10 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
+#[path = "interop/metal_capi.rs"]
+mod capi_test;
+
+#[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     objc2::rc::autoreleasepool(|_| metal::run())
 }
@@ -274,7 +278,7 @@ mod metal {
         let args: Vec<String> = std::env::args().skip(1).collect();
         if args.iter().any(|a| a == "--help") {
             println!(
-                "metal_interop [--frames N] [--size N] [--weights PATH] [--shared-queue] [--fp32] [--tile N] [--staged-waits] [--trace]\nDefaults: 1000 frames, 16x16, Small HDR model, dedicated queue, FP16 if available, whole image\n--staged-waits disables strict gating for diagnostics; --trace prints CPU submission timestamps"
+                "metal_interop [--frames N] [--size N] [--weights PATH] [--shared-queue] [--fp32] [--tile N] [--c-api] [--staged-waits] [--trace]\nDefaults: 1000 frames, 16x16, Small HDR model, dedicated queue, FP16 if available, whole image\n--c-api uses exported GPU C functions; --staged-waits disables strict gating for diagnostics; --trace prints CPU submission timestamps"
             );
             return Ok(());
         }
@@ -282,7 +286,9 @@ mod metal {
         while index < args.len() {
             match args[index].as_str() {
                 "--frames" | "--size" | "--weights" | "--tile" => index += 2,
-                "--shared-queue" | "--fp32" | "--staged-waits" | "--trace" => index += 1,
+                "--shared-queue" | "--fp32" | "--staged-waits" | "--trace" | "--c-api" => {
+                    index += 1
+                }
                 other => return Err(format!("unknown argument: {other}").into()),
             }
         }
@@ -410,6 +416,38 @@ mod metal {
             }
         }
 
+        let mut c_api = if args.iter().any(|a| a == "--c-api") {
+            if args.iter().any(|a| a == "--staged-waits") {
+                return Err("C API always uses strict synchronization".into());
+            }
+            let buffers: Vec<[_; 4]> = ring
+                .iter()
+                .map(|images| {
+                    std::array::from_fn(|i| Retained::as_ptr(&images.raw[i]).cast_mut().cast())
+                })
+                .collect();
+            Some(unsafe {
+                super::capi_test::MetalCApi::new(
+                    Retained::as_ptr(&raw).cast_mut().cast(),
+                    if shared {
+                        Retained::as_ptr(&producer).cast_mut().cast()
+                    } else {
+                        std::ptr::null_mut()
+                    },
+                    &buffers,
+                    (count * 16 + OFFSET) as u64,
+                    Retained::as_ptr(&ready).cast_mut().cast(),
+                    Retained::as_ptr(&done).cast_mut().cast(),
+                    &std::fs::read(model_path)?,
+                    size,
+                    tile,
+                    args.iter().any(|a| a == "--fp32"),
+                )?
+            })
+        } else {
+            None
+        };
+
         // Block the first native producer until several denoise executions
         // have been enqueued. Strict HAL waits must protect untracked foreign
         // buffers even while native queues execute independent workloads.
@@ -430,8 +468,13 @@ mod metal {
             objc2::rc::autoreleasepool(|_| -> Result<()> {
                 context.device.poll(wgpu::PollType::Poll)?;
                 let slot = frame % 3;
+                let pattern = (frame / 3 + slot) % 3;
                 let sequence = frame as u64 + 1;
                 let images = &ring[slot];
+                let host_queue = c_api
+                    .as_ref()
+                    .filter(|_| shared)
+                    .map(|api| api.lock_host_queue());
                 let cb = command(&producer)?;
                 // A wait in just the first CB does not gate independent later
                 // CBs on Metal. Chain the host timeline explicitly as well as
@@ -451,32 +494,37 @@ mod metal {
                         (&images.raw[1], OFFSET),
                         (&images.raw[2], OFFSET),
                     ],
-                    [size, size, slot as u32, 0],
+                    [size, size, pattern as u32, 0],
                 )?;
                 cb.encodeSignalEvent_value(ProtocolObject::from_ref(&*ready), sequence);
                 cb.commit();
+                drop(host_queue);
 
                 if args.iter().any(|a| a == "--trace") {
                     eprintln!("frame {frame} before rebind at {:?}", started.elapsed());
                 }
-                prepared.rebind(images.bindings(None))?;
-                if args.iter().any(|a| a == "--trace") {
-                    eprintln!("frame {frame} after rebind at {:?}", started.elapsed());
-                }
-                let mut encoder = context.device.create_command_encoder(&Default::default());
-                prepared.encode(
-                    &mut encoder,
-                    DenoiseParams {
-                        input_scale: scales[slot],
-                    },
-                )?;
-                let hal = unsafe { context.queue.as_hal::<wgpu::hal::api::Metal>() }
-                    .ok_or("not a Metal queue")?;
-                hal.add_wait_event(ready.clone(), sequence);
-                hal.add_signal_event(done.clone(), sequence);
-                last_submit = Some(context.queue.submit([encoder.finish()]));
-                if args.iter().any(|a| a == "--trace") {
-                    eprintln!("frame {frame} submitted at {:?}", started.elapsed());
+                if let Some(api) = &mut c_api {
+                    api.submit(slot, sequence, scales[pattern])?;
+                } else {
+                    prepared.rebind(images.bindings(None))?;
+                    if args.iter().any(|a| a == "--trace") {
+                        eprintln!("frame {frame} after rebind at {:?}", started.elapsed());
+                    }
+                    let mut encoder = context.device.create_command_encoder(&Default::default());
+                    prepared.encode(
+                        &mut encoder,
+                        DenoiseParams {
+                            input_scale: scales[pattern],
+                        },
+                    )?;
+                    let hal = unsafe { context.queue.as_hal::<wgpu::hal::api::Metal>() }
+                        .ok_or("not a Metal queue")?;
+                    hal.add_wait_event(ready.clone(), sequence);
+                    hal.add_signal_event(done.clone(), sequence);
+                    last_submit = Some(context.queue.submit([encoder.finish()]));
+                    if args.iter().any(|a| a == "--trace") {
+                        eprintln!("frame {frame} submitted at {:?}", started.elapsed());
+                    }
                 }
                 if frame + 1 == frames.min(3) {
                     gate_send.send(())?;
@@ -492,10 +540,10 @@ mod metal {
                     &consume,
                     &[
                         (&images.raw[3], OFFSET),
-                        (&references.raw[slot], OFFSET),
+                        (&references.raw[pattern], OFFSET),
                         (&checks, 0),
                     ],
-                    [size, size, slot as u32, frame as u32],
+                    [size, size, pattern as u32, frame as u32],
                 )?;
                 cb.encodeSignalEvent_value(ProtocolObject::from_ref(&*consumed), sequence);
                 cb.commit();
@@ -514,7 +562,13 @@ mod metal {
             )
             .into());
         }
-        context.wait(last_submit.unwrap())?;
+        if let Some(api) = &mut c_api {
+            // Retire public C handles while GPU work may still be in flight.
+            api.release_handles();
+            api.wait()?;
+        } else {
+            context.wait(last_submit.unwrap())?;
+        }
         wait_command(last_consumer.as_ref().unwrap()).map_err(|error| {
             format!(
                 "async consumer: {error}; ready={}, done={}, consumed={}, gate={}, errors={:?}",
@@ -540,10 +594,16 @@ mod metal {
             )
             .into());
         }
+        let queue_full_count = c_api.as_ref().map_or(0, |api| api.queue_full);
+        if let Some(api) = c_api.take() {
+            api.finish()?;
+        }
         println!(
             "{}",
             serde_json::json!({
                 "backend": "Metal", "adapter": context.adapter.get_info().name,
+                "api": if args.iter().any(|a| a == "--c-api") { "C" } else { "Rust" },
+                "queue_full_count": queue_full_count,
                 "queue": if shared { "shared" } else { "dedicated" },
                 "size": size, "frames": frames, "tile": tile,
                 "precision": format!("{:?}", prepared.info().precision),

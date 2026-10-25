@@ -151,6 +151,11 @@ file(GENERATE OUTPUT "\${CMAKE_BINARY_DIR}/executables-$<CONFIG>.txt"
   const usage = spawnSync(path.join(deployed, 'bin', windows ? 'denoise.exe' : 'denoise'), [], { cwd: deployed, encoding: 'utf8' });
   assert.equal(usage.status, 2, usage.error?.message ?? usage.stderr);
   assert.match(usage.stderr, /usage:/);
+  if (process.platform === 'darwin') {
+    const metalUsage = spawnSync(path.join(deployed, 'bin', 'metal_gpu'), [], { cwd: deployed, encoding: 'utf8' });
+    assert.equal(metalUsage.status, 2, metalUsage.error?.message ?? metalUsage.stderr);
+    assert.match(metalUsage.stderr, /usage:/);
+  }
   console.log('CMake targets, relocated package and installed C examples: OK (no GPU requested)');
   console.log(`Verified ${manifest.name}`);
 } finally {

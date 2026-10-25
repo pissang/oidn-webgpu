@@ -511,7 +511,7 @@ fn check_buffer_limits(device: &wgpu::Device, resource: &str, required: u64, sto
     }
     Ok(())
 }
-fn gpu_checked<T>(device: &wgpu::Device, body: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn gpu_checked<T>(device: &wgpu::Device, body: impl FnOnce() -> Result<T>) -> Result<T> {
     let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -539,7 +539,28 @@ pub struct PreparedDenoise {
     staging: wgpu::util::StagingBelt,
     _weights: Arc<SharedWeights>,
 }
+
+// The C runtime caches complete binding sets without creating another workspace.
+// Cloned wgpu handles also preserve bindings in already recorded commands.
+#[derive(Clone)]
+pub(crate) struct ImageBindings {
+    buffers: Vec<wgpu::Buffer>,
+    offsets: Vec<u64>,
+    groups: Vec<wgpu::BindGroup>,
+}
 impl PreparedDenoise {
+    pub(crate) fn image_bindings(&self) -> ImageBindings {
+        ImageBindings {
+            buffers: self.network.buffers.clone(),
+            offsets: self.network.buffer_offsets.clone(),
+            groups: self.network.bind_groups.clone(),
+        }
+    }
+    pub(crate) fn restore_image_bindings(&mut self, bindings: &ImageBindings) {
+        self.network.buffers.clone_from(&bindings.buffers);
+        self.network.buffer_offsets.clone_from(&bindings.offsets);
+        self.network.bind_groups.clone_from(&bindings.groups);
+    }
     pub fn size(&self) -> [u32; 2] {
         self.info.size
     }

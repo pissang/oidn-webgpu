@@ -7,8 +7,9 @@
  * oidn_webgpu.dll. The API and its results may change between versions.
  *
  * The filter takes and returns images in CPU memory, like Open Image
- * Denoise's host buffers. Hosts that already render on the GPU can instead
- * plan the work with oidn_webgpu_core.h and replay it on their own device.
+ * Denoise's host buffers. Metal hosts can import GPU resources through
+ * oidn_webgpu_metal.h. Other non-wgpu hosts can plan the work with
+ * oidn_webgpu_core.h and replay it on their own device.
  *
  * Conventions:
  * - Functions returning int32_t return OIDNW_OK or an oidnw_status. `error`
@@ -33,9 +34,15 @@ typedef enum oidnw_status {
   OIDNW_ERROR_UNAVAILABLE = 2,
   /* The weights are not a supported OIDN TZA model, or planning failed. */
   OIDNW_ERROR_MODEL = 3,
-  /* GPU execution or readback failed; destroy and recreate the filter. */
+  /* Standalone filter: execution/readback failed; recreate the filter.
+   * GPU interop: follow the quarantine/completion contract in its header. */
   OIDNW_ERROR_GPU = 4,
-  OIDNW_ERROR_BUSY = 5
+  OIDNW_ERROR_BUSY = 5,
+  /* GPU interop device is lost or submission outcome is uncertain. */
+  OIDNW_ERROR_DEVICE_LOST = 6,
+  OIDNW_ERROR_TIMEOUT = 7,
+  /* GPU interop submission was rejected before accepting synchronization. */
+  OIDNW_ERROR_QUEUE_FULL = 8
 } oidnw_status;
 
 typedef enum oidnw_backend {
@@ -109,10 +116,9 @@ typedef struct oidnw_filter_desc {
 typedef struct oidnw_device oidnw_device;
 typedef struct oidnw_filter oidnw_filter;
 
-/* API version = major << 16 | minor << 8 | patch. Compare the major for
- * ABI compatibility; a newer minor may add functions without removing old ones.
- * Dynamic loaders should resolve this symbol before optional entry points. */
-#define OIDNW_API_VERSION 0x00010000u
+/* API version = major << 16 | minor << 8 | patch. Use matching headers
+ * and library; dynamic loaders must require the exact version. */
+#define OIDNW_API_VERSION 0x00010100u
 uint32_t oidnw_api_version(void);
 
 void oidnw_filter_desc_default(oidnw_filter_desc *desc);

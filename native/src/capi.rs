@@ -12,6 +12,9 @@ pub const OIDNW_ERROR_UNAVAILABLE: i32 = 2;
 pub const OIDNW_ERROR_MODEL: i32 = 3;
 pub const OIDNW_ERROR_GPU: i32 = 4;
 pub const OIDNW_ERROR_BUSY: i32 = 5;
+pub const OIDNW_ERROR_DEVICE_LOST: i32 = 6;
+pub const OIDNW_ERROR_TIMEOUT: i32 = 7;
+pub const OIDNW_ERROR_QUEUE_FULL: i32 = 8;
 
 pub const OIDNW_BACKEND_AUTO: u32 = 0;
 pub const OIDNW_BACKEND_METAL: u32 = 1;
@@ -84,16 +87,17 @@ pub struct OidnwFilter {
     execution: Mutex<ExecutionState>,
 }
 
-struct Failure(i32, String);
+#[derive(Clone, Debug)]
+pub(crate) struct Failure(pub(crate) i32, pub(crate) String);
 
-type Outcome<T> = std::result::Result<T, Failure>;
+pub(crate) type Outcome<T> = std::result::Result<T, Failure>;
 
-fn invalid(message: impl Into<String>) -> Failure {
+pub(crate) fn invalid(message: impl Into<String>) -> Failure {
     Failure(OIDNW_ERROR_INVALID_ARGUMENT, message.into())
 }
 
 /// Copies `message` into caller storage, truncated on a UTF-8 boundary.
-unsafe fn write_error(error: *mut c_char, capacity: usize, message: &str) {
+pub(crate) unsafe fn write_error(error: *mut c_char, capacity: usize, message: &str) {
     if error.is_null() || capacity == 0 {
         return;
     }
@@ -108,7 +112,7 @@ unsafe fn write_error(error: *mut c_char, capacity: usize, message: &str) {
 }
 
 /// Runs an entry point, turning failures and panics into status codes.
-unsafe fn guard(error: *mut c_char, capacity: usize, body: impl FnOnce() -> Outcome<()>) -> i32 {
+pub(crate) unsafe fn guard(error: *mut c_char, capacity: usize, body: impl FnOnce() -> Outcome<()>) -> i32 {
     let outcome = catch_unwind(AssertUnwindSafe(body)).unwrap_or_else(|panic| {
         let message = panic
             .downcast_ref::<String>()
@@ -131,7 +135,7 @@ unsafe fn guard(error: *mut c_char, capacity: usize, body: impl FnOnce() -> Outc
 
 #[unsafe(no_mangle)]
 pub extern "C" fn oidnw_api_version() -> u32 {
-    1 << 16
+    (1 << 16) | (1 << 8)
 }
 
 fn wanted_features() -> wgpu::Features {
@@ -510,7 +514,7 @@ mod tests {
         unsafe {
             let mut error = [0i8; 1024];
             let mut device = std::ptr::null_mut();
-            assert_eq!(oidnw_api_version(), 0x00010000);
+            assert_eq!(oidnw_api_version(), 0x00010100);
             assert_eq!(
                 oidnw_device_create(OIDNW_BACKEND_AUTO, &mut device, error.as_mut_ptr(), error.len()),
                 OIDNW_OK

@@ -30,6 +30,7 @@ TZA file
                    native/src/lib.rs       replays the recorded program on wgpu (Network)
                    native/src/denoiser.rs  Rust Denoiser API
                    native/src/capi.rs      C filter API          native/include/oidn_webgpu.h
+                   native/src/gpu_capi/    GPU C API, submission ledger, Metal imports
 ```
 
 The browser and native runtimes share one TypeScript core. The native build compiles it to a static library with scriptc (version pinned in `native/toolchain/package.json`); `RecordingDevice` captures buffers, shaders and dispatches as a program, and Rust replays that program on a wgpu device.
@@ -59,6 +60,7 @@ Consequences:
 | `src/native/program.ts` | Native core entry; config and program wire formats |
 | `native/src/denoiser.rs` | `Model`, `Denoiser`, `PreparedDenoise`, `Error` |
 | `native/src/capi.rs` | `oidnw_*` C functions; must match `native/include/oidn_webgpu.h` |
+| `native/src/gpu_capi/` | GPU C handles, bounded completion ledger, binding cache and platform adapters; matches `oidn_webgpu_gpu.h` and `oidn_webgpu_metal.h` |
 | `native/src/bin/oidn-webgpu-bench.rs` | Native network benchmark |
 | `scripts/native-*.mjs` | Core build, C package build, package identity, package checks |
 
@@ -129,7 +131,7 @@ When one case is slower in every column, OIDN Metal included, remeasure only tha
 
 ### Native Metal interoperability prototype
 
-On macOS, `native/examples/metal_interop.rs` validates importing a host Metal device and private image buffers before the GPU C API is defined. Native Metal kernels produce inputs and consume denoised outputs on separate queues; image pixels stay on the GPU. The CPU inspects only per-pixel validation flags after execution.
+On macOS, `native/examples/metal_interop.rs` validates importing a host Metal device and private image buffers through the Rust and GPU C APIs. Native Metal kernels produce inputs and consume denoised outputs on separate queues; image pixels stay on the GPU. The CPU inspects only per-pixel validation flags after execution.
 
 The test rotates three image sets through one prepared workspace, with 256-byte offsets and three exposure scales. It compares every output pixel byte-for-byte with serialized executions of the existing Rust API. The producer remains gated until three executions have been submitted (or all executions, for shorter runs); denoising must not signal completion before that gate opens. The example is a correctness test, not a latency benchmark.
 
@@ -138,6 +140,7 @@ MTL_DEBUG_LAYER=1 cargo run --release --locked --manifest-path native/Cargo.toml
   --example metal_interop -- --frames 1000
 MTL_DEBUG_LAYER=1 native/target/release/examples/metal_interop --frames 1000 --shared-queue
 MTL_DEBUG_LAYER=1 native/target/release/examples/metal_interop --frames 1000 --size 31 --tile 16 --fp32
+MTL_DEBUG_LAYER=1 native/target/release/examples/metal_interop --frames 1000 --c-api --shared-queue
 ```
 
 | Option | Type | Default | Meaning |
@@ -148,10 +151,22 @@ MTL_DEBUG_LAYER=1 native/target/release/examples/metal_interop --frames 1000 --s
 | `--tile` | integer | `0` | Maximum output tile edge; follows `DenoiserOptions` |
 | `--shared-queue` | flag | off | Share the native producer queue; CPU queue access remains serialized by the single submitting thread |
 | `--fp32` | flag | off | Disable FP16 on the imported device |
+| `--c-api` | flag | off | Exercise exported GPU C functions against the serialized Rust oracle, with 8 pending submissions, 3 cached binding sets, queue-lock callbacks and in-flight C handle release |
 | `--staged-waits` | flag | off | Diagnostic mode using HAL's best-effort staged waits instead of strict gating; not an integration contract |
 | `--trace` | flag | off | Print CPU submission timestamps to stderr |
 
 The queues use a command-buffer capacity of 4096, matching wgpu-hal 30.0.1. Metal's default queue capacity can block submission when gated tiled executions accumulate. A host supplying a shared queue must account for this capacity and serialize its own submissions with library queue access and destruction. Strict event synchronization is enabled before any library command encoding. It currently uses HAL's relay-event mechanism; do not mix `CommandEncoder::as_hal_mut` with wgpu command encoding, which wgpu 30 rejects.
+
+The C API implementation has one shared submission ledger and a `Backend`/`Timeline` boundary for platform imports and external completion. Binding snapshots share a workspace and are capped per prepared instance; public buffer tokens invalidate cached entries without changing already recorded commands. GPU errors with uncertain submission quarantine the context rather than freeing resources whose use is unknown. Explicit quiescent teardown requires host proof that those resources are no longer in use; a library error alone is not that proof.
+
+For a controlled encoding failure after acceptance, the runtime submits no denoising and clears a private 4-byte marker. Metal HAL's empty-submit path is not relay-gated, so a truly empty batch could publish a signal before its external wait; the marker forces a normal gated command buffer without accessing host images. The ignored GPU test below checks admission limits, timeout, concurrent workspace submissions, balanced shared-queue callbacks, failure signaling, in-flight release, quarantine and quiescent teardown without inducing a driver fault:
+
+```bash
+MTL_DEBUG_LAYER=1 cargo test --locked --manifest-path native/Cargo.toml \
+  metal_backpressure_and_failed_batch_preserve_external_completion -- --ignored --nocapture
+```
+
+The standalone [Objective-C consumer](../native/examples/metal_gpu.m) uses the shipped headers and shared library; its build and usage are in the [GPU C API guide](../native/README.md#gpu-c-api-on-metal). CI compiles it on macOS through the packaged CMake examples but does not run GPU work.
 
 ### Native Windows interoperability prototypes
 
@@ -288,7 +303,7 @@ Windows builds use PowerShell to keep Git Bash's `link.exe` out of the MSVC link
 | --- | --- | --- |
 | `README.md` | Everyone; npm package page | Runtimes, weights table, doc index |
 | `docs/web.md` | Browser API users | `src/main.ts`, `src/UNet.ts`, `src/tileScheduler.ts` |
-| `native/README.md` | Rust and C users; also shipped as the package README | `native/src/denoiser.rs`, `native/include/oidn_webgpu.h`, `scripts/native-build.mjs` |
+| `native/README.md` | Rust and C users; also shipped as the package README | `native/src/denoiser.rs`, `native/src/gpu_capi/`, `native/include/`, `scripts/native-build.mjs` |
 | `docs/native-release.md` | Maintainers releasing native packages and the crate | `.github/workflows/native*.yml`, `scripts/native-release.mjs`, `native/build.rs` |
 | `docs/development.md` | Contributors | Scripts, CI, architecture |
 | `AGENTS.md` | Coding agents | Repository rules |
