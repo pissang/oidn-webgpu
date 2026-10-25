@@ -182,6 +182,8 @@ Capture enough command buffers to include complete network executions; a single 
 
 No GPU execution runs in CI. The npm unit tests are not run by this workflow; run `npm test` locally.
 
+Windows builds use PowerShell to keep Git Bash's `link.exe` out of the MSVC linker search. The pinned scriptc 0.3.2 Windows runtime uses MinGW CRT spellings and GNU `.ctors` initialization. `scripts/native-core-msvc.mjs` registers those constructors with the MSVC CRT and adds compatibility objects compiled from `native/toolchain/msvc-compat.c` and Zig's public-domain MinGW directory implementation. The manifest records the Zig version. Package checks cover the Windows 128-bit division ABI against JavaScript BigInt, CRT aliases, directory access and planner execution; unresolved runtime symbols or skipped constructors must fail those checks.
+
 ## Documentation map
 
 | File | Audience | Keep in sync with |

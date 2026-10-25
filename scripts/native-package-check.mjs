@@ -58,7 +58,7 @@ try {
   const compile = (source, output, planner = false) => {
     if (windows) {
       const libraries = planner ? [core, ...['ws2_32', 'bcrypt', 'crypt32', 'iphlpapi', 'userenv', 'ntdll', 'advapi32'].map((name) => `${name}.lib`)] : [path.join(lib, 'oidn_webgpu.dll.lib')];
-      run('cl.exe', ['/nologo', '/std:c11', '/O2', `/I${include}`, source, `/Fe${output}`, '/link', ...libraries]);
+      run('cl.exe', ['/nologo', '/std:c11', '/O2', '/MD', `/I${include}`, source, `/Fe${output}`, '/link', ...libraries]);
     } else {
       const libraries = planner ? [core, ...(process.platform === 'linux' ? ['-lm', '-ldl', '-lpthread'] : [])] : [`-L${lib}`, '-loidn_webgpu', `-Wl,-rpath,${lib}`];
       run('cc', ['-std=c11', '-O2', '-I', include, source, ...libraries, '-o', output]);
@@ -72,6 +72,26 @@ try {
   run(executable('abi'), [], dllEnv);
   const weights = path.join(root, 'weights/rt_hdr_alb_nrm_small.tza');
   run(executable('plan'), [weights, '16', '16']);
+
+  if (windows) {
+    compile(path.join(root, 'native/tests/msvc-runtime.c'), executable('msvc-runtime'), true);
+    const mask = (1n << 64n) - 1n;
+    const max = (1n << 128n) - 1n;
+    let seed = 0x123456789abcdefn;
+    const random = () => (seed = (seed * 6364136223846793005n + 1442695040888963407n) & mask);
+    const pairs = [[0n, 1n], [max, 1n], [max, 3n], [max, max],
+      [1n << 127n, 1n << 64n], [max, (1n << 127n) + 1n], [1n, max]];
+    for (let bit = 0n; bit < 128n; bit++) {
+      const numerator = (random() << 64n) | random();
+      const denominator = (((random() << 64n) | random()) & ((1n << (bit + 1n)) - 1n)) || 1n;
+      pairs.push([numerator, 1n << bit], [numerator, denominator]);
+    }
+    const input = pairs.map(([n, d]) => [n & mask, n >> 64n, d & mask, d >> 64n,
+      (n / d) & mask, (n / d) >> 64n].map(v => v.toString(16)).join(' ')).join('\n') + '\n';
+    execFileSync(executable('msvc-runtime'), [lib], {
+      cwd: work, input, timeout: 30_000, stdio: ['pipe', 'inherit', 'inherit']
+    });
+  }
 
   const consumer = path.join(work, 'consumer');
   mkdirSync(path.join(consumer, 'src'), { recursive: true });

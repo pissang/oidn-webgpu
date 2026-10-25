@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { adaptMsvcCore } from './native-core-msvc.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -50,3 +51,6 @@ if (!compiler) {
   writeFileSync(installed, 'scriptc 0.3.2\n');
 }
 execFileSync(compiler, ['build', '--lib', '--profile', path.join(root, 'src/native/core-profile.json'), '-o', output], { cwd: root, stdio: 'inherit' });
+if (process.platform === 'win32' && (process.env.CARGO_CFG_TARGET_ENV ?? 'msvc') === 'msvc') {
+  adaptMsvcCore(root, output);
+}

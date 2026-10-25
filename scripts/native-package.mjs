@@ -42,6 +42,7 @@ export function packageContext(root, { target, requireClean = false } = {}) {
       workflow_ref: process.env.GITHUB_REF ?? null,
       rustc, node: process.versions.node,
       scriptc: process.env.OIDN_WEBGPU_SCRIPTC ? 'custom override' : '0.3.2',
+      zig: process.platform === 'win32' ? capture(root, 'zig', ['version']) : null,
       os_release: os.release(), os_version: os.version(),
       macos_version: process.platform === 'darwin' ? capture(root, 'sw_vers', ['-productVersion']) : null,
       glibc: process.platform === 'linux' ? process.report.getReport().header.glibcVersionRuntime ?? null : null,

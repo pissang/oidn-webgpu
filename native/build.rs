@@ -40,6 +40,8 @@ fn main() {
         watch_tree(&root.join("src"));
         for file in [
             "scripts/native-core-build.mjs",
+            "scripts/native-core-msvc.mjs",
+            "native/toolchain/msvc-compat.c",
             "native/toolchain/compiler.mjs",
             "native/toolchain/package.json",
             "native/toolchain/package-lock.json",

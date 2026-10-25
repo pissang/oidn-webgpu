@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Windows native packages build and link with MSVC, including planner runtime initialization and the C and Rust interfaces. C consumers use the DLL CRT (`/MD`).
 - Native cooperative-matrix denoising produces finite, repeatable output with shader runtime checks disabled on the tested NVIDIA Vulkan device. Shared-memory staging loops now use a uniform iteration count.
 
 ## [0.6.0] - 2026-10-25

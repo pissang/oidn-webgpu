@@ -207,6 +207,8 @@ Initialize with `oidnw_filter_desc_default`, then override fields.
 
 Hosts with their own non-wgpu GPU executor can link the planner-only static library and replay its programs; see [`include/oidn_webgpu_core.h`](include/oidn_webgpu_core.h) and [`examples/plan.c`](examples/plan.c). Rust/wgpu hosts should use `Denoiser` instead.
 
+On Windows, use MSVC's DLL CRT (`/MD`). The core archive includes the compatibility objects needed by scriptc's Windows runtime; no MinGW installation or additional runtime DLL is required by consumers.
+
 ## Precompiled packages
 
 Download an artifact from a successful [Native packages workflow run](https://github.com/pissang/oidn-webgpu/actions/workflows/native.yml). GitHub sign-in is required, artifacts are kept for 30 days, and they are not GitHub Release assets. Each artifact contains a `.tar.gz` and its `.sha256`: extract the artifact, then the tarball.
