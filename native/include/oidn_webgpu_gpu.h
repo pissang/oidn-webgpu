@@ -5,9 +5,8 @@
 extern "C" {
 #endif
 
-/* GPU images stay in host allocations. Metal import is currently implemented;
- * Vulkan/DX12 prototypes are separate from this C API. All pointers must name
- * live handles from this library. Do not destroy a handle concurrently with a
+/* GPU images stay in host allocations. Metal, Vulkan and DX12 imports are implemented. Opaque handle pointers must name
+ * live objects from this library. Do not destroy a handle concurrently with a
  * call using it. Models may be shared; other same-handle CPU calls are exclusive.
  * Different handles on a device serialize queue operations internally.
  * Descriptions are required and initialized with their *_default function.
@@ -19,6 +18,7 @@ typedef struct oidnw_gpu_filter oidnw_gpu_filter;
 typedef struct oidnw_gpu_prepared oidnw_gpu_prepared;
 typedef struct oidnw_gpu_buffer oidnw_gpu_buffer;
 typedef struct oidnw_gpu_sync oidnw_gpu_sync;
+typedef void (*oidnw_gpu_queue_lock_fn)(void *user_data);
 
 typedef struct oidnw_gpu_filter_desc {
   uint32_t hdr;
@@ -42,7 +42,7 @@ typedef struct oidnw_gpu_images {
 
 typedef struct oidnw_gpu_timeline_point {
   oidnw_gpu_sync *sync;
-  uint64_t value;
+  uint64_t value; /* 0..UINT64_MAX-1; UINT64_MAX is reserved. */
 } oidnw_gpu_timeline_point;
 
 typedef struct oidnw_gpu_submit_desc {
@@ -82,8 +82,8 @@ void oidnw_gpu_prepared_destroy(oidnw_gpu_prepared *prepared);
  * this device (poll/wait/destroy remain available). An uncertain submission
  * returns DEVICE_LOST; its external signals may never fire. No image transfers
  * or GPU idle waits are performed. QUEUE_FULL rejects before synchronization.
- * Multiple executions of one workspace may be in flight. Metal command-buffer
- * allocation may block; producers must be able to signal waits independently
+ * Multiple executions of one workspace may be in flight. Native submission
+ * may block; producers must be able to signal waits independently
  * of submit returning on this CPU thread. */
 int32_t oidnw_gpu_submit(oidnw_gpu_prepared *prepared, const oidnw_gpu_submit_desc *desc,
   uint64_t *sequence, char *error, size_t capacity);

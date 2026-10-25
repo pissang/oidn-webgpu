@@ -53,6 +53,9 @@ try {
   const windows = process.platform === 'win32';
   const lib = path.join(directory, 'lib');
   const include = path.join(directory, 'include');
+  for (const name of ['oidn_webgpu_gpu.h', 'oidn_webgpu_metal.h', 'oidn_webgpu_vulkan.h', 'oidn_webgpu_dx12.h']) {
+    assert(existsSync(path.join(include, name)), `missing GPU header ${name}`);
+  }
   const core = path.join(lib, windows ? 'oidn_webgpu_core.lib' : 'liboidn_webgpu_core.a');
   const shared = path.join(lib, windows ? 'oidn_webgpu.dll' : process.platform === 'darwin' ? 'liboidn_webgpu.dylib' : 'liboidn_webgpu.so');
   assert(existsSync(core) && existsSync(shared), 'package must contain both shared library and core archive');
@@ -71,6 +74,21 @@ try {
   // DLL lookup finds the extracted DLL, not the copy in the Cargo target dir.
   const dllEnv = windows ? { PATH: `${lib}${path.delimiter}${process.env.PATH ?? ''}` } : {};
   run(executable('abi'), [], dllEnv);
+  const vulkanInclude = process.env.OIDNW_GPU_INTEROP_VULKAN_INCLUDE;
+  const dx12Include = process.env.OIDNW_GPU_INTEROP_DX12_INCLUDE;
+  if (windows) {
+    const exports = execFileSync('dumpbin.exe', ['/nologo', '/exports', shared], { encoding: 'utf8' });
+    for (const name of ['oidnw_gpu_device_import_vulkan', 'oidnw_gpu_buffer_import_vulkan',
+      'oidnw_gpu_sync_import_vulkan', 'oidnw_gpu_device_create_dx12', 'oidnw_gpu_buffer_import_dx12',
+      'oidnw_gpu_sync_import_dx12', 'oidnw_gpu_device_destroy_quiescent', 'oidnw_gpu_poll', 'oidnw_gpu_wait']) {
+      assert(exports.includes(name), `missing DLL export ${name}`);
+    }
+    if (vulkanInclude) {
+      run('cl.exe', ['/nologo', '/std:c11', '/O2', '/MD', '/DOIDNW_TEST_VULKAN', `/I${include}`, `/I${vulkanInclude}`,
+        path.join(root, 'native/tests/abi.c'), `/Fe${executable('abi-vulkan')}`, '/link', path.join(lib, 'oidn_webgpu.dll.lib')]);
+      run(executable('abi-vulkan'), [], dllEnv);
+    }
+  }
   const weights = path.join(root, 'weights/rt_hdr_alb_nrm_small.tza');
 
   const cmakeConsumer = path.join(work, 'cmake-consumer');
@@ -88,6 +106,7 @@ endif()
 find_package(oidn_webgpu ${manifest.crate_version} EXACT CONFIG REQUIRED)
 add_subdirectory(${cmakePath(path.join(directory, 'examples'))} examples)
 add_executable(cmake_abi ${cmakePath(path.join(root, 'native/tests/abi.c'))})
+target_compile_features(cmake_abi PRIVATE c_std_11)
 target_link_libraries(cmake_abi PRIVATE oidn_webgpu::oidn_webgpu)
 if(WIN32)
   add_custom_command(TARGET cmake_abi POST_BUILD
@@ -98,7 +117,9 @@ endif()
 file(GENERATE OUTPUT "\${CMAKE_BINARY_DIR}/executables-$<CONFIG>.txt"
   CONTENT "$<TARGET_FILE:cmake_abi>\n$<TARGET_FILE:denoise>\n$<TARGET_FILE:plan>\n")
 `);
-  run('cmake', ['-S', cmakeConsumer, '-B', cmakeBuild, `-DCMAKE_PREFIX_PATH=${directory}`, '-DCMAKE_BUILD_TYPE=Release']);
+  run('cmake', ['-S', cmakeConsumer, '-B', cmakeBuild, `-DCMAKE_PREFIX_PATH=${directory}`, '-DCMAKE_BUILD_TYPE=Release',
+    ...(windows && vulkanInclude ? ['-DOIDNW_BUILD_VULKAN_GPU_EXAMPLE=ON', `-DVulkan_INCLUDE_DIR=${vulkanInclude}`] : []),
+    ...(windows && dx12Include ? ['-DOIDNW_BUILD_DX12_GPU_EXAMPLE=ON', `-DDX12_AGILITY_INCLUDE_DIR=${dx12Include}`] : [])]);
   run('cmake', ['--build', cmakeBuild, '--config', 'Release']);
   const [cmakeAbi, , cmakePlan] = readFileSync(path.join(cmakeBuild, 'executables-Release.txt'), 'utf8').trim().split(/\r?\n/);
   run(cmakeAbi, []);
@@ -151,6 +172,18 @@ file(GENERATE OUTPUT "\${CMAKE_BINARY_DIR}/executables-$<CONFIG>.txt"
   const usage = spawnSync(path.join(deployed, 'bin', windows ? 'denoise.exe' : 'denoise'), [], { cwd: deployed, encoding: 'utf8' });
   assert.equal(usage.status, 2, usage.error?.message ?? usage.stderr);
   assert.match(usage.stderr, /usage:/);
+  if (windows && vulkanInclude) {
+    const gpuUsage = spawnSync(path.join(deployed, 'bin/vulkan_gpu.exe'), [], { cwd: deployed, encoding: 'utf8' });
+    assert.equal(gpuUsage.status, 2, gpuUsage.error?.message ?? gpuUsage.stderr);
+    assert.match(gpuUsage.stderr, /usage:/);
+    assert(existsSync(path.join(deployed, 'bin/shaders/produce.spv')));
+  }
+  if (windows && dx12Include) {
+    const gpuUsage = spawnSync(path.join(deployed, 'bin/dx12_gpu.exe'), [], { cwd: deployed, encoding: 'utf8' });
+    assert.equal(gpuUsage.status, 2, gpuUsage.error?.message ?? gpuUsage.stderr);
+    assert.match(gpuUsage.stderr, /usage:/);
+    assert(existsSync(path.join(deployed, 'bin/shaders/host.hlsl')));
+  }
   if (process.platform === 'darwin') {
     const metalUsage = spawnSync(path.join(deployed, 'bin', 'metal_gpu'), [], { cwd: deployed, encoding: 'utf8' });
     assert.equal(metalUsage.status, 2, metalUsage.error?.message ?? metalUsage.stderr);

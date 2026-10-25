@@ -1,9 +1,23 @@
 //! GPU-resident C API. Platform objects are isolated behind Backend/Timeline;
 //! the shared state machine owns numbering, completion, limits and lifetimes.
+mod dx12;
 mod ledger;
 mod metal;
+pub use dx12::{
+    Dx12DeviceDesc, oidnw_gpu_buffer_import_dx12, oidnw_gpu_device_create_dx12,
+    oidnw_gpu_dx12_device_desc_default, oidnw_gpu_sync_import_dx12,
+};
+mod vulkan;
+pub use vulkan::{
+    VulkanDeviceDesc, oidnw_gpu_buffer_import_vulkan, oidnw_gpu_device_import_vulkan,
+    oidnw_gpu_sync_import_vulkan, oidnw_gpu_vulkan_device_desc_default,
+};
+#[cfg(all(test, target_os = "windows"))]
+mod dx12_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
+mod vulkan_tests;
 
 use crate::capi::*;
 use crate::denoiser::ImageBindings;
@@ -112,12 +126,24 @@ pub struct GpuSync {
 }
 
 trait Timeline: Send + Sync {
-    fn value(&self) -> u64;
+    fn value(&self) -> Outcome<u64>;
     fn stage_wait(&self, queue: &wgpu::Queue, value: u64) -> Outcome<()>;
     fn stage_signal(&self, queue: &wgpu::Queue, value: u64) -> Outcome<()>;
     fn unstage(&self, queue: &wgpu::Queue);
 }
 trait Backend: Send + Sync {
+    fn check_health(&self) -> Outcome<()> {
+        Ok(())
+    }
+    unsafe fn identity(&self, raw: *mut c_void) -> Outcome<usize> {
+        Ok(raw as usize)
+    }
+    unsafe fn retain_buffer(&self, _raw: *mut c_void) -> Outcome<Option<Box<dyn Send + Sync>>> {
+        Ok(None)
+    }
+    fn check_admission(&self, _ledger: &Ledger<Pending>) -> Outcome<()> {
+        Ok(())
+    }
     unsafe fn buffer(
         &self,
         device: &wgpu::Device,
@@ -191,6 +217,7 @@ impl Drop for Lease {
     }
 }
 struct BufferInner {
+    _native_owner: Option<Box<dyn Send + Sync>>,
     state: Arc<DeviceState>,
     buffer: wgpu::Buffer,
     id: u64,
@@ -332,25 +359,43 @@ impl Runtime {
     }
     fn maintain(&mut self) -> Outcome<()> {
         self.context
+            .backend
+            .check_health()
+            .map_err(|e| self.lost(e.1))?;
+        self.context
             .device
             .poll(wgpu::PollType::Poll)
             .map_err(|e| self.lost(format!("GPU poll failed: {e}")))?;
+        self.context
+            .backend
+            .check_health()
+            .map_err(|e| self.lost(e.1))?;
         // Loss/error callbacks may run while polling. Once submission outcome
         // is uncertain, even completed software fences or CPU-advanced events
         // cannot establish physical GPU quiescence. Retain pending resources
         // until the host explicitly guarantees quiescence.
-        {
-            let health = self
-                .health
-                .lock()
-                .map_err(|_| gpu("health lock poisoned"))?;
-            if health.failure.is_none() {
-                self.ledger
-                    .retire(self.internal_completed.load(Ordering::Acquire), |p| {
-                        p.signals.iter().all(|p| p.sync.native.value() >= p.value)
-                    });
+        let health = self
+            .health
+            .lock()
+            .map_err(|_| gpu("health lock poisoned"))?;
+        if health.failure.is_none() {
+            let internal = self.internal_completed.load(Ordering::Acquire);
+            // Serialize retirement with asynchronous loss/error callbacks.
+            // Drop this guard before marking a native query error as uncertain.
+            let retirement = self.ledger.try_retire(internal, |pending| {
+                let mut complete = true;
+                for point in &pending.signals {
+                    let value = point.sync.native.value()?;
+                    complete &= value >= point.value;
+                }
+                Ok::<_, Failure>(complete)
+            });
+            if let Err(error) = retirement {
+                drop(health);
+                return Err(self.lost(error.1));
             }
         }
+        drop(health);
         self.buffers.retain(|_, b| b.strong_count() != 0);
         self.syncs.retain(|_, s| s.strong_count() != 0);
         self.prepared.retain(|p| p.strong_count() != 0);
@@ -549,6 +594,11 @@ unsafe fn points(
     unsafe { std::slice::from_raw_parts(pointer, count) }
         .iter()
         .map(|point| {
+            if point.value == u64::MAX {
+                return Err(invalid(
+                    "UINT64_MAX is reserved; timeline values must be smaller",
+                ));
+            }
             let sync = unsafe { required(point.sync, "sync")? };
             if !Arc::ptr_eq(&sync.inner.state, state) {
                 return Err(invalid("sync belongs to another GPU device"));
@@ -561,13 +611,18 @@ unsafe fn points(
         .collect()
 }
 fn validate_signals(waits: &[Point], signals: &[Point]) -> Outcome<()> {
+    for (i, wait) in waits.iter().enumerate() {
+        if waits[..i].iter().any(|p| Arc::ptr_eq(&p.sync, &wait.sync)) {
+            return Err(invalid("duplicate wait object"));
+        }
+    }
     for (i, signal) in signals.iter().enumerate() {
         if signal.value
             <= signal
                 .sync
                 .last_signal
                 .load(Ordering::Relaxed)
-                .max(signal.sync.native.value())
+                .max(signal.sync.native.value()?)
         {
             return Err(invalid(
                 "signal value must increase beyond current and accepted values",
@@ -718,6 +773,86 @@ pub unsafe extern "C" fn oidnw_gpu_device_import_metal(
         })
     }
 }
+fn ensure_backend(runtime: &Runtime, backend: wgpu::Backend) -> Outcome<()> {
+    if runtime.context.adapter.get_info().backend != backend {
+        return Err(invalid("platform import does not match the device backend"));
+    }
+    Ok(())
+}
+
+/// Source-only oracle access. The caller must serialize these handles with all
+/// C API calls and stop using them before native host teardown. They exist only
+/// to compare the Rust denoiser on the exact device owned by the GPU C API.
+#[cfg(feature = "interop-validation")]
+#[doc(hidden)]
+pub unsafe fn reference_context(
+    device: *mut GpuDevice,
+) -> Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue), String> {
+    unsafe { required(device, "device") }
+        .and_then(|device| {
+            with_runtime(&device.state, |r| {
+                r.healthy()?;
+                Ok((
+                    r.context.adapter.clone(),
+                    r.context.device.clone(),
+                    r.context.queue.clone(),
+                ))
+            })
+        })
+        .map_err(|e| e.1)
+}
+unsafe fn import_buffer(
+    device: &GpuDevice,
+    raw: *mut c_void,
+    length: u64,
+    result: *mut *mut GpuBuffer,
+    backend: wgpu::Backend,
+) -> Outcome<()> {
+    unsafe {
+        let _call = exclusive(&device.gate, "device handle is busy")?;
+        if raw.is_null() || length == 0 {
+            return Err(invalid("buffer and length are required"));
+        }
+        with_runtime(&device.state, |runtime| {
+            ensure_backend(runtime, backend)?;
+            runtime.maintain()?;
+            runtime.healthy()?;
+            if length > runtime.context.device.limits().max_buffer_size {
+                return Err(invalid("buffer exceeds device size limit"));
+            }
+            let identity = runtime.context.backend.identity(raw)?;
+            if runtime
+                .buffers
+                .get(&identity)
+                .is_some_and(|b| b.strong_count() != 0)
+            {
+                return Err(invalid("buffer is already imported"));
+            }
+            let buffer = runtime
+                .context
+                .backend
+                .buffer(&runtime.context.device, raw, length)?;
+            runtime.next_buffer = runtime
+                .next_buffer
+                .checked_add(1)
+                .ok_or_else(|| gpu("buffer identity exhausted"))?;
+            let inner = Arc::new(BufferInner {
+                _native_owner: runtime.context.backend.retain_buffer(raw)?,
+                state: device.state.clone(),
+                buffer,
+                id: runtime.next_buffer,
+                role: AtomicUsize::new(0),
+            });
+            runtime.buffers.insert(identity, Arc::downgrade(&inner));
+            result.write(Box::into_raw(Box::new(GpuBuffer {
+                _lease: Lease::new(&device.state),
+                inner,
+                token: Arc::new(()),
+            })));
+            Ok(())
+        })
+    }
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn oidnw_gpu_buffer_import_metal(
     device: *mut GpuDevice,
@@ -730,44 +865,57 @@ pub unsafe extern "C" fn oidnw_gpu_buffer_import_metal(
     unsafe {
         guard(error, capacity, || {
             output(result)?;
-            let device = required(device, "device")?;
-            let _call = exclusive(&device.gate, "device handle is busy")?;
-            if raw.is_null() || length == 0 {
-                return Err(invalid("buffer and length are required"));
+            import_buffer(
+                required(device, "device")?,
+                raw,
+                length,
+                result,
+                wgpu::Backend::Metal,
+            )
+        })
+    }
+}
+unsafe fn import_sync(
+    device: &GpuDevice,
+    raw: *mut c_void,
+    result: *mut *mut GpuSync,
+    backend: wgpu::Backend,
+) -> Outcome<()> {
+    unsafe {
+        let _call = exclusive(&device.gate, "device handle is busy")?;
+        if raw.is_null() {
+            return Err(invalid("shared event is NULL"));
+        }
+        with_runtime(&device.state, |runtime| {
+            ensure_backend(runtime, backend)?;
+            runtime.maintain()?;
+            runtime.healthy()?;
+            let identity = runtime.context.backend.identity(raw)?;
+            if runtime
+                .syncs
+                .get(&identity)
+                .is_some_and(|s| s.strong_count() != 0)
+            {
+                return Err(invalid("event is already imported"));
             }
-            with_runtime(&device.state, |runtime| {
-                runtime.maintain()?;
-                runtime.healthy()?;
-                if runtime
-                    .buffers
-                    .get(&(raw as usize))
-                    .is_some_and(|b| b.strong_count() != 0)
-                {
-                    return Err(invalid("buffer is already imported"));
+            let native = runtime.context.backend.timeline(raw).map_err(|error| {
+                if error.0 == OIDNW_ERROR_DEVICE_LOST {
+                    runtime.lost(error.1)
+                } else {
+                    error
                 }
-                let buffer =
-                    runtime
-                        .context
-                        .backend
-                        .buffer(&runtime.context.device, raw, length)?;
-                runtime.next_buffer = runtime
-                    .next_buffer
-                    .checked_add(1)
-                    .ok_or_else(|| gpu("buffer identity exhausted"))?;
-                let inner = Arc::new(BufferInner {
-                    state: device.state.clone(),
-                    buffer,
-                    id: runtime.next_buffer,
-                    role: AtomicUsize::new(0),
-                });
-                runtime.buffers.insert(raw as usize, Arc::downgrade(&inner));
-                result.write(Box::into_raw(Box::new(GpuBuffer {
-                    _lease: Lease::new(&device.state),
-                    inner,
-                    token: Arc::new(()),
-                })));
-                Ok(())
-            })
+            })?;
+            let inner = Arc::new(SyncInner {
+                state: device.state.clone(),
+                native,
+                last_signal: AtomicU64::new(0),
+            });
+            runtime.syncs.insert(identity, Arc::downgrade(&inner));
+            result.write(Box::into_raw(Box::new(GpuSync {
+                _lease: Lease::new(&device.state),
+                inner,
+            })));
+            Ok(())
         })
     }
 }
@@ -782,34 +930,12 @@ pub unsafe extern "C" fn oidnw_gpu_sync_import_metal(
     unsafe {
         guard(error, capacity, || {
             output(result)?;
-            let device = required(device, "device")?;
-            let _call = exclusive(&device.gate, "device handle is busy")?;
-            if raw.is_null() {
-                return Err(invalid("shared event is NULL"));
-            }
-            with_runtime(&device.state, |runtime| {
-                runtime.maintain()?;
-                runtime.healthy()?;
-                if runtime
-                    .syncs
-                    .get(&(raw as usize))
-                    .is_some_and(|s| s.strong_count() != 0)
-                {
-                    return Err(invalid("event is already imported"));
-                }
-                let native = runtime.context.backend.timeline(raw)?;
-                let inner = Arc::new(SyncInner {
-                    state: device.state.clone(),
-                    native,
-                    last_signal: AtomicU64::new(0),
-                });
-                runtime.syncs.insert(raw as usize, Arc::downgrade(&inner));
-                result.write(Box::into_raw(Box::new(GpuSync {
-                    _lease: Lease::new(&device.state),
-                    inner,
-                })));
-                Ok(())
-            })
+            import_sync(
+                required(device, "device")?,
+                raw,
+                result,
+                wgpu::Backend::Metal,
+            )
         })
     }
 }
@@ -989,6 +1115,17 @@ pub unsafe extern "C" fn oidnw_gpu_submit(
                         "submission queue is full or sequence numbers exhausted".into(),
                     )
                 })?;
+                runtime
+                    .context
+                    .backend
+                    .check_admission(&runtime.ledger)
+                    .map_err(|error| {
+                        if error.0 == OIDNW_ERROR_DEVICE_LOST {
+                            runtime.lost(error.1)
+                        } else {
+                            error
+                        }
+                    })?;
                 let views = bindings(
                     state,
                     prepared.inner.inputs,
@@ -1002,7 +1139,13 @@ pub unsafe extern "C" fn oidnw_gpu_submit(
                 )?;
                 let waits = points(state, desc.waits, desc.wait_count)?;
                 let signals = points(state, desc.signals, desc.signal_count)?;
-                validate_signals(&waits, &signals)?;
+                validate_signals(&waits, &signals).map_err(|error| {
+                    if error.0 == OIDNW_ERROR_DEVICE_LOST {
+                        runtime.lost(error.1)
+                    } else {
+                        error
+                    }
+                })?;
                 // No synchronization is staged until all CPU checks above pass.
                 // Retain everything before any operation that could submit work.
                 let seq = runtime
@@ -1192,7 +1335,12 @@ pub unsafe extern "C" fn oidnw_gpu_device_info(
                 );
                 if !backend.is_null() {
                     check_pointer(backend, "backend output")?;
-                    backend.write(OIDNW_BACKEND_METAL);
+                    backend.write(match runtime.context.adapter.get_info().backend {
+                        wgpu::Backend::Metal => OIDNW_BACKEND_METAL,
+                        wgpu::Backend::Vulkan => OIDNW_BACKEND_VULKAN,
+                        wgpu::Backend::Dx12 => OIDNW_BACKEND_DX12,
+                        _ => OIDNW_BACKEND_AUTO,
+                    });
                 }
                 if !features.is_null() {
                     check_pointer(features, "features output")?;

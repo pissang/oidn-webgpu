@@ -3,9 +3,31 @@
 #include <string.h>
 #include "oidn_webgpu.h"
 #include "oidn_webgpu_metal.h"
+#include "oidn_webgpu_dx12.h"
+_Static_assert(sizeof(oidnw_gpu_dx12_device_desc) == 40, "DX12 device ABI");
+#if defined(OIDNW_TEST_VULKAN)
+#include "oidn_webgpu_vulkan.h"
+_Static_assert(sizeof(oidnw_gpu_vulkan_device_desc) == 104, "Vulkan device ABI");
+#endif
+_Static_assert(sizeof(oidnw_filter_desc) == 28, "CPU filter ABI 2.0.0");
+_Static_assert(sizeof(oidnw_gpu_metal_device_desc) == 56, "Metal device ABI");
+_Static_assert(sizeof(oidnw_gpu_submit_desc) == 104, "submit ABI");
 
 int main(void) {
   if (oidnw_api_version() != OIDNW_API_VERSION) return 1;
+  oidnw_gpu_dx12_device_desc dx12;
+  oidnw_gpu_dx12_device_desc_default(&dx12);
+  if (dx12.flags || dx12.host_device || dx12.agility_sdk_version || dx12.agility_sdk_path || dx12.max_pending_submissions != 64) return 1;
+  oidnw_gpu_device *dx12_device = NULL;
+  if (oidnw_gpu_device_create_dx12(&dx12, &dx12_device, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT || dx12_device) return 1;
+#if defined(OIDNW_TEST_VULKAN)
+  oidnw_gpu_vulkan_device_desc vulkan;
+  oidnw_gpu_vulkan_device_desc_default(&vulkan);
+  if (vulkan.instance || vulkan.device || vulkan.get_instance_proc_addr ||
+      vulkan.lock || vulkan.unlock || vulkan.max_pending_submissions != 64) return 1;
+  oidnw_gpu_device *gpu_device = NULL;
+  if (oidnw_gpu_device_import_vulkan(&vulkan, &gpu_device, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT || gpu_device) return 1;
+#endif
   oidnw_gpu_metal_device_desc metal;
   oidnw_gpu_metal_device_desc_default(&metal);
   if (metal.device || metal.queue || metal.lock || metal.unlock ||
@@ -30,7 +52,7 @@ int main(void) {
   oidnw_filter_desc desc;
   memset(&desc, 0xff, sizeof desc);
   oidnw_filter_desc_default(&desc);
-  if (desc.size != sizeof desc || desc.hdr != 1 || desc.input_scale != 1.0f ||
+  if (desc.hdr != 1 || desc.input_scale != 1.0f ||
       desc.transfer != OIDNW_TRANSFER_PU || desc.kernel != OIDNW_KERNEL_AUTO || desc.flags != 0) {
     fprintf(stderr, "header and shared-library defaults disagree\n");
     return 1;

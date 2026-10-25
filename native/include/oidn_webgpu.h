@@ -7,8 +7,8 @@
  * oidn_webgpu.dll. The API and its results may change between versions.
  *
  * The filter takes and returns images in CPU memory, like Open Image
- * Denoise's host buffers. Metal hosts can import GPU resources through
- * oidn_webgpu_metal.h. Other non-wgpu hosts can plan the work with
+ * Denoise's host buffers. Metal, Vulkan and DX12 hosts can import GPU resources through
+ * their platform GPU headers. Other non-wgpu hosts can plan the work with
  * oidn_webgpu_core.h and replay it on their own device.
  *
  * Conventions:
@@ -92,8 +92,6 @@ typedef enum oidnw_transfer {
 #define OIDNW_FEATURE_COOPERATIVE_MATRIX 4u
 
 typedef struct oidnw_filter_desc {
-  /* sizeof(oidnw_filter_desc); set by oidnw_filter_desc_default. */
-  uint32_t size;
   /* Nonzero for HDR color (default). */
   uint32_t hdr;
   /* oidnw_transfer, used when hdr is nonzero (default PU). */
@@ -118,7 +116,7 @@ typedef struct oidnw_filter oidnw_filter;
 
 /* API version = major << 16 | minor << 8 | patch. Use matching headers
  * and library; dynamic loaders must require the exact version. */
-#define OIDNW_API_VERSION 0x00010100u
+#define OIDNW_API_VERSION 0x00020000u
 uint32_t oidnw_api_version(void);
 
 void oidnw_filter_desc_default(oidnw_filter_desc *desc);

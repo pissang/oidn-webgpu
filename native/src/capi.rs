@@ -42,7 +42,6 @@ pub const OIDNW_FEATURE_COOPERATIVE_MATRIX: u32 = 4;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct OidnwFilterDesc {
-    pub size: u32,
     pub hdr: u32,
     pub transfer: u32,
     pub quality: u32,
@@ -135,7 +134,7 @@ pub(crate) unsafe fn guard(error: *mut c_char, capacity: usize, body: impl FnOnc
 
 #[unsafe(no_mangle)]
 pub extern "C" fn oidnw_api_version() -> u32 {
-    (1 << 16) | (1 << 8)
+    2 << 16
 }
 
 fn wanted_features() -> wgpu::Features {
@@ -149,7 +148,6 @@ pub unsafe extern "C" fn oidnw_filter_desc_default(desc: *mut OidnwFilterDesc) {
     }
     unsafe {
         *desc = OidnwFilterDesc {
-            size: std::mem::size_of::<OidnwFilterDesc>() as u32,
             hdr: 1,
             transfer: OIDNW_TRANSFER_PU,
             quality: OIDNW_QUALITY_HIGH,
@@ -311,9 +309,6 @@ pub unsafe extern "C" fn oidnw_filter_create(
             let mut filter_desc = std::mem::zeroed::<OidnwFilterDesc>();
             oidnw_filter_desc_default(&mut filter_desc);
             if let Some(desc) = desc.as_ref() {
-                if (desc.size as usize) < std::mem::size_of::<OidnwFilterDesc>() {
-                    return Err(invalid("oidnw_filter_desc.size is too small"));
-                }
                 filter_desc = *desc;
             }
             let weights = std::slice::from_raw_parts(weights, weights_size).to_vec();
@@ -514,7 +509,7 @@ mod tests {
         unsafe {
             let mut error = [0i8; 1024];
             let mut device = std::ptr::null_mut();
-            assert_eq!(oidnw_api_version(), 0x00010100);
+            assert_eq!(oidnw_api_version(), 0x00020000);
             assert_eq!(
                 oidnw_device_create(OIDNW_BACKEND_AUTO, &mut device, error.as_mut_ptr(), error.len()),
                 OIDNW_OK

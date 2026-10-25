@@ -7,7 +7,6 @@ extern "C" {
 
 #define OIDNW_GPU_METAL_FP32 1u
 #define OIDNW_GPU_METAL_NO_SUBGROUPS 2u
-typedef void (*oidnw_gpu_queue_lock_fn)(void *user_data);
 typedef struct oidnw_gpu_metal_device_desc {
   uint32_t flags; /* Stable features only; experimental matrices not enabled. */
   void *device; /* id<MTLDevice>, borrowed, use __bridge under ARC. */

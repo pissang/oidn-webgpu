@@ -134,8 +134,8 @@ mod platform {
         }
     }
     impl Timeline for Event {
-        fn value(&self) -> u64 {
-            self.0.signaledValue()
+        fn value(&self) -> Outcome<u64> {
+            Ok(self.0.signaledValue())
         }
         fn stage_wait(&self, queue: &wgpu::Queue, value: u64) -> Outcome<()> {
             let hal = unsafe { queue.as_hal::<wgpu::hal::api::Metal>() }.ok_or_else(unavailable)?;

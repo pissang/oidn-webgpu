@@ -17,6 +17,7 @@ pub struct Options {
     pub debug: bool,
     pub trace: bool,
     pub unchecked: bool,
+    pub c_api: bool,
     pub weights: String,
     pub adapter: String,
 }
@@ -32,6 +33,7 @@ impl Options {
             debug: true,
             trace: false,
             unchecked: false,
+            c_api: false,
             weights: concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../weights/rt_hdr_alb_nrm_small.tza"
@@ -53,6 +55,7 @@ impl Options {
                 "--no-debug" => result.debug = false,
                 "--trace" => result.trace = true,
                 "--unchecked" => result.unchecked = true,
+                "--c-api" => result.c_api = true,
                 _ => return Err(format!("unknown argument: {arg}").into()),
             }
         }

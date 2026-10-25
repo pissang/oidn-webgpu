@@ -45,7 +45,7 @@ const copy = (source, destination) => {
   if (!existsSync(source)) throw new Error(`Missing build output ${source}`);
   copyFileSync(source, destination);
 };
-for (const header of ['oidn_webgpu.h', 'oidn_webgpu_core.h', 'oidn_webgpu_gpu.h', 'oidn_webgpu_metal.h']) {
+for (const header of ['oidn_webgpu.h', 'oidn_webgpu_core.h', 'oidn_webgpu_gpu.h', 'oidn_webgpu_metal.h', 'oidn_webgpu_vulkan.h', 'oidn_webgpu_dx12.h']) {
   copy(path.join(root, 'native/include', header), path.join(output, 'include', header));
 }
 for (const library of libraries) copy(path.join(release, library), path.join(output, 'lib', library));
@@ -53,6 +53,8 @@ copy(core, path.join(output, 'lib', path.basename(core)));
 const bench = `oidn-webgpu-bench${windows ? '.exe' : ''}`;
 copy(path.join(release, bench), path.join(output, 'bin', bench));
 copy(path.join(root, 'native/examples/denoise.c'), path.join(output, 'examples/denoise.c'));
+copy(path.join(root, 'native/examples/vulkan_gpu.cpp'), path.join(output, 'examples/vulkan_gpu.cpp'));
+copy(path.join(root, 'native/examples/dx12_gpu.cpp'), path.join(output, 'examples/dx12_gpu.cpp'));
 copy(path.join(root, 'native/examples/metal_gpu.m'), path.join(output, 'examples/metal_gpu.m'));
 copy(path.join(root, 'native/examples/validate_windows.c'), path.join(output, 'examples/validate_windows.c'));
 copy(path.join(root, 'native/examples/plan.c'), path.join(output, 'examples/plan.c'));
@@ -65,6 +67,7 @@ if (!rustExample.includes('path = "../.."')) throw new Error('Rust example must 
 writeFileSync(path.join(output, 'examples/rust-app/Cargo.toml'), rustExample.replace(
   'path = "../.."', `git = "https://github.com/pissang/oidn-webgpu.git", rev = "${context.source.commit}"`
 ));
+run('cargo', ['run', '--release', '--locked', '--target', context.target, '--manifest-path', 'native/Cargo.toml', '--example', 'interop_shaders', '--', path.join(output, 'examples/shaders')], { OIDN_WEBGPU_CORE_ARCHIVE: core });
 copy(path.join(root, 'native/README.md'), path.join(output, 'README.md'));
 copy(path.join(root, 'LICENSE'), path.join(output, 'LICENSE'));
 copy(path.join(root, 'native/NOTICE'), path.join(output, 'NOTICE'));

@@ -30,7 +30,7 @@ TZA file
                    native/src/lib.rs       replays the recorded program on wgpu (Network)
                    native/src/denoiser.rs  Rust Denoiser API
                    native/src/capi.rs      C filter API          native/include/oidn_webgpu.h
-                   native/src/gpu_capi/    GPU C API, submission ledger, Metal imports
+                   native/src/gpu_capi/    GPU C API, shared ledger, platform imports
 ```
 
 The browser and native runtimes share one TypeScript core. The native build compiles it to a static library with scriptc (version pinned in `native/toolchain/package.json`); `RecordingDevice` captures buffers, shaders and dispatches as a program, and Rust replays that program on a wgpu device.
@@ -118,7 +118,7 @@ The Mac suite requires Node 22+, Chrome, Rust, a C compiler and an OIDN SDK with
 
 Default inputs are `720p` (1280x720), `1080p` (1920x1080) and `1440p` (2560x1440). Use `--sizes 720p` to measure only 720p, or `--sizes 512` for the 512x512 regression case.
 
-The suite writes raw samples, model and binary hashes, source revisions, selected kernels, resource sizes and a Markdown report to `benchmarks/results/mac-performance.{json,md}`. Its metric is synchronized latency for one GPU-resident RGBA32F HDR image with albedo and normal. It includes preprocessing, network execution and output conversion, and excludes uploads, readback, device creation and preparation. Default protocol: 3 warmups, 7 measured images, whole-image processing, `inputScale=1`. Native runtime checks are disabled to match the C API default. Official OIDN loads the same TZA weights; Small uses fast quality, Base uses high, and Large uses high with clean auxiliary images. This is a timing comparison, not an image-quality comparison.
+The suite writes raw samples, model and binary hashes, source revisions, selected kernels, resource sizes and a Markdown report to `benchmarks/results/mac-performance.{json,md}`. Its metric is synchronized latency for one GPU-resident RGBA32F HDR image with albedo and normal. It includes preprocessing, network execution and output conversion, and excludes uploads, readback, device creation and preparation. Default protocol: 3 warmups, 7 measured images, whole-image processing, `inputScale=1`. Native benchmark runtime checks are disabled to match the standalone CPU C filter default. Official OIDN loads the same TZA weights; Small uses fast quality, Base uses high, and Large uses high with clean auxiliary images. This is a timing comparison, not an image-quality comparison.
 
 Repeat the changelog's Apple M4 Max comparison with OIDN 2.5.1 and:
 
@@ -166,77 +166,77 @@ MTL_DEBUG_LAYER=1 cargo test --locked --manifest-path native/Cargo.toml \
   metal_backpressure_and_failed_batch_preserve_external_completion -- --ignored --nocapture
 ```
 
-The standalone [Objective-C consumer](../native/examples/metal_gpu.m) uses the shipped headers and shared library; its build and usage are in the [GPU C API guide](../native/README.md#gpu-c-api-on-metal). CI compiles it on macOS through the packaged CMake examples but does not run GPU work.
+The standalone [Objective-C consumer](../native/examples/metal_gpu.m) uses the shipped headers and shared library; its build and usage are in the [GPU C API guide](../native/README.md#gpu-c-api). CI compiles it on macOS through the packaged CMake examples but does not run GPU work.
 
-### Native Windows interoperability prototypes
+### Native Windows GPU interoperability
 
-`native/examples/vulkan_interop.rs` and `native/examples/dx12_interop.rs` exercise native GPU production, the existing Rust `PreparedDenoise`, and native GPU consumption. Image allocations are never CPU mapped, uploaded or downloaded. A GPU consumer compares every output channel's bits with three serial references from the same device, model, kernel, precision and runtime-check setting. The CPU reads integer validation flags after execution. These correctness tests include artificial delays and provide no performance measurements.
+The platform C contracts, creation options and native ownership rules are in the [GPU C API guide](../native/README.md#gpu-c-api). `native/examples/vulkan_gpu.cpp` and `dx12_gpu.cpp` are independent DLL consumers. Native shaders produce color/albedo/normal, and a native consumer compares all output bits with serial executions. Only integer validation flags reach the CPU. Shader assets are built by `interop_shaders`; the package includes SPIR-V and the host HLSL source so consumers need no Rust or Node runtime.
 
-Both examples reuse one prepared workspace, rotate three image sets, bind at byte offset 256 and vary input patterns and exposure on each reuse of a slot. Producer, denoiser and consumer use GPU dependencies, including a consumer-completion dependency before a slot can be reused. The last producer stays gated while the application drops the prepared workspace and imported wgpu handles. Native command and descriptor objects are retired by completion values, with a maximum of 64 pending pairs. At that limit the test waits for the oldest consumer, rather than waiting for GPU idle or waiting after every frame. Allocator samples are included where the backend exposes them.
+`native/examples/vulkan_interop.rs` and `dx12_interop.rs` additionally compare formal C submissions with serial `PreparedDenoise` references on the same device, precision, kernel and runtime-check configuration. They rotate three buffer sets at offset 256, change contents and input scale on slot reuse, and cover partial 31×31 images with tile edge 16. Native command/descriptor retirement has a 64-pair bound. The C pending queue and binding cache have their own bounds. These correctness protocols use artificial delays and establish no performance result.
 
-| Route | Device creation and ownership | Current scope |
+#### Backend boundaries
+
+`native/src/gpu_capi/mod.rs` owns handles, image roles, binding caches, submission numbering, admission, pending-resource retention, completion and quarantine. `ledger.rs` first checks an eligible prefix without dropping resources; any native timeline-query error retains the prefix. Retirement holds the health lock so loss/error callbacks cannot race reclamation. The platform modules implement `Backend` and fallible `Timeline`; they do not copy the runtime. Queue locks cover initialization, uploads, submissions, polling and final queue destruction.
+
+| Route | Implementation | Scope |
 | --- | --- | --- |
-| Vulkan A: host device import | Host creates `VkInstance`, `VkDevice`, three queues in one graphics/compute family, and device-local buffers. HAL uses the host loader table. Non-owning instance/device callbacks and `from_raw_externally_owned` retain host owners. | Executed on Windows. A dedicated denoise queue is the default; `--shared-queue` shares the producer queue. A single host mutex covers device import, queue submissions, polling, cleanup and final wgpu destruction. This is an example integration, not a public queue-lock callback API. |
-| Vulkan B: external memory | A separate library device would import Win32 memory/semaphore handles. | Only physical-device capability queries are implemented. The RTX 4060 reports `OPAQUE_WIN32` buffer and timeline semaphore import/export support. Cross-device binding, memory-type compatibility, dedicated allocations and `VK_QUEUE_FAMILY_EXTERNAL` release/acquire execution remain unverified. |
-| DX12: external memory | Host and library create distinct devices on the same adapter LUID using Agility independent devices. wgpu normally creates the library device. Host exports shared UAV-capable committed buffers and shared fences; the library uses `OpenSharedHandle` and HAL buffer wrapping. | Image roles stay fixed. Native DIRECT command lists use buffer promotion from COMMON and decay to COMMON at `ExecuteCommandLists` completion, plus UAV barriers. Fences order accesses across devices; fences do not establish resource states. Exporter-owned NT handles close immediately after opening; opened resources/fences retain COM references. |
+| Vulkan A | Non-owning HAL views use the host loader, instance, physical device, device, queue, buffers and timeline semaphores. Host queue access shares paired C callbacks. | Executed on Windows. Dedicated and shared producer/denoiser queues are tested. Linux execution is unverified. |
+| Vulkan B | The Rust probe queries external buffer/semaphore capabilities only. | No external-memory binding, ownership transfer or separate-device execution; no fallback. |
+| DX12 | Matching Agility SDK; a distinct library device and queue on the host LUID. Temporary shared NT handles are opened and closed, and both original/opened COM identities are retained. | Committed DEFAULT UAV buffers and shared fences; no host device or queue import. Debug maintenance checks both devices. |
 
-Vulkan A is appropriate for hosts that can satisfy HAL's device-creation contract. Before `vkCreateDevice`, the example queries `required_device_extensions` and `physical_device_features`, snapshots the complete feature chain, and checks the original host `VkDeviceCreateInfo` before import. This includes HAL's implicit robustness, timeline, shader-int8 and other requirements, not just denoise shader requirements. The prototype accepts HAL's canonical individual feature structs; aggregate Vulkan 1.1/1.2/1.3 feature structs are rejected until normalization is implemented. `--no-recommended` disables optional wgpu acceleration features; it does not waive HAL requirements. No experimental matrix features are requested. A host whose existing device does not satisfy that contract needs another route. Route B would avoid that enabled-feature constraint but adds allocation compatibility, external ownership transfers and handle management. It is not offered as a working fallback on the evidence of capability queries alone.
+Vulkan import validates the original `VkDeviceCreateInfo` against the complete pinned HAL extension/feature chain, including implicitly required robustness, timeline and shader-int8 features. `vulkan_features.rs` is shared with the prototype and rejects each missing required boolean in its negative checks. Individual canonical feature structs are required; Vulkan 1.1/1.2/1.3 aggregate structs fail closed. The supplied declarations must still be live during import. Physical-device support alone is insufficient.
 
-Vulkan has two additional constraints with the pinned wgpu 30.0.1:
+Pinned HAL 30.0.1 chains Vulkan submissions with binary relay semaphores. Deep chains behind not-yet-submitted CPU timeline signals can trigger `VUID-vkQueueSubmit-pWaitSemaphores-03238`. The C backend conservatively rejects another submission with `QUEUE_FULL` while a pending external wait remains unresolved. It does not guess whether a future producer signal was already submitted. The host must release producer gates independently of the CPU submit call returning.
 
-- HAL chains submissions with binary relay semaphores. Unresolved future timeline signals in that dependency chain can trigger `VUID-vkQueueSubmit-pWaitSemaphores-03238`, observed in shared-queue testing. The delayed-producer test therefore submits one gated execution, checks that it cannot complete, and resolves its CPU gates before chaining further HAL submissions. Normal frames use GPU producer/consumer dependencies. Deep chains of unresolved future CPU signals are not validated as an integration contract.
-- Naga emits workgroup array layout decorations that trigger `VUID-StandaloneSpirv-None-10684` ([upstream issue](https://github.com/gfx-rs/wgpu/issues/7696)). HAL's own messenger suppresses that VUID. This example preserves the full diagnostic and counts the observed workgroup/ArrayStride case separately in `known_naga_workgroup_layout_diagnostics`; other validation errors fail the test. A run with a nonzero count is not clean shader validation.
+DX12 HAL may complete its internal fence before external fence signals. The common ledger checks all external signals too. `GetCompletedValue()==UINT64_MAX` is a device-removal error, never completion. Real removal is not induced by the tests; the sentinel conversion has a GPU-independent unit test.
 
-Run from an x64 Visual Studio developer PowerShell with Rust's `x86_64-pc-windows-msvc` toolchain, Node 22+ and Zig 0.16.0 on `PATH`. A source-matched `OIDN_WEBGPU_CORE_ARCHIVE` can replace the core build. Install the Khronos validation layer and point `VK_LAYER_PATH` at its manifest directory if it is not registered globally:
+#### Reproduce
+
+Run from an x64 VS developer PowerShell with Rust's MSVC toolchain, Node 22+ and Zig 0.16.0 on PATH. A source-matched `OIDN_WEBGPU_CORE_ARCHIVE` can replace the planner build. Install the Khronos validation layer and use the matching Agility SDK binaries and headers:
 
 ```powershell
 $env:VK_LAYER_PATH = 'C:/VulkanSDK/<version>/Bin'
-pwsh -File scripts/native-interop-check.ps1 -Backend vulkan
-pwsh -File scripts/native-interop-check.ps1 -Backend vulkan -Frames 12 -GpuValidation
-```
-
-DX12 validation requires Windows Graphics Tools, DXC on the DLL search path for FP16, and a local [Agility SDK](https://devblogs.microsoft.com/directx/directx12agility/) with matching x64 `D3D12Core.dll` and `d3d12SDKLayers.dll`. The x64 VS developer environment used locally supplies DXC from the Windows SDK. The prototypes use the independent-device API without changing wgpu or its version. Set an absolute SDK binary directory ending in a slash:
-
-```powershell
 $env:WGPU_DX12_AGILITY_SDK_PATH = 'C:/SDKs/Agility/build/native/bin/x64/'
 $env:WGPU_DX12_AGILITY_SDK_VERSION = '619'
 $env:WGPU_DX12_AGILITY_SDK_REQUIRE = '1'
+pwsh -File scripts/native-interop-check.ps1 -Backend vulkan -VulkanIncludeDirectory "$env:VULKAN_SDK/Include"
+pwsh -File scripts/native-interop-check.ps1 -Backend vulkan -RustOracle
+pwsh -File scripts/native-interop-check.ps1 -Backend vulkan -Frames 12 -GpuValidation
+pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -Dx12IncludeDirectory 'C:/SDKs/Agility/build/native/include'
+pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -RustOracle
 pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -Unchecked
-pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -Frames 12 -Unchecked -GpuValidation
+pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -RustOracle -Unchecked
+pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -Frames 12 -GpuValidation
+pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -Frames 12 -GpuValidation -Unchecked
+cargo test --manifest-path native/Cargo.toml backpressure_and_failed_batch -- --ignored --nocapture
 ```
 
-The runner builds the explicit MSVC target and runs Small/Base at 16×16 and Large at 31×31 with tile edge 16, each in FP16 and FP32. Vulkan Base uses the shared queue; other cases use a dedicated denoise queue. `-NoDebug` is an explicit DX12 diagnostic mode if the debug layer cannot load; its reports contain `debug_layer=false` and `validation_errors=null`. It does not establish debug-layer validation. `-Unchecked` disables shader bounds checks and workgroup initialization for both the reference and asynchronous execution; the debug layer is a separate option. Checked DX12 Small did not finish a 1000-frame diagnostic run within 300 seconds on the local machine; that run has no correctness conclusion.
+The runner defaults to the actual DLL C++ consumer. `-RustOracle` builds the source-only `interop-validation` feature for DX12 so its serial Rust reference uses the exact C device. That feature adds no C exports and does not change shader checks. `-Prototype` selects the original Rust path. `-SkipBuild` reuses existing artifacts; do not use it after source changes. Different protocols/settings should use distinct `-OutputDirectory` values.
 
-Measured correctness on 2026-10-25: Windows 11 build 26200, RTX 4060 Laptop, NVIDIA 617.42, wgpu 30.0.1, Khronos layer API 1.4.366 and Agility SDK 1.619.6. Each row below covers the runner's six model/precision cases. The Intel Iris Xe in the same machine was not exercised.
+The six cases are Small/Base at 16×16 and Large at 31×31 with tile edge 16, in FP16 and FP32. Vulkan Base shares the producer queue; other Vulkan cases use a dedicated queue. DX12 always uses a dedicated library queue. `-Unchecked` explicitly disables bounds checks and workgroup initialization; defaults remain checked. `-NoDebug` is a DX12 diagnostic mode and supplies no debug validation evidence. The runner saves arguments, source/header/executable/DLL/model hashes, drivers, SDK environment, stdout, stderr and timeout/exit status as JSON under `.native-build/interop`. Timed-out or interrupted processes are not passes.
 
-| Backend | Frames per case | Shader runtime checks | Native validation | Result |
+#### Recorded correctness and diagnostics
+
+On 2026-10-25: Windows 11 build 26200, RTX 4060 Laptop, NVIDIA 617.42, wgpu 30.0.1, Khronos layer API 1.4.366, Agility 1.619.6. Each row covers all six model/precision cases:
+
+| Path | Frames per case | Shader checks | Native validation | Result |
 | --- | ---: | --- | --- | --- |
-| Vulkan host import | 1000 | enabled | Khronos layer | Byte equal; 8 or 10 known Naga layout diagnostics per case; zero other validation errors, including teardown |
-| Vulkan host import | 12 | enabled | GPU-assisted and synchronization validation | Byte equal; same Naga limitation; zero other validation errors |
-| DX12 shared memory | 1000 | disabled | D3D12 debug layer on both devices | Byte equal; zero validation errors |
-| DX12 shared memory | 12 | disabled | Debug layer and GPU validation on both devices | Byte equal; zero validation errors |
+| Vulkan DLL / serial C | 1000 | enabled | Khronos layer | Byte equal |
+| Vulkan C / serial Rust, same host device | 1000 | enabled | Khronos layer | Byte equal |
+| Vulkan DLL | 12 | enabled | GPU-assisted and synchronization validation, serialized diagnostic protocol | Byte equal |
+| DX12 DLL / serial C | 1000 | enabled and disabled separately | Debug layer on both devices | Byte equal |
+| DX12 C / serial Rust, same library device | 1000 | enabled and disabled separately | Debug layer on both devices | Byte equal |
+| DX12 DLL | 12 | enabled and disabled separately | Debug layer and GPU validation on both devices | Byte equal |
 
-All runs checked delayed production, delayed consumption, per-slot content changes, in-flight wrapper release, rejected parameters/imports and an empty failure batch retaining its wait/signal. Pending native command pairs never exceeded 64 and drained to zero. Allocator samples stayed within the prepared resources plus the bounded staging pool over the 1000-frame runs; this does not establish an unlimited-duration or device-loss reclamation bound. Vulkan also passed a 12-frame FP32 run with recommended wgpu features omitted. The Metal prototype was already present in this checkout; it was not rerun on Windows.
+Vulkan is **not clean shader validation**: Naga workgroup/ArrayStride decorations still trigger `VUID-StandaloneSpirv-None-10684`. The native messenger counts these separately in `known_naga_workgroup_layout_diagnostics` (8 or 10 per DLL case, and the layer's duplicate-message cap can limit oracle counts). All final cases report zero other validation errors. GPU-assisted runs additionally record two layer configuration warnings: instrumentation enables memory-model/address/scalar/8-bit features and disables irrelevant ray/mesh instrumentation. Warnings are recorded independently.
 
-| Example option | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `--frames` | integer | `1000` | 1..=100000 executions, with at most 256 MiB of validation flags |
-| `--size` | integer | `16` | Square image edge, 1..=1024 |
-| `--tile` | integer | `0` | Output tile edge; 0 or 16..=16384 |
-| `--weights` | path | Small three-input HDR model | Model must read color/albedo/normal |
-| `--adapter` | string | `RTX 4060` | Host adapter name substring; no silent adapter fallback |
-| `--fp32` | flag | off | Omit `SHADER_F16` |
-| `--no-recommended` | flag | off | Request only required wgpu features |
-| `--shared-queue` | flag | off | Vulkan only; host producer and denoiser share one queue |
-| `--unchecked` | flag | off | Disable shader runtime checks for both paths |
-| `--no-debug` | flag | off | DX12 only; explicitly skip debug-layer validation |
-| `--trace` | flag | off | Print preparation and submission progress to stderr |
+An initial asynchronous Vulkan GPUAV gate test queried an external counter before releasing its producer gate. The layer waited for timeline state, emitted timeout warnings in Small, and the Base FP16 process was interrupted after more than six minutes. Those runs are retained as failed diagnostic evidence. GPUAV now uses a serialized protocol with independent producer release and no gated completion queries; all six 12-frame reruns completed without timeline-state timeout diagnostics. The normal 1000-frame tests, rather than that serialized diagnostic protocol, establish blocked-producer and in-flight-release behavior. Asynchronous GPUAV with deeply gated future signals is not validated.
 
-Raw stdout, stderr, arguments, executable/weight hashes, drivers and validation settings go under `.native-build/interop/`; the runner writes a backend summary after each case. Invalid offsets and parameters are rejected before staging synchronization, duplicate native imports are rejected, and device/LUID mismatches are checked before wrapping. A controlled post-acceptance encoding failure uses an empty GPU batch with the original wait/signal; its output is not consumed. A zero-timeout wait exercises timeout reporting without inducing a GPU fault.
+The previous Rust DX12 prototype's checked Small 1000-frame run timed out at 300 seconds; that historical run remains inconclusive. The formal checked DLL and same-device Rust-oracle matrices now pass separately from unchecked matrices. No bounds checks were disabled for the checked results, and this work does not attribute the historical timeout to a verified cause.
 
-Wait for the external completion value when testing host notification. DX12 HAL signals its internal wgpu fence before enqueuing external fence signals; GPU validation exposed a case where `Device::poll(Wait)` returned while the external counter still held its previous value. The example now waits for the external value before asserting it. A common C completion-query contract must specify whether it includes that external signal operation; an internal wgpu submission index alone does not establish that it has occurred.
+The GPU state-machine tests run parameter/range/alignment/role/duplicate-sync rejections, same-workspace BUSY, multi-workspace CPU contention, queue backpressure, zero-timeout waits, public handle release in flight, controlled post-acceptance encoding failure with the promised wait/signal, quarantine and explicit quiescent teardown. DX12's state-machine fixture explicitly uses unchecked shaders; checked image correctness is established by the separate matrices. A software-completion advance after injected uncertainty does not retire resources. The tests establish real completion before injecting that uncertainty, so quiescent teardown has host proof.
 
-These examples do not define the GPU C ABI, bind-group range cache, production queue-lock callbacks, or a production submission/error state machine. The test executables terminate on device loss or an uncaptured wgpu error instead of reusing uncertain in-flight state; this process-exit policy is not a reusable library recovery contract. Device loss, uncertain submission, recovery across independently lost devices, hidden aliases and long-running reclamation beyond the recorded runs remain unverified. An empty batch after a controlled encoding failure does not establish that signaling is recoverable after device loss. A host CPU can advance a shared signal only while its own device and synchronization object remain usable. GPU denoise completion also does not permit output reuse until the host consumer has finished.
+Real device removal and recovery, independently lost DX12 devices, hidden memory aliases, unlimited-duration GPU memory behavior, other GPUs/drivers and performance remain unverified. Metal was not rerun on Windows. Existing allocator samples from a separate Vulkan reference wrapper do not measure the C context's allocator. Controlled encoding failure does not prove that external signals can be recovered after real device loss.
 
 ### Native Metal profiling
 

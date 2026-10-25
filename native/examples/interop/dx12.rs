@@ -2,6 +2,9 @@
 #[path = "common.rs"]
 mod common;
 use common::*;
+#[path = "gpu_client.rs"]
+mod gpu_client;
+use oidn_webgpu::gpu_capi::*;
 use oidn_webgpu::{DenoiseParams, Denoiser, DenoiserOptions, Model, wgpu};
 use std::{
     collections::{HashSet, VecDeque},
@@ -45,6 +48,7 @@ struct Context {
     queue: wgpu::Queue,
     adapter: wgpu::Adapter,
     raw: ID3D12Device,
+    c_device: *mut GpuDevice,
 }
 impl Context {
     fn wait(&self, index: wgpu::SubmissionIndex) -> Result<()> {
@@ -195,6 +199,45 @@ unsafe fn setup(options: &Options) -> Result<(Host, Context, bool)> {
         };
         let producer = host_device.CreateCommandQueue(&q)?;
         let consumer = host_device.CreateCommandQueue(&q)?;
+        let (adapter, device, queue, c_device) = if options.c_api {
+            #[cfg(not(feature = "interop-validation"))]
+            {
+                return Err("--c-api requires --features interop-validation".into());
+            }
+            #[cfg(feature = "interop-validation")]
+            {
+                let mut c_device = std::ptr::null_mut();
+                let desc = Dx12DeviceDesc {
+                    flags: u32::from(options.fp32)
+                        | if !options.recommended { 3 } else { 0 }
+                        | if options.debug { 4 } else { 0 }
+                        | if gpu_validation { 8 } else { 0 },
+                    host_device: host_device.as_raw(),
+                    agility_sdk_version: factory_desc.SDKVersion,
+                    agility_sdk_path: path.as_ptr(),
+                    max_pending_submissions: 8,
+                };
+                let mut error = [0i8; 4096];
+                if oidnw_gpu_device_create_dx12(
+                    &desc,
+                    &mut c_device,
+                    error.as_mut_ptr(),
+                    error.len(),
+                ) != 0
+                {
+                    return Err(std::ffi::CStr::from_ptr(error.as_ptr())
+                        .to_string_lossy()
+                        .into_owned()
+                        .into());
+                }
+                let (a, d, q) = reference_context(c_device)
+                    .map_err(|e| format!("C API reference device: {e}"))?;
+                (a, d, q, c_device)
+            }
+        } else {
+            (adapter, device, queue, std::ptr::null_mut())
+        };
+        let raw = device.as_hal::<Api>().unwrap().raw_device().clone();
         Ok((
             Host {
                 device: host_device,
@@ -207,6 +250,7 @@ unsafe fn setup(options: &Options) -> Result<(Host, Context, bool)> {
                 queue,
                 adapter,
                 raw,
+                c_device,
             },
             gpu_validation,
         ))
@@ -382,31 +426,7 @@ impl Fences {
     }
 }
 
-const HLSL: &str = r#"
-RWStructuredBuffer<float4> a : register(u0);
-RWStructuredBuffer<float4> b : register(u1);
-RWStructuredBuffer<float4> c : register(u2);
-cbuffer Params : register(b0) { uint size, pattern, frame, unused; }
-[numthreads(64,1,1)] void produce(uint3 id : SV_DispatchThreadID) {
-    uint i=id.x; if(i>=size*size) return;
-    float noise=float(((i+pattern*31u)*1664525u+1013904223u)>>24u)/255.0f-0.5f;
-    float signal=0.5f+float(i%size)/float(size)+float(pattern)*0.25f;
-    a[i]=float4(max(float3(0.8f,0.6f,0.4f)*signal+noise*0.3f,0.0f),0.25f+float(pattern)*0.125f);
-    b[i]=float4(0.8f,0.6f,0.4f,0.0f); c[i]=float4(0.0f,0.0f,1.0f,0.0f);
-}
-[numthreads(64,1,1)] void consume(uint3 id : SV_DispatchThreadID) {
-    uint i=id.x, count=size*size; if(i>=count) return;
-    float4 actual=a[i], expected=b[i]; uint flag=any(asuint(actual)!=asuint(expected))?1u:0u;
-    if(!all(isfinite(actual)) || any(actual.xyz<0)) flag|=2u;
-    if(actual.w!=0.25f+float(pattern)*0.125f) flag|=4u;
-    if(!any(actual.xyz>0)) flag|=8u;
-    c[frame*count+i]=asfloat(uint4(flag,flag,flag,flag));
-}
-[numthreads(64,1,1)] void initialize(uint3 id : SV_DispatchThreadID) {
-    uint i=id.x+id.y*(65535u*64u); if(i>=size) return;
-    c[i]=asfloat(uint4(0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu));
-}
-"#;
+const HLSL: &str = include_str!("host.hlsl");
 struct Kernels {
     root: ID3D12RootSignature,
     pipelines: [ID3D12PipelineState; 3],
@@ -789,6 +809,7 @@ pub fn run() -> Result<()> {
         if options.trace {
             eprintln!("prepared: {:?}", prepared.info());
         }
+        assert_eq!(prepared.info().runtime_checks, !options.unchecked);
         let precision = format!("{:?}", prepared.info().precision);
         let paths = format!("{:?}", prepared.info().kernels);
         for pattern in 0..3 {
@@ -875,6 +896,71 @@ pub fn run() -> Result<()> {
             .map_err(|_| "failure gate thread panicked")?
             .map_err(|e| format!("failure gate: {e}"))?;
         assert_eq!(fallback_early, 3, "empty fallback ignored its wait");
+        let mut c_api = if options.c_api {
+            let mut imported = Vec::new();
+            let mut images = Vec::new();
+            let mut error = [0i8; 4096];
+            for group in &raw {
+                let mut views = Vec::new();
+                for resource in group {
+                    let mut handle = std::ptr::null_mut();
+                    if oidnw_gpu_buffer_import_dx12(
+                        context.c_device,
+                        resource.as_raw(),
+                        &mut handle,
+                        error.as_mut_ptr(),
+                        error.len(),
+                    ) != 0
+                    {
+                        return Err(std::ffi::CStr::from_ptr(error.as_ptr())
+                            .to_string_lossy()
+                            .into_owned()
+                            .into());
+                    }
+                    imported.push(handle);
+                    views.push(Image {
+                        buffer: handle,
+                        offset: OFFSET,
+                    });
+                }
+                images.push(Images {
+                    color: views[0],
+                    albedo: views[1],
+                    normal: views[2],
+                    output: views[3],
+                });
+            }
+            let mut ready = std::ptr::null_mut();
+            let mut done = std::ptr::null_mut();
+            for (native, handle) in [(&sync.host[0], &mut ready), (&sync.host[1], &mut done)] {
+                if oidnw_gpu_sync_import_dx12(
+                    context.c_device,
+                    native.as_raw(),
+                    handle,
+                    error.as_mut_ptr(),
+                    error.len(),
+                ) != 0
+                {
+                    return Err(std::ffi::CStr::from_ptr(error.as_ptr())
+                        .to_string_lossy()
+                        .into_owned()
+                        .into());
+                }
+            }
+            Some(gpu_client::GpuClient::new(
+                context.c_device,
+                images,
+                imported,
+                ready,
+                done,
+                &std::fs::read(&options.weights)?,
+                options.size,
+                options.tile,
+                options.unchecked,
+            )?)
+        } else {
+            None
+        };
         let release = sync.clone();
         let (send, receive) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || -> std::result::Result<(bool, u64), String> {
@@ -928,21 +1014,25 @@ pub fn run() -> Result<()> {
                 &waits,
                 &[(&sync.host[0], 4 + sequence)],
             )?;
-            prepared.rebind(bindings(&ring[slot], None))?;
-            let mut encoder = context.device.create_command_encoder(&Default::default());
-            prepared.encode(
-                &mut encoder,
-                DenoiseParams {
-                    input_scale: SCALES[pattern],
-                },
-            )?;
-            last = Some(library_submit(
-                &context,
-                Some(encoder.finish()),
-                &sync,
-                4 + sequence,
-                4 + sequence,
-            ));
+            if let Some(api) = c_api.as_mut() {
+                api.submit(slot, 4 + sequence, SCALES[pattern])?;
+            } else {
+                prepared.rebind(bindings(&ring[slot], None))?;
+                let mut encoder = context.device.create_command_encoder(&Default::default());
+                prepared.encode(
+                    &mut encoder,
+                    DenoiseParams {
+                        input_scale: SCALES[pattern],
+                    },
+                )?;
+                last = Some(library_submit(
+                    &context,
+                    Some(encoder.finish()),
+                    &sync,
+                    4 + sequence,
+                    4 + sequence,
+                ));
+            }
             let consumer = Batch::dispatch(
                 &host,
                 &kernels,
@@ -980,6 +1070,9 @@ pub fn run() -> Result<()> {
         if !submitted || early != 4 {
             return Err(format!("producer gate failed: {submitted}, {early}").into());
         }
+        if let Some(api) = c_api.as_mut() {
+            api.release_handles();
+        }
         drop(prepared);
         drop(denoiser);
         drop(ring);
@@ -988,7 +1081,12 @@ pub fn run() -> Result<()> {
         // commands must outlive the application handles just released.
         assert!(sync.value(1)? < 4 + options.frames as u64);
         sync.signal(5)?;
-        context.wait(last.unwrap())?;
+        let c_queue_full = c_api.as_ref().map_or(0, |api| api.queue_full);
+        if let Some(api) = c_api.take() {
+            api.finish()?;
+        } else {
+            context.wait(last.unwrap())?;
+        }
         sync.wait(2, options.frames as u64, 60_000)?;
         pending.clear();
         let copy = Batch::copy(&host, &checks, &readback, report_bytes)?;
@@ -1045,7 +1143,7 @@ pub fn run() -> Result<()> {
             serde_json::json!({"backend":"DX12","route":"external-memory","device_created_by":"library",
         "adapter":context.adapter.get_info().name,"adapter_luid":[luid.HighPart as i64,luid.LowPart as i64],"distinct_devices":true,
         "frames":options.frames,"size":options.size,"tile":options.tile,"precision":precision,"kernels":paths,
-        "runtime_checks":!options.unchecked,
+        "formal_c_api":options.c_api,"queue_full":c_queue_full,"runtime_checks":!options.unchecked,
         "output_byte_equal":true,"completed_before_producer_release":early-4,"cpu_image_uploads":0,"cpu_image_readbacks":0,
         "pending_batches_high_water":high_water,"pending_batches_after_wait":pending.len(),"debug_layer":options.debug,"gpu_validation":gpu_validation,
         "allocator_samples":allocator_samples,

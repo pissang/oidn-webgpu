@@ -1,9 +1,14 @@
 #[path = "common.rs"]
 mod common;
-#[path = "vulkan_features.rs"]
+#[path = "../../src/gpu_capi/vulkan_features.rs"]
 mod features;
+#[path = "gpu_client.rs"]
+mod gpu_client;
+#[path = "queue_lock.rs"]
+mod queue_lock;
 use ash::{vk, vk::Handle};
 use common::*;
+use oidn_webgpu::gpu_capi::*;
 use oidn_webgpu::{DenoiseParams, Denoiser, DenoiserOptions, Model, wgpu};
 use std::{
     collections::{HashSet, VecDeque},
@@ -64,7 +69,7 @@ struct Host {
     physical: vk::PhysicalDevice,
     family: u32,
     queues: [vk::Queue; 3],
-    lock: Arc<Mutex<()>>,
+    lock: Arc<queue_lock::QueueLock>,
 }
 impl std::ops::Deref for Host {
     type Target = InstanceOwner;
@@ -75,7 +80,7 @@ impl std::ops::Deref for Host {
 impl Drop for Host {
     fn drop(&mut self) {
         unsafe {
-            let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = self.lock.lock().unwrap();
             let _ = self.device.device_wait_idle();
             self.device.destroy_device(None);
         }
@@ -85,7 +90,8 @@ struct Context {
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter: wgpu::Adapter,
-    lock: Arc<Mutex<()>>,
+    c_device: *mut GpuDevice,
+    lock: Arc<queue_lock::QueueLock>,
 }
 impl Context {
     fn wait(&self, index: wgpu::SubmissionIndex) -> Result<()> {
@@ -272,7 +278,7 @@ unsafe fn setup(options: &Options) -> Result<(Arc<Host>, Context, serde_json::Va
             physical,
             family,
             queues: raw_queues,
-            lock: Arc::new(Mutex::new(())),
+            lock: Arc::new(queue_lock::QueueLock::default()),
         });
         // Instance's non-owning wrapper must also keep the host alive. The adapter
         // above was only used to query requirements; wrap a second non-owning view.
@@ -330,12 +336,45 @@ unsafe fn setup(options: &Options) -> Result<(Arc<Host>, Context, serde_json::Va
                 ..Default::default()
             },
         )?;
+        drop(_guard);
+        let mut c_device = std::ptr::null_mut();
+        if options.c_api {
+            let host_instance_create = vk::InstanceCreateInfo::default()
+                .application_info(&app)
+                .enabled_extension_names(&extension_names)
+                .enabled_layer_names(&layers);
+            let desc = VulkanDeviceDesc {
+                flags: u32::from(options.fp32),
+                get_instance_proc_addr: Some(host._entry.static_fn().get_instance_proc_addr),
+                instance: host.instance.handle(),
+                physical_device: physical,
+                device: host.device.handle(),
+                queue: host.queues[if options.shared { 0 } else { 1 }],
+                queue_family_index: family,
+                queue_index: if options.shared { 0 } else { 1 },
+                instance_create_info: (&host_instance_create as *const vk::InstanceCreateInfo)
+                    .cast(),
+                device_create_info: (&create as *const vk::DeviceCreateInfo).cast(),
+                lock: Some(queue_lock::lock),
+                unlock: Some(queue_lock::unlock),
+                user_data: Arc::as_ptr(&host.lock).cast_mut().cast(),
+                max_pending_submissions: 8,
+            };
+            let mut error = [0i8; 4096];
+            if oidnw_gpu_device_import_vulkan(&desc, &mut c_device, error.as_mut_ptr(), error.len())
+                != 0
+            {
+                return Err(CStr::from_ptr(error.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+                    .into());
+            }
+        }
         let report = serde_json::json!({"device_uuid": ids.device_uuid, "driver_uuid": ids.driver_uuid,
         "driver_version": props.driver_version, "external_memory_route_probe":external_probe,
         "required_extensions": device_extensions.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>(),
         "required_hal_features": required, "missing_feature_rejections": negative_checks,
         "host_device": host.device.handle().as_raw(), "imported_device": device.as_hal::<Api>().unwrap().raw_device().handle().as_raw()});
-        drop(_guard);
         let lock = host.lock.clone();
         Ok((
             host,
@@ -343,6 +382,7 @@ unsafe fn setup(options: &Options) -> Result<(Arc<Host>, Context, serde_json::Va
                 device,
                 queue,
                 adapter,
+                c_device,
                 lock,
             },
             report,
@@ -813,7 +853,8 @@ pub fn run() -> Result<()> {
             device: other_device,
             queue: other_queue,
             adapter: context.adapter.clone(),
-            lock: Arc::new(Mutex::new(())),
+            c_device: std::ptr::null_mut(),
+            lock: Arc::new(queue_lock::QueueLock::default()),
         };
         assert!(imports.import(&foreign, &raw[0][0]).is_err());
         drop(foreign);
@@ -847,6 +888,7 @@ pub fn run() -> Result<()> {
         if options.trace {
             eprintln!("prepared: {:?}", prepared.info());
         }
+        assert_eq!(prepared.info().runtime_checks, !options.unchecked);
         let precision = format!("{:?}", prepared.info().precision);
         let kernel_paths = format!("{:?}", prepared.info().kernels);
         for pattern in 0..3 {
@@ -946,6 +988,79 @@ pub fn run() -> Result<()> {
             .map_err(|_| "failure gate thread panicked")?
             .map_err(|e| format!("failure gate: {e}"))?;
         assert_eq!(fallback_early, base, "empty fallback ignored its wait");
+        let mut c_api = if options.c_api {
+            let mut handles = Vec::new();
+            let mut groups = Vec::new();
+            let mut error = [0i8; 4096];
+            for group in &raw {
+                let mut images = Vec::new();
+                for buffer in group {
+                    let create = vk::BufferCreateInfo::default()
+                        .size(buffer.size)
+                        .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
+                    let mut handle = std::ptr::null_mut();
+                    if oidnw_gpu_buffer_import_vulkan(
+                        context.c_device,
+                        buffer.raw,
+                        &create,
+                        &mut handle,
+                        error.as_mut_ptr(),
+                        error.len(),
+                    ) != 0
+                    {
+                        return Err(CStr::from_ptr(error.as_ptr())
+                            .to_string_lossy()
+                            .into_owned()
+                            .into());
+                    }
+                    handles.push(handle);
+                    images.push(Image {
+                        buffer: handle,
+                        offset: OFFSET,
+                    });
+                }
+                groups.push(Images {
+                    color: images[0],
+                    albedo: images[1],
+                    normal: images[2],
+                    output: images[3],
+                });
+            }
+            let mut kind =
+                vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+            let create = vk::SemaphoreCreateInfo::default().push_next(&mut kind);
+            let mut ready = std::ptr::null_mut();
+            let mut done = std::ptr::null_mut();
+            for (native, handle) in [(sync.sems[0], &mut ready), (sync.sems[1], &mut done)] {
+                if oidnw_gpu_sync_import_vulkan(
+                    context.c_device,
+                    native,
+                    &create,
+                    handle,
+                    error.as_mut_ptr(),
+                    error.len(),
+                ) != 0
+                {
+                    return Err(CStr::from_ptr(error.as_ptr())
+                        .to_string_lossy()
+                        .into_owned()
+                        .into());
+                }
+            }
+            Some(gpu_client::GpuClient::new(
+                context.c_device,
+                groups,
+                handles,
+                ready,
+                done,
+                &std::fs::read(&options.weights)?,
+                options.size,
+                options.tile,
+                options.unchecked,
+            )?)
+        } else {
+            None
+        };
         let signal_base = fallback;
         let release = sync.clone();
         let (send, receive) = std::sync::mpsc::channel();
@@ -1018,21 +1133,25 @@ pub fn run() -> Result<()> {
                 &waits,
                 &[(sync.sems[0], fallback + sequence)],
             )?;
-            prepared.rebind(bindings(&ring[slot], None))?;
-            let mut encoder = context.device.create_command_encoder(&Default::default());
-            prepared.encode(
-                &mut encoder,
-                DenoiseParams {
-                    input_scale: SCALES[pattern],
-                },
-            )?;
-            last = Some(library_submit(
-                &context,
-                &host,
-                Some(encoder.finish()),
-                &[(sync.sems[0], fallback + sequence)],
-                (sync.sems[1], signal_base + sequence),
-            )?);
+            if let Some(api) = c_api.as_mut() {
+                api.submit(slot, fallback + sequence, SCALES[pattern])?;
+            } else {
+                prepared.rebind(bindings(&ring[slot], None))?;
+                let mut encoder = context.device.create_command_encoder(&Default::default());
+                prepared.encode(
+                    &mut encoder,
+                    DenoiseParams {
+                        input_scale: SCALES[pattern],
+                    },
+                )?;
+                last = Some(library_submit(
+                    &context,
+                    &host,
+                    Some(encoder.finish()),
+                    &[(sync.sems[0], fallback + sequence)],
+                    (sync.sems[1], signal_base + sequence),
+                )?);
+            }
             let consumer = Batch::new(
                 &kernels,
                 true,
@@ -1070,17 +1189,25 @@ pub fn run() -> Result<()> {
         }
         // Release every imported application handle and the prepared workspace while
         // commands remain in flight. HAL callbacks retain native allocations.
+        if let Some(api) = c_api.as_mut() {
+            api.release_handles();
+        }
         drop(prepared);
         drop(denoiser);
         drop(ring);
         drop(reference_views);
         let callbacks_before_release = imports.drops.load(Ordering::Relaxed);
         assert!(
-            callbacks_before_release < 15,
+            options.c_api || callbacks_before_release < 15,
             "in-flight imported buffers released early"
         );
         sync.signal(5)?;
-        context.wait(last.unwrap())?;
+        let c_queue_full = c_api.as_ref().map_or(0, |api| api.queue_full);
+        if let Some(api) = c_api.take() {
+            api.finish()?;
+        } else {
+            context.wait(last.unwrap())?;
+        }
         sync.wait(2, options.frames as u64, TIMEOUT)?;
         pending.clear();
         {
@@ -1124,7 +1251,7 @@ pub fn run() -> Result<()> {
             "{}",
             serde_json::json!({"backend":"Vulkan", "route":"host-device-import", "device_created_by":"host",
         "adapter":name,"frames":options.frames,"size":options.size,"tile":options.tile,"precision":precision,"kernels":kernel_paths,
-        "runtime_checks":!options.unchecked,
+        "formal_c_api":options.c_api,"queue_full":c_queue_full,"runtime_checks":!options.unchecked,
         "queue":if options.shared {"shared"} else {"dedicated"},"requirements":requirements,"validation_errors":VALIDATION_ERRORS.load(Ordering::Relaxed),
         "known_naga_workgroup_layout_diagnostics":NAGA_LAYOUT_ERRORS.load(Ordering::Relaxed),
         "output_byte_equal":true,"completed_before_producer_release":early - signal_base,"cpu_image_uploads":0,"cpu_image_readbacks":0,

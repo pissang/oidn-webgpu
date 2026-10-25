@@ -44,6 +44,15 @@ fn invalid_calls_clear_outputs_and_defaults_match_contract() {
             oidnw_gpu_device_destroy(std::ptr::null_mut(), std::ptr::null_mut(), 0),
             OIDNW_OK
         );
+        let mut vulkan: VulkanDeviceDesc = std::mem::zeroed();
+        oidnw_gpu_vulkan_device_desc_default(&mut vulkan);
+        assert_eq!(vulkan.max_pending_submissions, 64);
+        let mut device = std::ptr::dangling_mut();
+        assert_eq!(
+            oidnw_gpu_device_import_vulkan(&vulkan, &mut device, std::ptr::null_mut(), 0),
+            OIDNW_ERROR_INVALID_ARGUMENT
+        );
+        assert!(device.is_null());
     }
 }
 
@@ -166,6 +175,44 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
             "{}",
             text(&error)
         );
+        exercise_failure_contract(
+            device,
+            imported,
+            ready_handle,
+            done_handle,
+            OIDNW_FILTER_RUNTIME_CHECKS,
+            || done.signaledValue(),
+            |v| ready.setSignaledValue(v),
+        );
+        assert!(!access.held.load(Ordering::Acquire));
+        assert!(access.locks.load(Ordering::Relaxed) > 8);
+        assert_eq!(
+            access.locks.load(Ordering::Relaxed),
+            access.unlocks.load(Ordering::Relaxed)
+        );
+        // Host resources are still usable after library teardown.
+        ready.setSignaledValue(3);
+        assert_eq!(ready.signaledValue(), 3);
+    });
+}
+
+// Exercise the common submission state machine with real backend synchronization.
+pub(super) unsafe fn exercise_failure_contract(
+    device: *mut GpuDevice,
+    imported: Vec<*mut GpuBuffer>,
+    ready_handle: *mut GpuSync,
+    done_handle: *mut GpuSync,
+    filter_flags: u32,
+    get_done: impl Fn() -> u64,
+    set_ready: impl Fn(u64),
+) {
+    unsafe {
+        let mut error = [0i8; 1024];
+        let text = |error: &[i8]| {
+            std::ffi::CStr::from_ptr(error.as_ptr())
+                .to_string_lossy()
+                .into_owned()
+        };
         let weights = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../weights/rt_hdr_alb_nrm_small.tza"
@@ -185,6 +232,7 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
         let mut filter = std::ptr::null_mut();
         let mut filter_desc: FilterDesc = std::mem::zeroed();
         oidnw_gpu_filter_desc_default(&mut filter_desc);
+        filter_desc.flags = filter_flags;
         assert_eq!(
             oidnw_gpu_filter_create(
                 device,
@@ -275,6 +323,91 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
         submit.wait_count = 1;
         submit.signals = &signal;
         submit.signal_count = 1;
+        // Every public C rejection must leave the sequence and synchronization
+        // untouched, including checks which precede HAL staging.
+        let duplicate_waits = [wait, wait];
+        let duplicate_signals = [
+            signal,
+            TimelinePoint {
+                sync: done_handle,
+                value: 2,
+            },
+        ];
+        let reserved = TimelinePoint {
+            sync: done_handle,
+            value: u64::MAX,
+        };
+        let self_wait = TimelinePoint {
+            sync: done_handle,
+            value: 1,
+        };
+        let mut bad_requests = Vec::new();
+        let mut bad = submit;
+        bad.input_scale = f32::NAN;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.images.color.offset = 1;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.images.output.offset = 16;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.images.color.offset = u64::MAX;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.images.output = bad.images.color;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        std::mem::swap(&mut bad.images.color, &mut bad.images.output);
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.wait_count = 65;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.waits = std::ptr::null();
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.waits = duplicate_waits.as_ptr();
+        bad.wait_count = 2;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.signals = duplicate_signals.as_ptr();
+        bad.signal_count = 2;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.signals = &reserved;
+        bad_requests.push(bad);
+        let mut bad = submit;
+        bad.waits = &self_wait;
+        bad_requests.push(bad);
+        for bad in bad_requests {
+            let mut sequence = 99;
+            assert_eq!(
+                oidnw_gpu_submit(
+                    prepared,
+                    &bad,
+                    &mut sequence,
+                    error.as_mut_ptr(),
+                    error.len()
+                ),
+                OIDNW_ERROR_INVALID_ARGUMENT,
+                "{}",
+                text(&error)
+            );
+            assert_eq!(sequence, 0);
+        }
+        assert_eq!(get_done(), 0);
+        // The internal fence and first external signal are insufficient: the
+        // second external signal must be visible before the C wait completes.
+        let first_signals = [
+            signal,
+            TimelinePoint {
+                sync: ready_handle,
+                value: 2,
+            },
+        ];
+        submit.signals = first_signals.as_ptr();
+        submit.signal_count = 2;
         let mut seq = 0;
         assert_eq!(
             oidnw_gpu_submit(prepared, &submit, &mut seq, error.as_mut_ptr(), error.len()),
@@ -308,12 +441,12 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
             OIDNW_ERROR_TIMEOUT
         );
         assert_eq!(complete, 0);
-        assert_eq!(done.signaledValue(), 0);
+        assert_eq!(get_done(), 0);
         assert_eq!(
             oidnw_gpu_device_destroy(device, error.as_mut_ptr(), error.len()),
             OIDNW_ERROR_BUSY
         );
-        ready.setSignaledValue(1);
+        set_ready(1);
         assert_eq!(
             oidnw_gpu_wait(
                 device,
@@ -328,7 +461,16 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
             text(&error)
         );
         assert_eq!(complete, 1);
-        assert!(done.signaledValue() >= 1);
+        assert!(get_done() >= 1);
+        assert!(
+            required(ready_handle, "ready")
+                .unwrap()
+                .inner
+                .native
+                .value()
+                .unwrap()
+                >= 2
+        );
         // Hold one workspace's CPU gate to make BUSY deterministic. Other
         // workspaces must still be usable, and rejected calls issue no sequence.
         let held = (&(*prepared).inner).gate.lock().unwrap();
@@ -408,10 +550,11 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
             Ok(())
         })
         .unwrap();
-        wait.value = 2;
+        wait.value = 3;
         signal.value = 2;
         submit.waits = &wait;
         submit.signals = &signal;
+        submit.signal_count = 1;
         assert_eq!(
             oidnw_gpu_submit(prepared, &submit, &mut seq, error.as_mut_ptr(), error.len()),
             OIDNW_ERROR_GPU
@@ -429,7 +572,7 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
             OIDNW_ERROR_TIMEOUT
         );
         assert_eq!(complete, 0);
-        assert_eq!(done.signaledValue(), 1);
+        assert_eq!(get_done(), 1);
         // Public wrappers can be released while the failed batch is gated.
         let saved = (*prepared).inner.clone();
         oidnw_gpu_prepared_destroy(prepared);
@@ -442,7 +585,7 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
             oidnw_gpu_device_destroy(device, error.as_mut_ptr(), error.len()),
             OIDNW_ERROR_BUSY
         );
-        ready.setSignaledValue(2);
+        set_ready(3);
         assert_eq!(
             oidnw_gpu_wait(
                 device,
@@ -457,7 +600,7 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
             text(&error)
         );
         assert_eq!(complete, 1);
-        assert!(done.signaledValue() >= 2);
+        assert!(get_done() >= 2);
         // Simulate an uncertain accepted submission with no actual GPU work.
         // Ordinary destruction must retain its resources rather than assuming
         // a wgpu error proves the host GPU has stopped accessing them.
@@ -490,14 +633,5 @@ fn metal_backpressure_and_failed_batch_preserve_external_completion() {
             "{}",
             text(&error)
         );
-        assert!(!access.held.load(Ordering::Acquire));
-        assert!(access.locks.load(Ordering::Relaxed) > 8);
-        assert_eq!(
-            access.locks.load(Ordering::Relaxed),
-            access.unlocks.load(Ordering::Relaxed)
-        );
-        // Host resources are still usable after library teardown.
-        ready.setSignaledValue(3);
-        assert_eq!(ready.signaledValue(), 3);
-    });
+    }
 }

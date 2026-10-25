@@ -1,7 +1,7 @@
 //! Deliberately narrow VkDeviceCreateInfo validator for the pinned HAL.
 //! Accepts canonical individual feature structs returned by HAL, not aggregate
 //! Vulkan11/12/13 aliases. Unknown REQUIRED structures fail closed.
-use super::common::Result;
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 use ash::vk;
 use std::collections::{BTreeMap, HashSet};
 pub type Features = BTreeMap<String, Vec<u32>>;
@@ -118,6 +118,9 @@ pub unsafe fn snapshot(create: &vk::DeviceCreateInfo<'_>) -> Result<Features> {
     unsafe {
         let mut result = Features::new();
         if !create.p_enabled_features.is_null() {
+            if !create.p_enabled_features.is_aligned() {
+                return Err("unaligned core feature declaration".into());
+            }
             // VkPhysicalDeviceFeatures contains only Bool32, with no header.
             let count = std::mem::size_of::<vk::PhysicalDeviceFeatures>() / 4;
             result.insert(
@@ -128,6 +131,9 @@ pub unsafe fn snapshot(create: &vk::DeviceCreateInfo<'_>) -> Result<Features> {
         let mut next = create.p_next.cast::<vk::BaseInStructure>();
         let mut seen = HashSet::new();
         while !next.is_null() {
+            if !next.is_aligned() {
+                return Err("unaligned feature chain".into());
+            }
             if !seen.insert((*next).s_type) {
                 return Err("duplicate/cyclic feature chain".into());
             }
@@ -178,7 +184,7 @@ pub unsafe fn validate_create(
         for &extension in extensions {
             if !actual
                 .iter()
-                .any(|p| std::ffi::CStr::from_ptr(*p) == extension)
+                .any(|p| !p.is_null() && std::ffi::CStr::from_ptr(*p) == extension)
             {
                 return Err(format!("missing HAL-required device extension {extension:?}").into());
             }
@@ -200,6 +206,7 @@ pub unsafe fn validate_create(
         Ok(())
     }
 }
+#[allow(dead_code)]
 pub fn negative_checks(required: &Features) -> Result<usize> {
     let mut checked = 0;
     for (name, bits) in required {

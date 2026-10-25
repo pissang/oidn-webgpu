@@ -40,6 +40,23 @@ impl<T> Ledger<T> {
             self.completed = self.pending.pop_front().unwrap().0;
         }
     }
+    // Native timeline queries can fail. Inspect the eligible prefix before
+    // releasing any payload, so a later query error retains the entire batch.
+    pub fn try_retire<E>(
+        &mut self,
+        internal: u64,
+        ready: impl Fn(&T) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        let mut through = 0;
+        for (sequence, value) in &self.pending {
+            if *sequence > internal || !ready(value)? {
+                break;
+            }
+            through = *sequence;
+        }
+        self.retire(through, |_| true);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -81,5 +98,21 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         ledger.issued = u64::MAX;
         assert_eq!(ledger.next(), None);
+    }
+    #[test]
+    fn native_query_error_keeps_previously_ready_resources() {
+        let mut ledger = Ledger::new(3);
+        ledger.accept(1);
+        ledger.accept(2);
+        assert_eq!(
+            ledger.try_retire(2, |value| if *value == 2 {
+                Err("device removed")
+            } else {
+                Ok(true)
+            }),
+            Err("device removed")
+        );
+        assert_eq!(ledger.completed, 0);
+        assert_eq!(ledger.pending.len(), 2);
     }
 }

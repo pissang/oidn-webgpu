@@ -7,7 +7,7 @@ Experimental native GPU denoising through [wgpu](https://wgpu.rs) on Metal, Vulk
 - [Choose an API](#choose-an-api)
 - [Rust API](#rust-api)
 - [C API](#c-api)
-- [GPU C API on Metal](#gpu-c-api-on-metal)
+- [GPU C API](#gpu-c-api)
 - [Precompiled packages](#precompiled-packages)
 - [Build configuration](#build-configuration)
 - [Performance](#performance)
@@ -19,7 +19,7 @@ Experimental native GPU denoising through [wgpu](https://wgpu.rs) on Metal, Vulk
 | --- | --- | --- | --- | --- |
 | Rust `Denoiser` | Your Rust host already renders with wgpu `=30.0.1` | The host's | Host `wgpu::Buffer`s, RGBA f32 | `oidn_webgpu::Denoiser` |
 | C filter | Any language; images are in CPU memory | Created by the library | CPU arrays, RGBA f32 | [`include/oidn_webgpu.h`](include/oidn_webgpu.h) |
-| GPU C API on Metal | Your host renders with Metal and needs GPU-resident images | The host's; dedicated library queue by default | Host MTLBuffers, RGBA f32 | [`include/oidn_webgpu_metal.h`](include/oidn_webgpu_metal.h) |
+| GPU C API | Your host renders with Metal, Vulkan or DX12 | Host objects, following platform ownership rules | Host GPU buffers, RGBA f32 | [Platform imports](#gpu-c-api) |
 | C core planner | A non-wgpu host that executes GPU programs itself | The host's | Host-defined | [`include/oidn_webgpu_core.h`](include/oidn_webgpu_core.h) |
 
 Weights are not bundled. Choose a `.tza` file from the [weights table](https://github.com/pissang/oidn-webgpu#choose-weights) and ship it with your application.
@@ -88,7 +88,7 @@ queue.submit([encoder.finish()]);
 cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- weights/rt_hdr_alb_nrm_small.tza output.f32 256 192 128
 ```
 
-Native GPU handle imports and current platform support are covered in [GPU C API on Metal](#gpu-c-api-on-metal).
+Native GPU handle imports and current platform support are covered in [GPU C API](#gpu-c-api).
 
 ### Standalone Rust application
 
@@ -281,7 +281,7 @@ Initialize with `oidnw_filter_desc_default`, then override fields.
 
 ### Versioning
 
-`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 1.1.0 (`0x00010100`). Use matching headers and a library from the same version. Dynamic loaders must require an exact version match before calling the API.
+`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 2.0.0 (`0x00020000`). Use matching headers and a library from the same version. Dynamic loaders must require an exact version match before calling the API. ABI 2.0.0 removes the CPU filter descriptor's `size` field and layout-size check; rebuild consumers with the fixed layout. Older layouts are unsupported.
 
 ### Validate a Windows package
 
@@ -319,11 +319,19 @@ Hosts with their own non-wgpu GPU executor can link the planner-only static libr
 
 On Windows, use MSVC's DLL CRT (`/MD`). The core archive includes the compatibility objects needed by scriptc's Windows runtime; no MinGW installation or additional runtime DLL is required by consumers.
 
-## GPU C API on Metal
+## GPU C API
 
-The GPU C API imports a macOS host's `MTLDevice`, image `MTLBuffer`s and `MTLSharedEvent`s. It creates a dedicated queue by default; image pixels stay on the GPU. Applications call the C ABI and do not need Rust or wgpu types. Vulkan and DX12 GPU imports remain [source prototypes](https://github.com/pissang/oidn-webgpu/blob/main/docs/development.md#native-windows-interoperability-prototypes), outside this C API.
+The GPU C API denoises host GPU buffers without image uploads or readback. Applications call the C ABI without Rust or wgpu types. Platform SDK declarations are confined to the platform headers.
 
-This API is available in source builds with C ABI 1.1.0. Published native 0.1.1 packages use ABI 1.0.0 and do not contain these entry points.
+| Platform | Route | Ownership | Header |
+| --- | --- | --- | --- |
+| Metal / macOS | Import host device, buffer and shared event; dedicated queue by default | Library retains native objects | [`include/oidn_webgpu_metal.h`](include/oidn_webgpu_metal.h) |
+| Vulkan / Windows and Linux | Import host instance, physical device, device, queue, buffers and timeline semaphores | Host owns native objects through successful library device destruction | [`include/oidn_webgpu_vulkan.h`](include/oidn_webgpu_vulkan.h) |
+| DX12 / Windows | Independent library device on the host LUID, shared committed UAV buffers and fences | Library retains COM objects; temporary export handles close after opening | [`include/oidn_webgpu_dx12.h`](include/oidn_webgpu_dx12.h) |
+
+Vulkan has been GPU-tested on Windows. Linux execution has not been verified.
+
+Use the matching headers and library described in [Versioning](#versioning). The CPU filter remains available alongside the GPU API.
 
 [`examples/metal_gpu.m`](examples/metal_gpu.m) is a complete Objective-C host: a Metal shader produces inputs, the C API denoises a 31×31 image with tile edge 16, and another Metal shader validates the output. It reads only integer validation flags on the CPU. Build and run it from the repository root:
 
@@ -337,16 +345,16 @@ cmake --build .native-build/metal-examples --target metal_gpu
 
 ### Objects and execution
 
-- Descriptions are required; initialize them with their `*_default()` function. Import a device with `oidnw_gpu_device_import_metal`, then buffers and shared events with the corresponding import functions. Metal objects are retained; the host may release its own references after import.
+- Descriptions are required; initialize them with their `*_default()` function. Create or import a device with its platform function, then image buffers and timeline synchronization objects. Follow the native ownership rules in the platform header.
 - Create a CPU model with `oidnw_gpu_model_create`, then a device-bound filter and fixed-size workspace with `oidnw_gpu_filter_create` and `oidnw_gpu_prepare`. First image bindings are required during preparation; later submissions may use other buffers at the same size. Models share immutable weights per device. Preparation may allocate, compile and block.
 - Images follow the [Rust image contract](#image-contract). `oidnw_gpu_get_limits` reports image-offset alignment, maximum buffer/image bytes and the pending-submission limit. The result is output-only. Output must use a different buffer from every input; a buffer's input/output role cannot change. Use `{NULL, 0}` for unused auxiliary images. Tiling reduces the intermediate workspace; full input/output image buffers remain required.
-- Each `oidnw_gpu_submit` takes image ranges, `input_scale`, and up to 64 waits and 64 signals. Signal values must increase. The library caches binding sets up to the configured capacity. One workspace may have multiple executions in flight; calls using that workspace must not overlap on the CPU. Metal command-buffer allocation can block submission when queued work accumulates; producer signals must not depend on that CPU call returning.
+- Each `oidnw_gpu_submit` takes image ranges, `input_scale`, and up to 64 waits and 64 signals. Signal values must increase; `UINT64_MAX` is reserved for all wait/signal points. The library caches binding sets up to the configured capacity. One workspace may have multiple executions in flight; calls using that workspace must not overlap on the CPU. Native submission may block when queued work accumulates; producer signals must not depend on that CPU call returning.
 - A returned sequence of zero means rejection: no waits or signals were accepted. `OIDNW_ERROR_QUEUE_FULL` is backpressure and leaves synchronization untouched; poll or wait for earlier work before retrying. `OIDNW_ERROR_BUSY` describes concurrent CPU calls on the same handle.
-- `oidnw_gpu_poll` reports pending as `completed=0` with `OIDNW_OK` without waiting for GPU completion; serialized CPU queue access may block. `oidnw_gpu_wait` accepts a nanosecond timeout; zero performs one poll and `UINT64_MAX` waits without a deadline. Completion covers both internal execution and all external signal values. It permits input reuse; output reuse also requires the host consumer to have finished.
+- `oidnw_gpu_poll` reports pending as `completed=0` with `OIDNW_OK` without waiting for GPU completion; serialized CPU queue access may block. `oidnw_gpu_wait` accepts a nanosecond timeout; zero performs one poll and `UINT64_MAX` waits without a deadline. Completion covers both internal execution and all external signal values. Timeouts do not interrupt a driver call or queue-lock callback. It permits input reuse; output reuse also requires the host consumer to have finished.
 - After a sequence is accepted, an encoding failure submits a synchronization batch without denoising and returns an error with a nonzero sequence. The output is invalid. Poll/wait remain available and may return `OIDNW_ERROR_GPU` with `completed=1` once the error batch has signalled; new work on that device is rejected. Destroy its objects and import a new library context after resolving host dependencies.
-- `OIDNW_ERROR_DEVICE_LOST` also covers uncertain submission. External signals may never arrive, and output is invalid. Rebuild lost host devices; when the host device and shared event remain usable, the host can advance the event to release its own waits. Actual device-loss recovery has not been validated.
+- `OIDNW_ERROR_DEVICE_LOST` also covers uncertain submission. External signals may never arrive, and output is invalid. Rebuild lost host devices; when native synchronization objects remain usable, the host may signal them to release its own waits. Actual device-loss recovery has not been validated.
 - A quarantined context may retain submissions whose outcome is unknown. Ordinary destruction keeps returning `BUSY` for those submissions. After the host establishes that no GPU work can access imported allocations or library workspaces, `oidnw_gpu_device_destroy_quiescent` can release that context. It does not cancel work or establish GPU quiescence; neither a timeout nor advancing a CPU event proves that resources are safe to release.
-- Public buffer, event, filter and workspace handles may be released after submission; accepted work retains what it needs. Models can be released after filter creation and filters after workspace preparation. Cached/current bindings may retain an allocation until rebinding or workspace destruction. Cache entries whose public buffer wrappers were released are pruned on later calls.
+- Public buffer, sync, filter and workspace handles may be released after submission; accepted work retains what it needs. Models can be released after filter creation and filters after workspace preparation. Cached/current bindings may retain an allocation until rebinding or workspace destruction. Cache entries whose public buffer wrappers were released are pruned on later calls.
 - Release all device-owned public handles before `oidnw_gpu_device_destroy`. It returns `BUSY` without destroying the device while children or submissions remain; continue polling/waiting before retrying. Successful destruction releases library queue references synchronously. A shared queue may still wait for the host's work during teardown.
 - Different handles on a device may be used on different CPU threads; library queue operations are serialized. Do not destroy any handle concurrently with a call using it. Call submit, poll or wait regularly to reclaim completed work; idle callers defer reclamation until a later call or destruction.
 
@@ -362,6 +370,71 @@ cmake --build .native-build/metal-examples --target metal_gpu
 
 A shared queue must be created with a command-buffer capacity of at least 4096. Callbacks run on the calling thread around initialization, queue access and destruction; they must not reenter the library or unwind, and `user_data` must remain valid through successful device destruction. Stable FP16 and subgroup features are enabled when available; experimental cooperative matrices are not enabled by this API.
 
+### Vulkan device options
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `get_instance_proc_addr` | `PFN_vkGetInstanceProcAddr` | NULL | Required host loader entry point, including host layers |
+| `instance`, `physical_device`, `device`, `queue` | Vulkan handles | NULL | Required objects from the same host context |
+| `queue_family_index`, `queue_index` | u32 | 0 | Created, unprotected graphics/compute queue |
+| `instance_create_info`, `device_create_info` | pointers | NULL | Original creation declarations with live arrays and individual feature chains during import |
+| `flags` | bitmask | 0 | `OIDNW_GPU_VULKAN_FP32` disables FP16; `OIDNW_GPU_VULKAN_NO_SUBGROUPS` disables subgroups |
+| `lock`, `unlock`, `user_data` | callbacks and pointer | NULL | Required paired callbacks shared with all host access to the imported queue |
+| `max_pending_submissions` | u32 | 64 | 1..=4096 accepted submissions before backpressure |
+
+- Release the host queue lock before calling the library; the library invokes the callbacks itself.
+- Vulkan 1.2 or newer is required. Import checks all features and extensions required by the pinned HAL; supported physical-device capabilities alone do not prove they were enabled. Aggregated Vulkan 1.1/1.2/1.3 feature structs are rejected. The C++ example supplies individual structs.
+- Import fully bound, non-sparse storage buffers and timeline semaphores with their original creation declarations. Buffers must belong to the imported queue family or use concurrent sharing that includes it. The host performs queue-family ownership transfers. Overlapping memory aliases and binary semaphores are unsupported.
+- Native objects and their memory remain alive through successful library device destruction. Release library public children first, drain accepted work, destroy the library device, then free host buffers/semaphores, device and instance.
+- While an earlier submission's external waits remain unresolved, another submit returns `QUEUE_FULL` with sequence zero. Resolve those producer signals independently and poll/wait before retrying. This may add CPU waits. Deep chains behind unresolved CPU timeline signals are unsupported.
+- External-memory imports on a separate Vulkan device are not implemented. The development probe only queries that route's capabilities.
+
+[`examples/vulkan_gpu.cpp`](examples/vulkan_gpu.cpp) links the actual DLL. Its GPU shaders produce input and compare output against serial GPU C API executions; the development oracle additionally compares the C API with the Rust API on the same device. Build packaged shader assets and this consumer from an x64 VS developer PowerShell:
+
+```powershell
+npm run native:build
+cmake -S .native-build/package/examples -B .native-build/gpu-examples `
+  -DCMAKE_PREFIX_PATH="$PWD/.native-build/package" -DOIDNW_BUILD_VULKAN_GPU_EXAMPLE=ON `
+  -DVulkan_INCLUDE_DIR="$env:VULKAN_SDK/Include"
+cmake --build .native-build/gpu-examples --config Release --target vulkan_gpu
+$env:VK_LAYER_PATH = "$env:VULKAN_SDK/Bin"
+.native-build/gpu-examples/Release/vulkan_gpu.exe weights/rt_hdr_alb_nrm_small.tza .native-build/package/examples/shaders 1000 16 0 0 0 1
+```
+
+The positional options after the shader directory are frame count, image edge, tile edge, FP32, shared queue and shader checks; flag values are 0 or 1. The validation example selects an RTX 4060 by name. Known Naga workgroup/ArrayStride diagnostics are counted separately from other validation errors; a nonzero known count is not clean shader validation.
+
+### DX12 device options
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `host_device` | `ID3D12Device *` | NULL | Exporting host device; retained, used to select the same adapter LUID |
+| `agility_sdk_version` | u32 | 0 | Required exact SDK version, matching the host device |
+| `agility_sdk_path` | UTF-8 string | NULL | Absolute directory containing `D3D12Core.dll`, ending with `/` or `\`; required during creation |
+| `flags` | bitmask | 0 | `OIDNW_GPU_DX12_FP32`, `NO_SUBGROUPS`, `DEBUG`, `GPU_VALIDATION`; GPU validation requires DEBUG |
+| `max_pending_submissions` | u32 | 64 | 1..=4096 accepted submissions before backpressure |
+
+- `oidnw_gpu_device_create_dx12` creates a distinct device and dedicated queue. It does not import the host `ID3D12Device`. There is no SDK or adapter fallback.
+- Import committed buffers on DEFAULT heaps with `D3D12_HEAP_FLAG_SHARED`, ROW_MAJOR layout and `ALLOW_UNORDERED_ACCESS`. Import shared fences from that same host device. Placed/reserved resources, textures and cross-adapter heaps are unsupported.
+- The library creates, opens and closes its own temporary NT handles. It neither takes nor closes a caller-owned handle. Original and opened COM objects remain retained through cached/in-flight use. Duplicate COM identities are rejected while retained.
+- Handoff buffers in COMMON. The host may use DIRECT command-list buffer promotion and decay, or explicitly transition back to COMMON before signaling. Fences order access; they do not change resource states. Keep buffers alive through the host consumer's completion too.
+- With DEBUG enabled, completion maintenance checks both devices' debug queues. Device removal, including fence completion value `UINT64_MAX`, quarantines the context and preserves uncertain resources. An internal wgpu fence completing before external signals does not complete the C submission.
+- The formal C path passed checked and unchecked Small/Base/Large FP16/FP32 runs of 1000 frames on the tested Windows GPU. The earlier prototype's checked Small 300-second timeout remains a separate historical result; see the development guide. Shader checks remain enabled in the default descriptor; set filter `flags=0` explicitly for unchecked operation.
+
+[`examples/dx12_gpu.cpp`](examples/dx12_gpu.cpp) is an independent C++ DLL host with native production, three rotating buffer sets and GPU output comparison. Build it with the matching Agility headers from an x64 VS developer PowerShell:
+
+```powershell
+$env:WGPU_DX12_AGILITY_SDK_PATH = 'C:/SDKs/Agility/build/native/bin/x64/'
+$env:WGPU_DX12_AGILITY_SDK_VERSION = '619'
+npm run native:build
+cmake -S .native-build/package/examples -B .native-build/dx12-examples `
+  -DCMAKE_PREFIX_PATH="$PWD/.native-build/package" -DOIDNW_BUILD_DX12_GPU_EXAMPLE=ON `
+  -DDX12_AGILITY_INCLUDE_DIR='C:/SDKs/Agility/build/native/include'
+cmake --build .native-build/dx12-examples --config Release --target dx12_gpu
+.native-build/dx12-examples/Release/dx12_gpu.exe weights/rt_hdr_alb_nrm_small.tza .native-build/package/examples/shaders 1000 16 0 0 0 0
+```
+
+The final arguments are frame count, image edge, tile edge, FP32, reserved zero and shader checks. This command explicitly disables shader checks and enables the host/library debug layers. GPU validation can be enabled with `WGPU_GPU_BASED_VALIDATION=1` before running. These tests include deliberate delays and are not performance measurements.
+
 ### GPU filter options
 
 | Field | Type | Default | Meaning |
@@ -372,7 +445,7 @@ A shared queue must be created with a command-buffer capacity of at least 4096. 
 | `flags` | bitmask | `OIDNW_FILTER_RUNTIME_CHECKS` | Set to 0 to disable shader runtime checks |
 | `binding_cache_capacity` | u32 | `8` | 1..=64 binding sets per workspace; cached image allocations increase retained GPU memory |
 
-Per-submit `input_scale` defaults to 1 and must be finite and positive. Full declarations and pointer/lifetime requirements are in [`include/oidn_webgpu_gpu.h`](include/oidn_webgpu_gpu.h) and the [Metal header](include/oidn_webgpu_metal.h).
+Per-submit `input_scale` defaults to 1 and must be finite and positive. Full declarations and pointer/lifetime requirements are in [`include/oidn_webgpu_gpu.h`](include/oidn_webgpu_gpu.h) and the platform headers above.
 
 ## Precompiled packages
 
@@ -393,13 +466,13 @@ The build host does not guarantee compatibility with older systems; `manifest.js
 | --- | --- |
 | `include/oidn_webgpu.h` | C filter API |
 | `include/oidn_webgpu_core.h` | Core planner API |
-| `include/oidn_webgpu_gpu.h`, `include/oidn_webgpu_metal.h` | GPU C API and macOS Metal imports |
+| `include/oidn_webgpu_gpu.h`, `include/oidn_webgpu_metal.h`, `include/oidn_webgpu_vulkan.h`, `include/oidn_webgpu_dx12.h` | Shared GPU C API and platform imports |
 | `lib/liboidn_webgpu.dylib`, `.so`, or `oidn_webgpu.dll` + `oidn_webgpu.dll.lib` | C filter and GPU C shared library |
 | `lib/liboidn_webgpu_core.a` or `oidn_webgpu_core.lib` | Core planner static library; also the Rust core override |
 | `lib/cmake/oidn_webgpu/` | CMake config, version checks and imported targets |
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `examples/denoise.c`, `examples/plan.c`, `examples/host_buffers.rs` | Complete examples |
-| `examples/metal_gpu.m` | GPU-resident Metal C API example, built on macOS |
+| `examples/metal_gpu.m`, `examples/vulkan_gpu.cpp`, `examples/dx12_gpu.cpp`, `examples/shaders/` | Native GPU C ABI consumers and SPIR-V host shaders |
 | `examples/CMakeLists.txt` | C examples using the packaged CMake targets |
 | `examples/validate_windows.c` | Windows DLL output and latency check |
 | `examples/validate.rs`, `examples/rust-app/Cargo.toml` | Standalone Rust application with a source-pinned dependency |
