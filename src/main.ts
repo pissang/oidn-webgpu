@@ -5,6 +5,7 @@ import { initWebGPUBackend } from './backend';
 import type { DynamicTileSetting } from './tileScheduler';
 import type { UNetModelSpec } from './modelSpec';
 import type {
+  NativeSubgroupMatrixOptions,
   NativeUNetGemmOptions,
   NativeUNetKernelSetting,
   NativeUNetPrecisionSetting
@@ -42,9 +43,12 @@ export type {
 } from './graphOptimizer';
 export {
   NativeUNetExecutor,
-  resolveNativeUNetPrecision
+  resolveNativeUNetPrecision,
+  selectSubgroupMatrixConfig
 } from './nativeUNet';
 export type {
+  NativeSubgroupMatrixConfig,
+  NativeSubgroupMatrixOptions,
   NativeUNetGemmWorkgroup,
   NativeUNetGemmOptions,
   NativeUNetExecutionProfile,
@@ -77,6 +81,12 @@ export interface UNetOptions {
    * @experimental
    */
   gemm?: NativeUNetGemmOptions;
+  /**
+   * Experimental `kernel: 'subgroup-matrix'` tuning. The kernel needs a
+   * GPUDevice created with `subgroups` and `chromium-experimental-subgroup-matrix`.
+   * @experimental
+   */
+  subgroupMatrix?: NativeSubgroupMatrixOptions;
   /** Versioned topology descriptor for future/custom OIDN TZA models. */
   modelSpec?: UNetModelSpec;
 }

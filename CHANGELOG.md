@@ -2,6 +2,78 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+## [0.6.0] - 2026-10-25
+
+oidn-webgpu 0.6.0 is the first release under the new package name. It adds experimental native Rust and C APIs, sanitizes inputs and outputs like OIDN, and lowers default FP16 latency in Chrome by up to 19% on the measured GPUs. The package name is the only breaking change.
+
+### Breaking changes
+
+- The package is renamed from `oidn-web` to `oidn-webgpu`. Replace the dependency and imports (`import { initUNetFromURL } from 'oidn-webgpu'`); the API is unchanged.
+
+### Added
+
+- Experimental native denoising through Rust and C APIs on Metal, Vulkan or Direct3D 12. Rust hosts can share GPU buffers; the C API accepts CPU images. See the [native guide](native/README.md).
+- Native releases provide precompiled C packages and a Rust crate with SHA-256 verified cores for Windows x86_64 MSVC, Linux x86_64 GNU, macOS x86_64 and macOS ARM64. The bundled crate builds without Node, npm, Zig or build-time downloads from GitHub.
+- Native packages include standalone Rust and Windows MSVC applications for output validation and timing. The Rust application's Git dependency is pinned to the package source revision.
+- Experimental `kernel: 'subgroup-matrix'` and `subgroupMatrix` tuning options. Browsers need `chromium-experimental-subgroup-matrix`; native hosts need wgpu cooperative-matrix support.
+
+### Changed
+
+- Default FP16 denoising in Chrome has 11–19% lower latency on Apple M4 Max and 0–16% on NVIDIA RTX 4060 Laptop than 0.5.0 ([Performance](#performance)); first initialization takes longer. Output differs slightly from 0.5.0; `gemm: { decoderSubPixel: false }` restores the 0.5.0 decoder calculation. FP32 is unchanged.
+- `getLastExecutionProfile()` sums network time over all tiles of an image instead of reporting only the first tile. Preprocessing and output conversion are excluded.
+
+### Fixed
+
+- Browser CPU input preserves normalized `Float32Array` albedo and normal values instead of dividing them by 255. `tileExecute` now accepts floating-point auxiliary images in its TypeScript API; 8-bit auxiliary images still use [0, 255].
+- Windows native packages build and link with MSVC. C consumers use the DLL CRT (`/MD`).
+- Native cooperative-matrix denoising produces finite, repeatable output with shader runtime checks disabled on the tested NVIDIA Vulkan device.
+- Native distributions include the required runtime license notices, and the crate declares the bundled components' licenses alongside MIT.
+- Inputs and network outputs are sanitized like OIDN: NaN becomes 0, and color, albedo and normals are clamped to their valid ranges. Previously NaN or out-of-range input could spread across the image, HDR output could be negative and GPU LDR output could exceed 1.
+- `examples/aux.*` are renamed to `examples/auxiliary.*` so the repository can be checked out on Windows, where `AUX` is a reserved file name.
+
+### Performance
+
+Measured on 2026-10-24 with the [Mac benchmark suite](docs/development.md#benchmarks-and-gpu-checks) protocol:
+
+- Cells are median milliseconds per image over 21 executions after 5 warmups, with no outliers removed. Parentheses show the latency reduction relative to 0.5.0 in Chrome.
+- Each execution denoises one whole HDR image with albedo and normals (`inputScale=1`) in GPU-resident RGBA32F buffers and synchronizes before the next. Timings include preprocessing, network execution and output conversion; they exclude device creation, model preparation, uploads and readback.
+- oidn-webgpu uses FP16 with default accumulation; native runs with shader runtime checks disabled, the C API default. Official OIDN loads the same weights: Small `rt_hdr_alb_nrm_small.tza` at fast quality, Base `rt_hdr_alb_nrm.tza` at high quality, Large `rt_hdr_calb_cnrm_large.tza` at high quality with clean auxiliary images.
+- 720p = 1280 x 720, 1080p = 1920 x 1080, 1440p = 2560 x 1440. Image quality is not compared.
+
+#### Apple M4 Max
+
+40 GPU cores, macOS 27.0.1, Chrome 155.0.8059.85, OIDN 2.5.1 Metal, revision `fd0d816`. Chrome subgroup matrix needs `--enable-unsafe-webgpu`; native uses Metal cooperative matrices. Large 720p comes from a separate run because every column, OIDN included, was 8–17% slower in the main run.
+
+| Model | Input | 0.5.0 Chrome | Chrome | Chrome subgroup matrix | Native Metal | OIDN Metal |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Small | 720p | 15.60 | 13.60 (↓12.8%) | 11.90 (↓23.7%) | 8.51 (↓45.4%) | 8.78 (↓43.7%) |
+| Small | 1080p | 35.00 | 30.40 (↓13.1%) | 26.50 (↓24.3%) | 18.48 (↓47.2%) | 19.19 (↓45.2%) |
+| Small | 1440p | 61.60 | 53.50 (↓13.1%) | 46.40 (↓24.7%) | 32.26 (↓47.6%) | 33.48 (↓45.7%) |
+| Base | 720p | 28.20 | 22.90 (↓18.8%) | 20.20 (↓28.4%) | 14.55 (↓48.4%) | 15.91 (↓43.6%) |
+| Base | 1080p | 62.90 | 51.20 (↓18.6%) | 45.00 (↓28.5%) | 32.09 (↓49.0%) | 35.12 (↓44.2%) |
+| Base | 1440p | 123.60 | 103.70 (↓16.1%) | 81.90 (↓33.7%) | 58.59 (↓52.6%) | 65.42 (↓47.1%) |
+| Large | 720p | 64.90 | 54.20 (↓16.5%) | 50.50 (↓22.2%) | 36.29 (↓44.1%) | 34.85 (↓46.3%) |
+| Large | 1080p | 161.20 | 143.00 (↓11.3%) | 127.10 (↓21.2%) | 93.94 (↓41.7%) | 89.79 (↓44.3%) |
+| Large | 1440p | 295.10 | 259.30 (↓12.1%) | 224.70 (↓23.9%) | 171.30 (↓42.0%) | 159.14 (↓46.1%) |
+
+#### NVIDIA RTX 4060 Laptop
+
+8 GiB, Intel Core i9-13900H, Windows 11 build 26200, driver 566.14, Chrome 156.0.8078.48, OIDN 2.5.1 CUDA, on AC power, revision `b30a515`. Native uses Vulkan cooperative matrices; its output was not checked for correctness on this device.
+
+| Model | Input | 0.5.0 Chrome | Chrome | Native Vulkan | OIDN CUDA |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Small | 720p | 30.10 | 30.10 (0.0%) | 9.44 (↓68.6%) | 10.27 (↓65.9%) |
+| Small | 1080p | 66.20 | 62.50 (↓5.6%) | 20.49 (↓69.1%) | 22.92 (↓65.4%) |
+| Small | 1440p | 113.70 | 105.40 (↓7.3%) | 32.98 (↓71.0%) | 39.76 (↓65.0%) |
+| Base | 720p | 58.90 | 51.00 (↓13.4%) | 15.36 (↓73.9%) | 20.02 (↓66.0%) |
+| Base | 1080p | 121.00 | 101.80 (↓15.9%) | 34.05 (↓71.9%) | 45.45 (↓62.4%) |
+| Base | 1440p | 195.50 | 166.80 (↓14.7%) | 59.50 (↓69.6%) | 78.51 (↓59.8%) |
+| Large | 720p | 125.50 | 108.30 (↓13.7%) | 37.58 (↓70.1%) | 40.41 (↓67.8%) |
+| Large | 1080p | 262.70 | 229.50 (↓12.6%) | 75.10 (↓71.4%) | 92.42 (↓64.8%) |
+| Large | 1440p | 453.30 | 406.50 (↓10.3%) | 130.59 (↓71.2%) | 163.50 (↓63.9%) |
+
 ## [0.5.0] - 2026-10-09
 
 oidn-web 0.5.0 simplifies device setup, makes tiled execution always settle, and switches FP16 convolutions to implicit GEMM. It contains breaking changes for TypeScript callers that pass `adapterInfo`, for code that constructs `UNet` directly, and for code that relies on square tiles or per-frame tile pacing.
@@ -52,7 +124,6 @@ Measured with `npm run benchmark -- --direct-gemm-only` in headless Chrome, usin
 - Completed executions release their device-loss listeners.
 - Edge tiles whose size is not a multiple of 16 replicate edge pixels into the padded model input.
 - The npm package no longer includes benchmark results, tests, and scripts.
-- Renamed `examples/aux.*` to `examples/auxiliary.*` so the repository can be checked out on Windows, where `AUX` is a reserved file name.
 
 ### Migration notes
 
@@ -105,5 +176,7 @@ oidn-web 0.4.0 replaces the TensorFlow.js inference stack with a purpose-built, 
 - When supplying an existing `GPUDevice`, request `shader-f16` before creating the device if FP16 inference is desired.
 - Set `dynamicTile: false` to restore fixed-size tiling.
 
-[0.5.0]: https://github.com/pissang/oidn-web/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/pissang/oidn-web/compare/v0.3.5...v0.4.0
+[Unreleased]: https://github.com/pissang/oidn-webgpu/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/pissang/oidn-webgpu/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/pissang/oidn-webgpu/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/pissang/oidn-webgpu/compare/v0.3.5...v0.4.0

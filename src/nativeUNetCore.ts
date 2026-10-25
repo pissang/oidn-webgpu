@@ -1,0 +1,3735 @@
+import {
+  BufferUsage,
+  MapMode,
+  type OIDNGPUAdapterInfo,
+  type OIDNGPUBindGroup,
+  type OIDNGPUBindGroupEntry,
+  type OIDNGPUBuffer,
+  type OIDNGPUComputePipeline,
+  type OIDNGPUDevice,
+  type OIDNGPUQuerySet
+} from './gpuTypes.js';
+import { createFinalRgbShader, sharedMemoryBytes as finalRgbSharedMemoryBytes } from './finalRgbShader.js';
+import {
+  optimizeModelGraph,
+  planModelExecution,
+  type ExecutableModelNode,
+  type FusedUpsampleConcatConvNodeSpec,
+  type ModelExecutionPlan,
+  type ModelValueShape
+} from './graphOptimizer.js';
+import type {
+  Conv2DNodeSpec,
+  UNetModelGraph,
+  ValidatedConvTensor,
+  ValidatedUNetModel
+} from './modelSpec';
+import { HostTensor } from './tza.js';
+import {
+  OIDNResourceTracker,
+  type OIDNResourceSnapshot
+} from './resourceTracker.js';
+
+export type NativeUNetPrecision = 'fp32' | 'fp16';
+export type NativeUNetPrecisionSetting = NativeUNetPrecision | 'auto';
+export type NativeUNetKernel =
+  | 'direct'
+  | 'implicit-gemm'
+  | 'spatial'
+  | 'subgroup'
+  | 'subgroup-matrix';
+export type NativeUNetKernelSetting = NativeUNetKernel | 'auto';
+export type NativeUNetGemmWorkgroup = readonly [4 | 8 | 16, 4 | 8];
+
+export interface NativeUNetGemmOptions {
+  /** Internal per-layer tile selection; explicit workgroup sizes remain fixed by default. */
+  tilePolicy?: 'fixed' | 'output-aligned';
+  /** Internal decoder source-branch scheduling experiment. */
+  decoderLoad?: 'per-load' | 'source-first';
+  /** Sub-pixel GEMM decoder experiment; defaults to FP16 with K-major weights. */
+  decoderSubPixel?: boolean;
+  /** Expand register-tile rows for native shader robustness; off by default in browsers. */
+  unrollRows?: boolean;
+  /** Internal pooling dispatch experiment for the GEMM execution path. */
+  poolLayout?: 'spatial' | 'channels';
+  /** Internal shared-memory padding experiment; does not change storage ABI. */
+  sharedLayout?: 'linear' | 'padded' | 'padded-input' | 'padded-weights';
+  /** Internal loop scheduling experiment; each output keeps the same K order. */
+  accumulationOrder?: 'k-major' | 'row-major';
+  /** Internal final-convolution experiments; retains the original FP16 partial order. */
+  finalLayer?: 'direct' | 'shared-input' | 'shared-input-weights' | 'shared-auto';
+  /** Internal load-layout experiments; packed loads preserve the FP16 storage bits. */
+  loadMode?: 'native' | 'packed-weights' | 'packed-all';
+  /** Incremental addressing (default), or the original analytic path for A/B comparisons. */
+  addressMode?: 'analytic' | 'incremental' | 'base-offset';
+  /** K-major (default) coalesces neighboring output-block loads; output-major preserves the old ABI. */
+  weightLayout?: 'output-major' | 'k-major';
+  /** Register tile height (default 8). The K reduction grouping stays fixed. */
+  rowsPerThread?: 2 | 4 | 8;
+  /** Workgroup width/height (default [8, 8]); width also selects output channel blocks. */
+  workgroupSize?: NativeUNetGemmWorkgroup;
+}
+
+/** Square multiply-add shape selected from `chromium-experimental-subgroup-matrix`. */
+export interface NativeSubgroupMatrixConfig {
+  componentType: 'f16' | 'f32';
+  resultType: 'f16' | 'f32';
+  /** M = N = K. */
+  size: 8 | 16;
+  subgroupSize: number;
+  /**
+   * WGSL spelling: Chrome's `chromium_experimental_subgroup_matrix`, or
+   * wgpu/Naga's `wgpu_cooperative_matrix` for native hosts.
+   */
+  dialect: 'tint' | 'naga';
+}
+
+/** Experimental subgroup-matrix tile tuning; not covered by semver. */
+export interface NativeSubgroupMatrixOptions {
+  /** Output channel fragments per workgroup (default 2). */
+  outputFragments?: 1 | 2 | 4;
+  /** Preferred accumulation type when the adapter offers several. */
+  accumulation?: 'f32' | 'f16';
+  /** Sub-pixel decomposition of the upsampling decoder layers (default true). */
+  subPixel?: boolean;
+  /**
+   * Double-buffered staging with register prefetch when the workgroup memory
+   * limit allows it (default false: 6-10% slower on an Apple M4 Max).
+   */
+  doubleBuffer?: boolean;
+}
+
+export interface NativeUNetOptions {
+  precision?: NativeUNetPrecisionSetting;
+  /** Experimental `subgroup-matrix` kernel tuning. */
+  subgroupMatrix?: NativeSubgroupMatrixOptions;
+  /**
+   * Convolution kernel selection. `auto` uses implicit GEMM for FP16/FP32
+   * convolutions and the direct kernel for the final output layer.
+   */
+  kernel?: NativeUNetKernelSetting;
+  /** Optional implicit-GEMM tuning; other convolution kernels ignore it. */
+  gemm?: NativeUNetGemmOptions;
+  /** Maximum number of shape-dependent activation plans retained. */
+  shapeCacheSize?: number;
+}
+
+export interface NativeUNetLayerTiming {
+  id: string;
+  durationMs: number;
+}
+
+export interface NativeUNetExecutionProfile {
+  totalMs: number;
+  layers: NativeUNetLayerTiming[];
+}
+
+interface PackedConvBuffers {
+  weights: OIDNGPUBuffer;
+  bias: OIDNGPUBuffer;
+  weightLayout: NonNullable<NativeUNetGemmOptions['weightLayout']>;
+}
+
+export interface NativePipelineSpec {
+  key: string;
+  code: string;
+  kernel?: NativeUNetKernel;
+}
+
+interface ActivationSlot {
+  buffer: OIDNGPUBuffer;
+  capacity: number;
+}
+
+export interface CachedExecution {
+  plan: ModelExecutionPlan;
+  valueBuffers: Map<string, OIDNGPUBuffer>;
+  slots: ActivationSlot[];
+  nodeBindings: OIDNGPUBindGroup[];
+  nodePipelines: OIDNGPUComputePipeline[];
+  nodeKernels: NativeUNetKernel[];
+  /** Subgroup-matrix output fragments per node (0 for other kernels). */
+  nodeFragments: number[];
+  inputPipeline: OIDNGPUComputePipeline;
+  inputUniform: OIDNGPUBuffer;
+  ownedBuffers: OIDNGPUBuffer[];
+  cpuInputBuffers?: OIDNGPUBuffer[];
+  cpuReadbackBuffer?: OIDNGPUBuffer;
+  lastUsed: number;
+}
+
+const pipelineCachesByDevice = new WeakMap<OIDNGPUDevice, Map<string, OIDNGPUComputePipeline>>();
+
+function sharedPipelineCache(device: OIDNGPUDevice) {
+  let cache = pipelineCachesByDevice.get(device);
+  if (!cache) {
+    cache = new Map();
+    pipelineCachesByDevice.set(device, cache);
+  }
+  return cache;
+}
+
+const WORKGROUP_SIZE = 8;
+const TILED_CONV_K_BLOCKS = 8;
+const SPATIAL_CONV_WORKGROUP = 8;
+const SPATIAL_CONV_PATCH = SPATIAL_CONV_WORKGROUP + 2;
+
+function gemmTile(options: Readonly<Required<NativeUNetGemmOptions>>) {
+  const [workgroupX, workgroupY] = options.workgroupSize;
+  return {
+    workgroupX,
+    workgroupY,
+    rowsPerThread: options.rowsPerThread,
+    tileM: workgroupY * options.rowsPerThread,
+    tileNBlocks: workgroupX,
+    // Keep the half partial accumulation grouping independent of tile tuning.
+    tileKBlocks: TILED_CONV_K_BLOCKS
+  };
+}
+
+// Holes change only workgroup addresses. Cooperative loads still visit the
+// original dense logical tiles and never read the unused padding elements.
+function gemmSharedSizes(options: Readonly<Required<NativeUNetGemmOptions>>) {
+  const tile = gemmTile(options);
+  const paddedInput = options.sharedLayout === 'padded' || options.sharedLayout === 'padded-input';
+  const paddedWeights = options.sharedLayout === 'padded' || options.sharedLayout === 'padded-weights';
+  return {
+    input: tile.tileM * tile.tileKBlocks + (paddedInput ? tile.workgroupY : 0),
+    weights: tile.tileKBlocks * tile.tileNBlocks * (paddedWeights ? 5 : 4)
+  };
+}
+
+function gemmSharedInputIndex(index: string, options: Readonly<Required<NativeUNetGemmOptions>>) {
+  return options.sharedLayout === 'padded' || options.sharedLayout === 'padded-input'
+    ? `(${index}) + (${index}) / ${options.rowsPerThread * TILED_CONV_K_BLOCKS}u`
+    : index;
+}
+
+function gemmSharedWeightIndex(index: string, options: Readonly<Required<NativeUNetGemmOptions>>) {
+  return options.sharedLayout === 'padded' || options.sharedLayout === 'padded-weights'
+    ? `(${index}) + (${index}) / 4u`
+    : index;
+}
+
+function roundUp(value: number, alignment: number) {
+  return Math.ceil(value / alignment) * alignment;
+}
+
+function blocksForChannels(channels: number) {
+  return Math.ceil(channels / 4);
+}
+
+function activationByteSize(
+  shape: ModelValueShape,
+  bytesPerScalar: number
+) {
+  return (
+    shape.width *
+    shape.height *
+    blocksForChannels(shape.channels) *
+    4 *
+    bytesPerScalar
+  );
+}
+
+let float16ToFloat32Lookup: Float32Array | undefined;
+
+function halfBitsToNumber(bits: number) {
+  const sign = bits & 0x8000 ? -1 : 1;
+  const exponent = (bits >>> 10) & 0x1f;
+  const fraction = bits & 0x3ff;
+  if (exponent === 0) {
+    return sign * fraction * 2 ** -24;
+  }
+  if (exponent === 0x1f) {
+    return fraction === 0 ? sign * Infinity : NaN;
+  }
+  return sign * (1 + fraction / 1024) * 2 ** (exponent - 15);
+}
+
+const halfConversionView = new DataView(new ArrayBuffer(4));
+
+/** IEEE binary16 bits of a number, rounding to nearest even like Float16Array. */
+function numberToHalfBits(value: number) {
+  halfConversionView.setFloat32(0, value);
+  const bits = halfConversionView.getUint32(0);
+  const sign = (bits >>> 16) & 0x8000;
+  const exponent = (bits >>> 23) & 0xff;
+  const mantissa = bits & 0x7fffff;
+  if (exponent === 0xff) {
+    return sign | 0x7c00 | (mantissa ? 0x200 : 0);
+  }
+  // Rounds through float32 first; this matches direct rounding except for rare
+  // double-rounding ties. Official OIDN weights are already binary16.
+  const halfExponent = exponent - 127 + 15;
+  if (halfExponent >= 0x1f) return sign | 0x7c00;
+  if (halfExponent <= 0) {
+    if (halfExponent < -10) return sign;
+    const full = mantissa | 0x800000;
+    const shift = 14 - halfExponent;
+    const half = full >>> shift;
+    const remainder = full & ((1 << shift) - 1);
+    const midpoint = 1 << (shift - 1);
+    const rounded = remainder > midpoint || (remainder === midpoint && (half & 1)) ? half + 1 : half;
+    return sign | rounded;
+  }
+  const half = (halfExponent << 10) | (mantissa >>> 13);
+  const remainder = mantissa & 0x1fff;
+  // A carry out of the mantissa correctly increments the exponent.
+  return sign | (remainder > 0x1000 || (remainder === 0x1000 && (half & 1)) ? half + 1 : half);
+}
+
+function halfLookup() {
+  if (!float16ToFloat32Lookup) {
+    float16ToFloat32Lookup = new Float32Array(1 << 16);
+    for (let bits = 0; bits < float16ToFloat32Lookup.length; bits++) {
+      float16ToFloat32Lookup[bits] = halfBitsToNumber(bits);
+    }
+  }
+  return float16ToFloat32Lookup;
+}
+
+function tensorFloat32Values(tensor: HostTensor): Float32Array {
+  if (tensor.desc.dataType === 'Float32') {
+    return new Float32Array(
+      tensor.data.buffer,
+      tensor.data.byteOffset,
+      tensor.data.byteLength / 4
+    );
+  }
+  const bits = new Uint16Array(
+    tensor.data.buffer,
+    tensor.data.byteOffset,
+    tensor.data.byteLength / 2
+  );
+  const values = new Float32Array(bits.length);
+  if (bits.length < 4096) {
+    for (let index = 0; index < bits.length; index++) {
+      values[index] = halfBitsToNumber(bits[index]);
+    }
+  } else {
+    const lookup = halfLookup();
+    for (let index = 0; index < bits.length; index++) {
+      values[index] = lookup[bits[index]];
+    }
+  }
+  return values;
+}
+
+function createMappedBuffer(
+  device: OIDNGPUDevice,
+  label: string,
+  data: Uint8Array,
+  usage: number
+) {
+  const size = roundUp(data.byteLength, 4);
+  const buffer = device.createBuffer({
+    label,
+    size,
+    usage,
+    mappedAtCreation: true
+  });
+  new Uint8Array(buffer.getMappedRange()).set(data);
+  buffer.unmap();
+  return buffer;
+}
+
+function createUniformBuffer(
+  device: OIDNGPUDevice,
+  label: string,
+  values: readonly number[]
+) {
+  const data = new Uint32Array(roundUp(values.length, 4));
+  data.set(values);
+  return createMappedBuffer(
+    device,
+    label,
+    new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+    BufferUsage.UNIFORM
+  );
+}
+
+function packConvTensors(
+  device: OIDNGPUDevice,
+  id: string,
+  tensors: ValidatedConvTensor,
+  precision: NativeUNetPrecision,
+  weightLayout: NonNullable<NativeUNetGemmOptions['weightLayout']>
+): PackedConvBuffers {
+  const inputBlocks = blocksForChannels(tensors.inputChannels);
+  const outputBlocks = blocksForChannels(tensors.outputChannels);
+  const packedWeightCount =
+    outputBlocks *
+    tensors.kernelHeight *
+    tensors.kernelWidth *
+    inputBlocks *
+    4 *
+    4;
+  const canCopyHalfBits =
+    precision === 'fp16' && tensors.weight.desc.dataType === 'Float16';
+  const halfWeights = precision === 'fp16'
+    ? new Uint16Array(packedWeightCount)
+    : undefined;
+  const floatWeights = halfWeights
+    ? undefined
+    : new Float32Array(packedWeightCount);
+  const sourceHalfBits = canCopyHalfBits
+    ? new Uint16Array(
+        tensors.weight.data.buffer,
+        tensors.weight.data.byteOffset,
+        tensors.weight.data.byteLength / 2
+      )
+    : undefined;
+  const sourceValues = sourceHalfBits
+    ? undefined
+    : tensorFloat32Values(tensors.weight);
+
+  for (let outputBlock = 0; outputBlock < outputBlocks; outputBlock++) {
+    for (let y = 0; y < tensors.kernelHeight; y++) {
+      for (let x = 0; x < tensors.kernelWidth; x++) {
+        for (let inputBlock = 0; inputBlock < inputBlocks; inputBlock++) {
+          for (let outputLane = 0; outputLane < 4; outputLane++) {
+            const outputChannel = outputBlock * 4 + outputLane;
+            for (let inputLane = 0; inputLane < 4; inputLane++) {
+              const inputChannel = inputBlock * 4 + inputLane;
+              const packedBlock = weightLayout === 'k-major'
+                ? ((((y * tensors.kernelWidth + x) * inputBlocks + inputBlock) *
+                    outputBlocks + outputBlock) * 16)
+                : ((((outputBlock * tensors.kernelHeight + y) *
+                  tensors.kernelWidth +
+                  x) *
+                  inputBlocks +
+                  inputBlock) *
+                  16);
+              // One vec4 contains the four output lanes for an input lane.
+              // Both layouts preserve the vec4's output lanes and the
+              // convolution's reduction order; only the vec4 address changes.
+              const packedIndex =
+                packedBlock + inputLane * 4 + outputLane;
+              if (
+                outputChannel < tensors.outputChannels &&
+                inputChannel < tensors.inputChannels
+              ) {
+                const sourceIndex =
+                  ((outputChannel * tensors.inputChannels + inputChannel) *
+                    tensors.kernelHeight +
+                    y) *
+                    tensors.kernelWidth +
+                  x;
+                if (halfWeights) {
+                  halfWeights[packedIndex] = sourceHalfBits
+                    ? sourceHalfBits[sourceIndex]
+                    : numberToHalfBits(sourceValues![sourceIndex]);
+                } else {
+                  floatWeights![packedIndex] = sourceValues![sourceIndex];
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Bias stays f32 even for half activations because convolution accumulates
+  // in f32. Padded lanes are zero and never escape the final three channels.
+  const packedBias = new Float32Array(outputBlocks * 4);
+  packedBias.set(tensorFloat32Values(tensors.bias));
+
+  const weights = createMappedBuffer(
+    device,
+    `oidn/${id}/weights/${precision}/${weightLayout}`,
+    halfWeights
+      ? new Uint8Array(halfWeights.buffer)
+      : new Uint8Array(floatWeights!.buffer),
+    BufferUsage.STORAGE
+  );
+  try {
+    return {
+      weights,
+      weightLayout,
+      bias: createMappedBuffer(
+        device,
+        `oidn/${id}/bias`,
+        new Uint8Array(packedBias.buffer),
+        BufferUsage.STORAGE
+      )
+    };
+  } catch (error) {
+    weights.destroy();
+    throw error;
+  }
+}
+
+function storageVecType(precision: NativeUNetPrecision) {
+  return precision === 'fp16' ? 'vec4<f16>' : 'vec4<f32>';
+}
+
+function shaderPreamble(precision: NativeUNetPrecision) {
+  return precision === 'fp16' ? 'enable f16;\n' : '';
+}
+
+function storeExpression(
+  expression: string,
+  outputPrecision: NativeUNetPrecision
+) {
+  return outputPrecision === 'fp16'
+    ? `vec4<f16>(${expression})`
+    : expression;
+}
+
+function activationExpression(
+  expression: string,
+  activation: Conv2DNodeSpec['activation']
+) {
+  return activation === 'relu'
+    ? `max(${expression}, vec4<f32>(0.0))`
+    : expression;
+}
+
+function accumulationCode(
+  inputExpression: string,
+  weightBase: string,
+  precision: NativeUNetPrecision
+) {
+  if (precision === 'fp32') {
+    return /* wgsl */ `
+let inputValue = vec4<f32>(${inputExpression});
+let weightBase = ${weightBase};
+acc = fma(vec4<f32>(weights[weightBase]), vec4<f32>(inputValue.x), acc);
+acc = fma(vec4<f32>(weights[weightBase + 1u]), vec4<f32>(inputValue.y), acc);
+acc = fma(vec4<f32>(weights[weightBase + 2u]), vec4<f32>(inputValue.z), acc);
+acc = fma(vec4<f32>(weights[weightBase + 3u]), vec4<f32>(inputValue.w), acc);
+`;
+  }
+  return /* wgsl */ `
+let inputValue = vec4<f16>(${inputExpression});
+let weightBase = ${weightBase};
+var partial = vec4<f16>(0.0h);
+partial = fma(weights[weightBase], vec4<f16>(inputValue.x), partial);
+partial = fma(weights[weightBase + 1u], vec4<f16>(inputValue.y), partial);
+partial = fma(weights[weightBase + 2u], vec4<f16>(inputValue.z), partial);
+partial = fma(weights[weightBase + 3u], vec4<f16>(inputValue.w), partial);
+acc += vec4<f32>(partial);
+`;
+}
+
+function subgroupAccumulationCode(
+  inputExpression: string,
+  weightBase: string,
+  precision: NativeUNetPrecision
+) {
+  const inputType = precision === 'fp16' ? 'vec4<f16>' : 'vec4<f32>';
+  const accumulator = precision === 'fp16'
+    ? `var partial = vec4<f16>(0.0h);
+partial = fma(subgroupBroadcast(weights[weightBase], 0u), ${inputType}(inputValue.x), partial);
+partial = fma(subgroupBroadcast(weights[weightBase + 1u], 0u), ${inputType}(inputValue.y), partial);
+partial = fma(subgroupBroadcast(weights[weightBase + 2u], 0u), ${inputType}(inputValue.z), partial);
+partial = fma(subgroupBroadcast(weights[weightBase + 3u], 0u), ${inputType}(inputValue.w), partial);
+acc += vec4<f32>(partial);`
+    : `acc = fma(subgroupBroadcast(weights[weightBase], 0u), vec4<f32>(inputValue.x), acc);
+acc = fma(subgroupBroadcast(weights[weightBase + 1u], 0u), vec4<f32>(inputValue.y), acc);
+acc = fma(subgroupBroadcast(weights[weightBase + 2u], 0u), vec4<f32>(inputValue.z), acc);
+acc = fma(subgroupBroadcast(weights[weightBase + 3u], 0u), vec4<f32>(inputValue.w), acc);`;
+  return /* wgsl */ `
+let inputValue = ${inputType}(${inputExpression});
+let weightBase = ${weightBase};
+${accumulator}
+`;
+}
+
+function gemmPackedLoad(
+  precision: NativeUNetPrecision,
+  gemm: Readonly<Required<NativeUNetGemmOptions>>,
+  weights: boolean
+) {
+  return precision === 'fp16' &&
+    (gemm.loadMode === 'packed-all' ||
+      (weights && gemm.loadMode === 'packed-weights'));
+}
+
+// vec2<u32> reinterprets exactly the same eight bytes as vec4<f16>.
+function gemmLoadExpression(expression: string, packed: boolean) {
+  return packed ? `bitcast<vec4<f16>>(${expression})` : expression;
+}
+
+function tiledAccumulationCode(precision: NativeUNetPrecision, gemm: Readonly<Required<NativeUNetGemmOptions>>) {
+  const { rowsPerThread, tileNBlocks, tileKBlocks } = gemmTile(gemm);
+  if (!gemm.unrollRows || gemm.accumulationOrder === 'row-major') {
+    return rolledAccumulationCode(precision, gemm);
+  }
+  const weightBase = `(tileK * ${tileNBlocks}u + localId.x) * ${gemm.sharedLayout === 'padded' || gemm.sharedLayout === 'padded-weights' ? 5 : 4}u`;
+  // Constant register-tile indices avoid robust dynamic private-array
+  // accesses in Naga. Leave the K loop rolled to limit shader/register size;
+  // every row keeps the same four FMAs and the same FP16 fold boundaries.
+  const rows = Array.from({ length: rowsPerThread }, (_, row) => row);
+  const type = storageVecType(precision);
+  return /* wgsl */ `
+    ${precision === 'fp16' ? rows.map((row) => `var partial${row} = vec4<f16>(0.0h);`).join('\n    ') : ''}
+    for (var tileK = 0u; tileK < ${tileKBlocks}u; tileK++) {
+      let weightBase = ${weightBase};
+      let w0 = weightTile[weightBase];
+      let w1 = weightTile[weightBase + 1u];
+      let w2 = weightTile[weightBase + 2u];
+      let w3 = weightTile[weightBase + 3u];
+      ${rows.map((row) => {
+        const index = gemmSharedInputIndex(`(localId.y * ${rowsPerThread}u + ${row}u) * ${tileKBlocks}u + tileK`, gemm);
+        const target = precision === 'fp16' ? `partial${row}` : `acc[${row}]`;
+        return `let v${row} = inputTile[${index}];\n      ` +
+          ['x', 'y', 'z', 'w'].map((lane, k) => `${target} = fma(w${k}, ${type}(v${row}.${lane}), ${target});`).join('\n      ');
+      }).join('\n      ')}
+    }
+    ${precision === 'fp16' ? rows.map((row) => `acc[${row}] += vec4<f32>(partial${row});`).join('\n    ') : ''}
+`;
+}
+
+function rolledAccumulationCode(precision: NativeUNetPrecision, gemm: Readonly<Required<NativeUNetGemmOptions>>) {
+  const { rowsPerThread, tileNBlocks, tileKBlocks } = gemmTile(gemm);
+  const inputIndex = gemmSharedInputIndex(`tileSpatial * ${tileKBlocks}u + tileK`, gemm);
+  const weightBase = `(tileK * ${tileNBlocks}u + localId.x) * ${gemm.sharedLayout === 'padded' || gemm.sharedLayout === 'padded-weights' ? 5 : 4}u`;
+  if (gemm.accumulationOrder === 'row-major') {
+    const valueType = storageVecType(precision);
+    const target = precision === 'fp16' ? 'partial' : 'acc[row]';
+    return /* wgsl */ `
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      ${precision === 'fp16' ? 'var partial = vec4<f16>(0.0h);' : ''}
+      let tileSpatial = localId.y * ${rowsPerThread}u + row;
+      for (var tileK = 0u; tileK < ${tileKBlocks}u; tileK++) {
+        let weightBase = ${weightBase};
+        let inputValue = inputTile[${inputIndex}];
+        ${target} = fma(weightTile[weightBase], ${valueType}(inputValue.x), ${target});
+        ${target} = fma(weightTile[weightBase + 1u], ${valueType}(inputValue.y), ${target});
+        ${target} = fma(weightTile[weightBase + 2u], ${valueType}(inputValue.z), ${target});
+        ${target} = fma(weightTile[weightBase + 3u], ${valueType}(inputValue.w), ${target});
+      }
+      ${precision === 'fp16' ? 'acc[row] += vec4<f32>(partial);' : ''}
+    }
+`;
+  }
+  if (precision === 'fp16') {
+    return /* wgsl */ `
+    var partial: array<vec4<f16>, ${rowsPerThread}>;
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      partial[row] = vec4<f16>(0.0h);
+    }
+    for (var tileK = 0u; tileK < ${tileKBlocks}u; tileK++) {
+      let weightBase =
+        ${weightBase};
+      for (var row = 0u; row < ${rowsPerThread}u; row++) {
+        let tileSpatial =
+          localId.y * ${rowsPerThread}u + row;
+        let inputValue =
+          inputTile[${inputIndex}];
+        partial[row] = fma(
+          weightTile[weightBase],
+          vec4<f16>(inputValue.x),
+          partial[row]
+        );
+        partial[row] = fma(
+          weightTile[weightBase + 1u],
+          vec4<f16>(inputValue.y),
+          partial[row]
+        );
+        partial[row] = fma(
+          weightTile[weightBase + 2u],
+          vec4<f16>(inputValue.z),
+          partial[row]
+        );
+        partial[row] = fma(
+          weightTile[weightBase + 3u],
+          vec4<f16>(inputValue.w),
+          partial[row]
+        );
+      }
+    }
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      acc[row] += vec4<f32>(partial[row]);
+    }
+`;
+  }
+  return /* wgsl */ `
+    for (var tileK = 0u; tileK < ${tileKBlocks}u; tileK++) {
+      let weightBase =
+        ${weightBase};
+      for (var row = 0u; row < ${rowsPerThread}u; row++) {
+        let tileSpatial =
+          localId.y * ${rowsPerThread}u + row;
+        let inputValue =
+          inputTile[${inputIndex}];
+        acc[row] = fma(
+          weightTile[weightBase],
+          vec4<f32>(inputValue.x),
+          acc[row]
+        );
+        acc[row] = fma(
+          weightTile[weightBase + 1u],
+          vec4<f32>(inputValue.y),
+          acc[row]
+        );
+        acc[row] = fma(
+          weightTile[weightBase + 2u],
+          vec4<f32>(inputValue.z),
+          acc[row]
+        );
+        acc[row] = fma(
+          weightTile[weightBase + 3u],
+          vec4<f32>(inputValue.w),
+          acc[row]
+        );
+      }
+    }
+`;
+}
+
+function createConvShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  inputBlocks: number,
+  outputBlocks: number
+) {
+  const inputType = storageVecType(precision);
+  const weightType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const stored = storeExpression(
+    activationExpression('acc', activation),
+    outputPrecision
+  );
+
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  inputWidth: u32,
+  inputHeight: u32,
+  outputWidth: u32,
+  outputHeight: u32,
+  inputBlocks: u32,
+  outputBlocks: u32,
+}
+
+@group(0) @binding(0) var<storage, read> inputData: array<${inputType}>;
+@group(0) @binding(1) var<storage, read> weights: array<${weightType}>;
+@group(0) @binding(2) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE}, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= params.outputWidth || gid.y >= params.outputHeight || gid.z >= ${outputBlocks}u) {
+    return;
+  }
+  var acc = bias[gid.z];
+  for (var ky = 0u; ky < 3u; ky++) {
+    let inputY = i32(gid.y) + i32(ky) - 1;
+    if (inputY < 0 || inputY >= i32(params.inputHeight)) { continue; }
+    for (var kx = 0u; kx < 3u; kx++) {
+      let inputX = i32(gid.x) + i32(kx) - 1;
+      if (inputX < 0 || inputX >= i32(params.inputWidth)) { continue; }
+      let pixelBase = (u32(inputY) * params.inputWidth + u32(inputX)) * ${inputBlocks}u;
+      for (var inputBlock = 0u; inputBlock < ${inputBlocks}u; inputBlock++) {
+        ${accumulationCode(
+          'inputData[pixelBase + inputBlock]',
+          `((((gid.z * 3u + ky) * 3u + kx) * ${inputBlocks}u + inputBlock) * 4u)`,
+          precision
+        )}
+      }
+    }
+  }
+  let outputIndex = (gid.y * params.outputWidth + gid.x) * ${outputBlocks}u + gid.z;
+  outputData[outputIndex] = ${stored};
+}
+`;
+}
+
+/** Direct convolution with subgroup-wide weight broadcast. */
+function createSubgroupConvShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  inputBlocks: number,
+  outputBlocks: number
+) {
+  const inputType = storageVecType(precision);
+  const weightType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const stored = storeExpression(
+    activationExpression('acc', activation),
+    outputPrecision
+  );
+  return /* wgsl */ `${shaderPreamble(precision)}
+enable subgroups;
+struct Params {
+  inputWidth: u32,
+  inputHeight: u32,
+  outputWidth: u32,
+  outputHeight: u32,
+  inputBlocks: u32,
+  outputBlocks: u32,
+}
+@group(0) @binding(0) var<storage, read> inputData: array<${inputType}>;
+@group(0) @binding(1) var<storage, read> weights: array<${weightType}>;
+@group(0) @binding(2) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE}, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let outputInBounds =
+    gid.x < params.outputWidth && gid.y < params.outputHeight;
+  var acc = bias[gid.z];
+  for (var ky = 0u; ky < 3u; ky++) {
+    let inputY = i32(gid.y) + i32(ky) - 1;
+    let clampedY = u32(clamp(inputY, 0, i32(params.inputHeight) - 1));
+    for (var kx = 0u; kx < 3u; kx++) {
+      let inputX = i32(gid.x) + i32(kx) - 1;
+      let clampedX = u32(clamp(inputX, 0, i32(params.inputWidth) - 1));
+      let inputInBounds =
+        outputInBounds && inputX >= 0 && inputY >= 0 &&
+        inputX < i32(params.inputWidth) && inputY < i32(params.inputHeight);
+      let pixelBase =
+        (clampedY * params.inputWidth + clampedX) * ${inputBlocks}u;
+      for (var inputBlock = 0u; inputBlock < ${inputBlocks}u; inputBlock++) {
+        ${subgroupAccumulationCode(
+          `select(${inputType}(0.0), inputData[pixelBase + inputBlock], inputInBounds)`,
+          `((((gid.z * 3u + ky) * 3u + kx) * ${inputBlocks}u + inputBlock) * 4u)`,
+          precision
+        )}
+      }
+    }
+  }
+  if (outputInBounds) {
+    let outputIndex =
+      (gid.y * params.outputWidth + gid.x) * ${outputBlocks}u + gid.z;
+    outputData[outputIndex] = ${stored};
+  }
+}
+`;
+}
+
+/**
+ * A 2D convolution tile which loads the complete 3x3 halo into workgroup
+ * memory once. Kernel choice only depends on the operation shape, precision,
+ * and device limits; it is deliberately independent of OIDN model names.
+ */
+function createSpatialConvShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  inputBlocks: number,
+  outputBlocks: number
+) {
+  const inputType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const stored = storeExpression(
+    activationExpression('acc', activation),
+    outputPrecision
+  );
+  const patchValues =
+    SPATIAL_CONV_PATCH * SPATIAL_CONV_PATCH * inputBlocks;
+  const workgroupThreads =
+    SPATIAL_CONV_WORKGROUP * SPATIAL_CONV_WORKGROUP;
+
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  inputWidth: u32,
+  inputHeight: u32,
+  outputWidth: u32,
+  outputHeight: u32,
+  inputBlocks: u32,
+  outputBlocks: u32,
+}
+@group(0) @binding(0) var<storage, read> inputData: array<${inputType}>;
+@group(0) @binding(1) var<storage, read> weights: array<${inputType}>;
+@group(0) @binding(2) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+var<workgroup> inputPatch: array<${inputType}, ${patchValues}>;
+
+@compute @workgroup_size(${SPATIAL_CONV_WORKGROUP}, ${SPATIAL_CONV_WORKGROUP}, 1)
+fn main(
+  @builtin(local_invocation_id) localId: vec3<u32>,
+  @builtin(workgroup_id) workgroupId: vec3<u32>
+) {
+  let localLinear =
+    localId.y * ${SPATIAL_CONV_WORKGROUP}u + localId.x;
+  for (
+    var loadIndex = localLinear;
+    loadIndex < ${patchValues}u;
+    loadIndex += ${workgroupThreads}u
+  ) {
+    let patchPixel = loadIndex / ${inputBlocks}u;
+    let inputBlock = loadIndex % ${inputBlocks}u;
+    let patchX = patchPixel % ${SPATIAL_CONV_PATCH}u;
+    let patchY = patchPixel / ${SPATIAL_CONV_PATCH}u;
+    let inputX =
+      i32(workgroupId.x * ${SPATIAL_CONV_WORKGROUP}u + patchX) - 1;
+    let inputY =
+      i32(workgroupId.y * ${SPATIAL_CONV_WORKGROUP}u + patchY) - 1;
+    var value = ${inputType}(0.0);
+    if (
+      inputX >= 0 && inputX < i32(params.inputWidth) &&
+      inputY >= 0 && inputY < i32(params.inputHeight)
+    ) {
+      let inputIndex =
+        (u32(inputY) * params.inputWidth + u32(inputX)) *
+        ${inputBlocks}u + inputBlock;
+      value = inputData[inputIndex];
+    }
+    inputPatch[loadIndex] = value;
+  }
+  workgroupBarrier();
+
+  let outputX =
+    workgroupId.x * ${SPATIAL_CONV_WORKGROUP}u + localId.x;
+  let outputY =
+    workgroupId.y * ${SPATIAL_CONV_WORKGROUP}u + localId.y;
+  let outputBlock = workgroupId.z;
+  if (
+    outputX >= params.outputWidth || outputY >= params.outputHeight ||
+    outputBlock >= ${outputBlocks}u
+  ) {
+    return;
+  }
+
+  var acc = bias[outputBlock];
+  for (var ky = 0u; ky < 3u; ky++) {
+    for (var kx = 0u; kx < 3u; kx++) {
+      let patchBase =
+        ((localId.y + ky) * ${SPATIAL_CONV_PATCH}u + localId.x + kx) *
+        ${inputBlocks}u;
+      for (var inputBlock = 0u; inputBlock < ${inputBlocks}u; inputBlock++) {
+        ${accumulationCode(
+          'inputPatch[patchBase + inputBlock]',
+          `((((outputBlock * 3u + ky) * 3u + kx) * ${inputBlocks}u + inputBlock) * 4u)`,
+          precision
+        )}
+      }
+    }
+  }
+  let outputIndex =
+    (outputY * params.outputWidth + outputX) * ${outputBlocks}u + outputBlock;
+  outputData[outputIndex] = ${stored};
+}
+`;
+}
+
+/** Precompute spatial predicates once, then advance the original flattened K order. */
+function tiledAddressCacheCode(inputBlocks: number, decoder: boolean, gemm: Readonly<Required<NativeUNetGemmOptions>>, sources?: { blocks: readonly number[]; upsampled: 0 | 1 }) {
+  const { workgroupX, workgroupY, tileM, tileKBlocks } = gemmTile(gemm);
+  const width = decoder ? 'params.outputWidth' : 'params.inputWidth';
+  const height = decoder ? 'params.outputHeight' : 'params.inputHeight';
+  const baseOffset = gemm.addressMode === 'base-offset';
+  // Decoder parity travels in the high mask bits, avoiding extra cached arrays.
+  const baseAssignments = sources
+    ? sources.blocks.map((blocks, source) =>
+        `cachedBase${source}[load] = (${source === sources.upsampled ? 'y / 2u' : 'y'} * params.source${source}Width + ${source === sources.upsampled ? 'x / 2u' : 'x'}) * ${blocks}u;`
+      ).join('\n    ')
+    : `cachedBase0[load] = (y * params.inputWidth + x) * ${inputBlocks}u;`;
+  const loads = tileM * tileKBlocks /
+    (workgroupX * workgroupY);
+  return /* wgsl */ `
+  ${baseOffset ? `var cachedBase0: array<u32, ${loads}>;
+  ${sources ? `var cachedBase1: array<u32, ${loads}>;` : ''}` : `var cachedX: array<u32, ${loads}>;
+  var cachedY: array<u32, ${loads}>;`}
+  var cachedMask: array<u32, ${loads}>;
+  for (var load = 0u; load < ${loads}u; load++) {
+    let loadIndex = localLinear + load * ${workgroupX * workgroupY}u;
+    let spatial = workgroupId.x * ${tileM}u + loadIndex / ${tileKBlocks}u;
+    let x = spatial % params.outputWidth;
+    let y = spatial / params.outputWidth;
+    ${baseOffset ? baseAssignments : `cachedX[load] = x;
+    cachedY[load] = y;`}
+    let columns =
+      select(0u, 0x049u, x > 0u && x - 1u < ${width}) |
+      select(0u, 0x092u, x < ${width}) |
+      select(0u, 0x124u, x + 1u < ${width});
+    let rows =
+      select(0u, 0x007u, y > 0u && y - 1u < ${height}) |
+      select(0u, 0x038u, y < ${height}) |
+      select(0u, 0x1c0u, y + 1u < ${height});
+    cachedMask[load] = select(0u, columns & rows, spatial < spatialCount)${baseOffset && sources ? ' | ((x & 1u) << 9u) | ((y & 1u) << 10u)' : ''};
+  }
+  var channelBlock = (localLinear % ${tileKBlocks}u) % ${inputBlocks}u;
+  var filterPosition = (localLinear % ${tileKBlocks}u) / ${inputBlocks}u;
+`;
+}
+
+function tiledAddressAdvanceCode(inputBlocks: number, gemm: Readonly<Required<NativeUNetGemmOptions>>) {
+  const { tileKBlocks } = gemmTile(gemm);
+  // The remainder is less than inputBlocks, so at most one carry is needed.
+  return /* wgsl */ `
+    channelBlock += ${tileKBlocks % inputBlocks}u;
+    let carry = channelBlock >= ${inputBlocks}u;
+    channelBlock -= select(0u, ${inputBlocks}u, carry);
+    filterPosition += ${Math.floor(tileKBlocks / inputBlocks)}u + select(0u, 1u, carry);
+`;
+}
+
+function tiledIncrementalInputCode(valueType: string, readValue: string, gemm: Readonly<Required<NativeUNetGemmOptions>>) {
+  const { workgroupX, workgroupY, tileM, tileKBlocks } = gemmTile(gemm);
+  const loads = tileM * tileKBlocks /
+    (workgroupX * workgroupY);
+  return /* wgsl */ `
+    let inputBlock = channelBlock;
+    let kernelY = filterPosition / 3u;
+    let kernelX = filterPosition % 3u;
+    for (var load = 0u; load < ${loads}u; load++) {
+      let loadIndex = localLinear + load * ${workgroupX * workgroupY}u;
+      var value = ${valueType}(0.0);
+      if (filterPosition < 9u && (cachedMask[load] & (1u << filterPosition)) != 0u) {
+        ${gemm.addressMode === 'base-offset' ? '' : `let inputX = i32(cachedX[load]) + i32(kernelX) - 1;
+        let inputY = i32(cachedY[load]) + i32(kernelY) - 1;`}
+        ${readValue}
+      }
+      inputTile[${gemmSharedInputIndex('loadIndex', gemm)}] = value;
+    }
+`;
+}
+
+/**
+ * Implicit-GEMM convolution for FP16/FP32. This follows the packed WebGPU
+ * shape: configurable spatial rows and vec4 output blocks per workgroup.
+ * The eight-vec4 K tile stays fixed to preserve FP16 rounding across variants.
+ */
+function createTiledConvShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  inputBlocks: number,
+  outputBlocks: number,
+  gemm: Readonly<Required<NativeUNetGemmOptions>>
+) {
+  const { workgroupX, workgroupY, rowsPerThread, tileM, tileNBlocks, tileKBlocks } = gemmTile(gemm);
+  const { addressMode, weightLayout } = gemm;
+  const inputType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const packedInput = gemmPackedLoad(precision, gemm, false);
+  const packedWeights = gemmPackedLoad(precision, gemm, true);
+  const inputStorageType = packedInput ? 'vec2<u32>' : inputType;
+  const weightStorageType = packedWeights ? 'vec2<u32>' : inputType;
+  const stored = storeExpression(
+    activationExpression('acc', activation),
+    outputPrecision
+  );
+  const workgroupThreads =
+    workgroupX * workgroupY;
+  const inputTileValues = tileM * tileKBlocks;
+  const weightTileValues =
+    tileKBlocks * tileNBlocks * 4;
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  inputWidth: u32,
+  inputHeight: u32,
+  outputWidth: u32,
+  outputHeight: u32,
+  inputBlocks: u32,
+  outputBlocks: u32,
+}
+@group(0) @binding(0) var<storage, read> inputData: array<${inputStorageType}>;
+@group(0) @binding(1) var<storage, read> weights: array<${weightStorageType}>;
+@group(0) @binding(2) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+var<workgroup> inputTile: array<${inputType}, ${gemmSharedSizes(gemm).input}>;
+var<workgroup> weightTile: array<${inputType}, ${gemmSharedSizes(gemm).weights}>;
+
+@compute @workgroup_size(${workgroupX}, ${workgroupY}, 1)
+fn main(
+  @builtin(local_invocation_id) localId: vec3<u32>,
+  @builtin(workgroup_id) workgroupId: vec3<u32>
+) {
+  let spatialBase =
+    workgroupId.x * ${tileM}u +
+    localId.y * ${rowsPerThread}u;
+  let outputBlock =
+    workgroupId.y * ${tileNBlocks}u + localId.x;
+  let spatialCount = params.outputWidth * params.outputHeight;
+  var acc: array<vec4<f32>, ${rowsPerThread}>;
+  if (outputBlock < ${outputBlocks}u) {
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      acc[row] = bias[outputBlock];
+    }
+  }
+
+  let localLinear =
+    localId.y * ${workgroupX}u + localId.x;
+  ${addressMode !== 'analytic' ? tiledAddressCacheCode(inputBlocks, false, gemm) : ''}
+  let totalK = ${inputBlocks * 9}u;
+  for (var kBase = 0u; kBase < totalK; kBase += ${tileKBlocks}u) {
+    ${addressMode !== 'analytic' ? tiledIncrementalInputCode(inputType, `
+        ${addressMode === 'base-offset' ? `let offset = (i32(kernelY) - 1) * i32(params.inputWidth) + i32(kernelX) - 1;
+        let inputIndex = cachedBase0[load] + u32(offset * ${inputBlocks}) + inputBlock;` : `let inputIndex = (u32(inputY) * params.inputWidth + u32(inputX)) *
+          ${inputBlocks}u + inputBlock;`}
+        value = ${gemmLoadExpression('inputData[inputIndex]', packedInput)};
+    `, gemm) : /* wgsl */ `
+    for (
+      var loadIndex = localLinear;
+      loadIndex < ${inputTileValues}u;
+      loadIndex += ${workgroupThreads}u
+    ) {
+      let tileSpatial = loadIndex / ${tileKBlocks}u;
+      let tileK = loadIndex % ${tileKBlocks}u;
+      let inputSpatialIndex =
+        workgroupId.x * ${tileM}u + tileSpatial;
+      let kIndex = kBase + tileK;
+      var value = ${inputType}(0.0);
+      if (inputSpatialIndex < spatialCount && kIndex < totalK) {
+        let outputY = inputSpatialIndex / params.outputWidth;
+        let outputX = inputSpatialIndex % params.outputWidth;
+        let inputBlock = kIndex % ${inputBlocks}u;
+        let kernelIndex = kIndex / ${inputBlocks}u;
+        let kernelY = kernelIndex / 3u;
+        let kernelX = kernelIndex % 3u;
+        let inputY = i32(outputY) + i32(kernelY) - 1;
+        let inputX = i32(outputX) + i32(kernelX) - 1;
+        if (
+          inputY >= 0 && inputY < i32(params.inputHeight) &&
+          inputX >= 0 && inputX < i32(params.inputWidth)
+        ) {
+          let inputIndex =
+            (u32(inputY) * params.inputWidth + u32(inputX)) *
+            ${inputBlocks}u + inputBlock;
+          value = ${gemmLoadExpression('inputData[inputIndex]', packedInput)};
+        }
+      }
+      inputTile[${gemmSharedInputIndex('loadIndex', gemm)}] = value;
+    }
+    `}
+
+    for (
+      var loadIndex = localLinear;
+      loadIndex < ${weightTileValues}u;
+      loadIndex += ${workgroupThreads}u
+    ) {
+      let tileK = loadIndex / ${tileNBlocks * 4}u;
+      let outputRemainder = loadIndex % ${tileNBlocks * 4}u;
+      let tileOutputBlock = outputRemainder / 4u;
+      let outputLane = outputRemainder % 4u;
+      let loadedOutputBlock =
+        workgroupId.y * ${tileNBlocks}u + tileOutputBlock;
+      let kIndex = kBase + tileK;
+      var value = ${inputType}(0.0);
+      if (loadedOutputBlock < ${outputBlocks}u && kIndex < totalK) {
+        ${weightLayout === 'k-major' ? /* wgsl */ `
+        let weightIndex = (kIndex * ${outputBlocks}u + loadedOutputBlock) * 4u + outputLane;
+        ` : addressMode !== 'analytic' ? /* wgsl */ `
+        let weightIndex = (loadedOutputBlock * ${inputBlocks * 9}u + kIndex) * 4u + outputLane;
+        ` : /* wgsl */ `
+        let inputBlock = kIndex % ${inputBlocks}u;
+        let kernelIndex = kIndex / ${inputBlocks}u;
+        let kernelY = kernelIndex / 3u;
+        let kernelX = kernelIndex % 3u;
+        let weightIndex =
+          ((((loadedOutputBlock * 3u + kernelY) * 3u + kernelX) *
+            ${inputBlocks}u + inputBlock) * 4u + outputLane);
+        `}
+        value = ${gemmLoadExpression('weights[weightIndex]', packedWeights)};
+      }
+      weightTile[${gemmSharedWeightIndex('loadIndex', gemm)}] = value;
+    }
+
+    workgroupBarrier();
+    ${tiledAccumulationCode(precision, gemm)}
+    workgroupBarrier();
+    ${addressMode !== 'analytic' ? tiledAddressAdvanceCode(inputBlocks, gemm) : ''}
+  }
+
+  if (outputBlock < ${outputBlocks}u) {
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      let spatialIndex = spatialBase + row;
+      if (spatialIndex < spatialCount) {
+        let outputIndex = spatialIndex * ${outputBlocks}u + outputBlock;
+        outputData[outputIndex] = ${stored.replaceAll('acc', 'acc[row]')};
+      }
+    }
+  }
+}
+`;
+}
+
+function createFusedConvPoolShader(
+  precision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  inputBlocks: number,
+  outputBlocks: number
+) {
+  const valueType = storageVecType(precision);
+  const activated = activationExpression('acc', activation);
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  inputWidth: u32,
+  inputHeight: u32,
+  outputWidth: u32,
+  outputHeight: u32,
+  inputBlocks: u32,
+  outputBlocks: u32,
+}
+@group(0) @binding(0) var<storage, read> inputData: array<${valueType}>;
+@group(0) @binding(1) var<storage, read> weights: array<${valueType}>;
+@group(0) @binding(2) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> outputData: array<${valueType}>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE}, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= params.outputWidth || gid.y >= params.outputHeight || gid.z >= ${outputBlocks}u) {
+    return;
+  }
+  var pooled = vec4<f32>(-3.402823466e+38);
+  for (var py = 0u; py < 2u; py++) {
+    let centerY = gid.y * 2u + py;
+    if (centerY >= params.inputHeight) { continue; }
+    for (var px = 0u; px < 2u; px++) {
+      let centerX = gid.x * 2u + px;
+      if (centerX >= params.inputWidth) { continue; }
+      var acc = bias[gid.z];
+      for (var ky = 0u; ky < 3u; ky++) {
+        let inputY = i32(centerY) + i32(ky) - 1;
+        if (inputY < 0 || inputY >= i32(params.inputHeight)) { continue; }
+        for (var kx = 0u; kx < 3u; kx++) {
+          let inputX = i32(centerX) + i32(kx) - 1;
+          if (inputX < 0 || inputX >= i32(params.inputWidth)) { continue; }
+          let pixelBase = (u32(inputY) * params.inputWidth + u32(inputX)) * ${inputBlocks}u;
+          for (var inputBlock = 0u; inputBlock < ${inputBlocks}u; inputBlock++) {
+            ${accumulationCode(
+              'inputData[pixelBase + inputBlock]',
+              `((((gid.z * 3u + ky) * 3u + kx) * ${inputBlocks}u + inputBlock) * 4u)`,
+              precision
+            )}
+          }
+        }
+      }
+      pooled = max(pooled, ${activated});
+    }
+  }
+  let outputIndex = (gid.y * params.outputWidth + gid.x) * ${outputBlocks}u + gid.z;
+  outputData[outputIndex] = ${storeExpression('pooled', precision)};
+}
+`;
+}
+
+function createMaxPoolShader(
+  precision: NativeUNetPrecision,
+  outputBlocks: number,
+  coalesced: boolean
+) {
+  const valueType = storageVecType(precision);
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  inputWidth: u32,
+  inputHeight: u32,
+  outputWidth: u32,
+  outputHeight: u32,
+  outputBlocks: u32,
+}
+@group(0) @binding(0) var<storage, read> inputData: array<${valueType}>;
+@group(0) @binding(1) var<storage, read_write> outputData: array<${valueType}>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE}, 1)
+fn main(
+  @builtin(global_invocation_id) gid: vec3<u32>${coalesced ? ',\n  @builtin(num_workgroups) groupCount: vec3<u32>' : ''}
+) {
+  ${coalesced ? `let linearX = gid.x + gid.z * groupCount.x * ${WORKGROUP_SIZE}u;
+  let outputBlock = linearX % ${outputBlocks}u;
+  let outputX = linearX / ${outputBlocks}u;` : `let outputBlock = gid.z;
+  let outputX = gid.x;`}
+  if (
+    outputX >= params.outputWidth ||
+    gid.y >= params.outputHeight ||
+    outputBlock >= ${outputBlocks}u
+  ) {
+    return;
+  }
+  var pooled = vec4<f32>(-3.402823466e+38);
+  for (var py = 0u; py < 2u; py++) {
+    let inputY = gid.y * 2u + py;
+    if (inputY >= params.inputHeight) { continue; }
+    for (var px = 0u; px < 2u; px++) {
+      let inputX = outputX * 2u + px;
+      if (inputX >= params.inputWidth) { continue; }
+      let inputIndex =
+        (inputY * params.inputWidth + inputX) * ${outputBlocks}u + outputBlock;
+      pooled = max(pooled, vec4<f32>(inputData[inputIndex]));
+    }
+  }
+  let outputIndex =
+    (gid.y * params.outputWidth + outputX) * ${outputBlocks}u + outputBlock;
+  outputData[outputIndex] = ${storeExpression('pooled', precision)};
+}
+`;
+}
+
+function createTiledDecoderShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  sourceBlocks: readonly number[],
+  upsampledSource: 0 | 1,
+  outputBlocks: number,
+  gemm: Readonly<Required<NativeUNetGemmOptions>>
+) {
+  const { workgroupX, workgroupY, rowsPerThread, tileM, tileNBlocks, tileKBlocks } = gemmTile(gemm);
+  const { addressMode, weightLayout } = gemm;
+  const valueType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const packedInput = gemmPackedLoad(precision, gemm, false);
+  const packedWeights = gemmPackedLoad(precision, gemm, true);
+  const inputStorageType = packedInput ? 'vec2<u32>' : valueType;
+  const weightStorageType = packedWeights ? 'vec2<u32>' : valueType;
+  const inputBlocks = sourceBlocks[0] + sourceBlocks[1];
+  const stored = storeExpression(
+    activationExpression('acc[row]', activation),
+    outputPrecision
+  );
+  const workgroupThreads =
+    workgroupX * workgroupY;
+  const inputTileValues = tileM * tileKBlocks;
+  const weightTileValues =
+    tileKBlocks * tileNBlocks * 4;
+  const sourceRead = (source: 0 | 1, blockExpression: string) => {
+    const sourceX =
+      source === upsampledSource
+        ? 'u32(inputX) / 2u'
+        : 'u32(inputX)';
+    const sourceY =
+      source === upsampledSource
+        ? 'u32(inputY) / 2u'
+        : 'u32(inputY)';
+    return /* wgsl */ `
+          {
+            let sourceBlock = ${blockExpression};
+            ${addressMode === 'base-offset' ? `let dx = ${source === upsampledSource ? '(i32((cachedMask[load] >> 9u) & 1u) + i32(kernelX) - 1) >> 1u' : 'i32(kernelX) - 1'};
+            let dy = ${source === upsampledSource ? '(i32((cachedMask[load] >> 10u) & 1u) + i32(kernelY) - 1) >> 1u' : 'i32(kernelY) - 1'};
+            let offset = (dy * i32(params.source${source}Width) + dx) * ${sourceBlocks[source]};
+            let sourceIndex = cachedBase${source}[load] + u32(offset) + sourceBlock;` : `let sourceX = ${sourceX};
+            let sourceY = ${sourceY};
+            let sourceIndex =
+              (sourceY * params.source${source}Width + sourceX) *
+              ${sourceBlocks[source]}u + sourceBlock;` }
+            value = ${gemmLoadExpression(`input${source}[sourceIndex]`, packedInput)};
+          }`;
+  };
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  outputWidth: u32,
+  outputHeight: u32,
+  outputBlocks: u32,
+  inputBlocks: u32,
+  source0Width: u32,
+  source0Height: u32,
+  source1Width: u32,
+  source1Height: u32,
+}
+@group(0) @binding(0) var<storage, read> input0: array<${inputStorageType}>;
+@group(0) @binding(1) var<storage, read> input1: array<${inputStorageType}>;
+@group(0) @binding(2) var<storage, read> weights: array<${weightStorageType}>;
+@group(0) @binding(3) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+var<workgroup> inputTile: array<${valueType}, ${gemmSharedSizes(gemm).input}>;
+var<workgroup> weightTile: array<${valueType}, ${gemmSharedSizes(gemm).weights}>;
+
+@compute @workgroup_size(${workgroupX}, ${workgroupY}, 1)
+fn main(
+  @builtin(local_invocation_id) localId: vec3<u32>,
+  @builtin(workgroup_id) workgroupId: vec3<u32>
+) {
+  let spatialBase =
+    workgroupId.x * ${tileM}u +
+    localId.y * ${rowsPerThread}u;
+  let outputBlock =
+    workgroupId.y * ${tileNBlocks}u + localId.x;
+  let spatialCount = params.outputWidth * params.outputHeight;
+  var acc: array<vec4<f32>, ${rowsPerThread}>;
+  if (outputBlock < ${outputBlocks}u) {
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      acc[row] = bias[outputBlock];
+    }
+  }
+
+  let localLinear =
+    localId.y * ${workgroupX}u + localId.x;
+  ${addressMode !== 'analytic' ? tiledAddressCacheCode(inputBlocks, true, gemm, { blocks: sourceBlocks, upsampled: upsampledSource }) : ''}
+  let totalK = ${inputBlocks * 9}u;
+  for (var kBase = 0u; kBase < totalK; kBase += ${tileKBlocks}u) {
+    ${addressMode !== 'analytic' ? (gemm.decoderLoad === 'source-first' ? `
+    if (channelBlock < ${sourceBlocks[0]}u) {
+      ${tiledIncrementalInputCode(valueType, sourceRead(0, 'inputBlock'), gemm)}
+    } else {
+      ${tiledIncrementalInputCode(valueType, sourceRead(1, `inputBlock - ${sourceBlocks[0]}u`), gemm)}
+    }
+    ` : tiledIncrementalInputCode(valueType, `
+        if (inputBlock < ${sourceBlocks[0]}u) {
+          ${sourceRead(0, 'inputBlock')}
+        } else {
+          ${sourceRead(1, `inputBlock - ${sourceBlocks[0]}u`)}
+        }
+    `, gemm)) : /* wgsl */ `
+    for (
+      var loadIndex = localLinear;
+      loadIndex < ${inputTileValues}u;
+      loadIndex += ${workgroupThreads}u
+    ) {
+      let tileSpatial = loadIndex / ${tileKBlocks}u;
+      let tileK = loadIndex % ${tileKBlocks}u;
+      let outputSpatialIndex =
+        workgroupId.x * ${tileM}u + tileSpatial;
+      let kIndex = kBase + tileK;
+      var value = ${valueType}(0.0);
+      if (outputSpatialIndex < spatialCount && kIndex < totalK) {
+        let outputY = outputSpatialIndex / params.outputWidth;
+        let outputX = outputSpatialIndex % params.outputWidth;
+        let inputBlock = kIndex % ${inputBlocks}u;
+        let kernelIndex = kIndex / ${inputBlocks}u;
+        let kernelY = kernelIndex / 3u;
+        let kernelX = kernelIndex % 3u;
+        let inputY = i32(outputY) + i32(kernelY) - 1;
+        let inputX = i32(outputX) + i32(kernelX) - 1;
+        if (
+          inputY >= 0 && inputY < i32(params.outputHeight) &&
+          inputX >= 0 && inputX < i32(params.outputWidth)
+        ) {
+          if (inputBlock < ${sourceBlocks[0]}u) {
+            ${sourceRead(0, 'inputBlock')}
+          } else {
+            ${sourceRead(1, `inputBlock - ${sourceBlocks[0]}u`)}
+          }
+        }
+      }
+      inputTile[${gemmSharedInputIndex('loadIndex', gemm)}] = value;
+    }
+    `}
+
+    for (
+      var loadIndex = localLinear;
+      loadIndex < ${weightTileValues}u;
+      loadIndex += ${workgroupThreads}u
+    ) {
+      let tileK = loadIndex / ${tileNBlocks * 4}u;
+      let outputRemainder = loadIndex % ${tileNBlocks * 4}u;
+      let tileOutputBlock = outputRemainder / 4u;
+      let outputLane = outputRemainder % 4u;
+      let loadedOutputBlock =
+        workgroupId.y * ${tileNBlocks}u + tileOutputBlock;
+      let kIndex = kBase + tileK;
+      var value = ${valueType}(0.0);
+      if (loadedOutputBlock < ${outputBlocks}u && kIndex < totalK) {
+        ${weightLayout === 'k-major' ? /* wgsl */ `
+        let weightIndex = (kIndex * ${outputBlocks}u + loadedOutputBlock) * 4u + outputLane;
+        ` : addressMode !== 'analytic' ? /* wgsl */ `
+        let weightIndex = (loadedOutputBlock * ${inputBlocks * 9}u + kIndex) * 4u + outputLane;
+        ` : /* wgsl */ `
+        let inputBlock = kIndex % ${inputBlocks}u;
+        let kernelIndex = kIndex / ${inputBlocks}u;
+        let kernelY = kernelIndex / 3u;
+        let kernelX = kernelIndex % 3u;
+        let weightIndex =
+          ((((loadedOutputBlock * 3u + kernelY) * 3u + kernelX) *
+            ${inputBlocks}u + inputBlock) * 4u + outputLane);
+        `}
+        value = ${gemmLoadExpression('weights[weightIndex]', packedWeights)};
+      }
+      weightTile[${gemmSharedWeightIndex('loadIndex', gemm)}] = value;
+    }
+
+    workgroupBarrier();
+    ${tiledAccumulationCode(precision, gemm)}
+    workgroupBarrier();
+    ${addressMode !== 'analytic' ? tiledAddressAdvanceCode(inputBlocks, gemm) : ''}
+  }
+
+  if (outputBlock < ${outputBlocks}u) {
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      let spatialIndex = spatialBase + row;
+      if (spatialIndex < spatialCount) {
+        let outputIndex = spatialIndex * ${outputBlocks}u + outputBlock;
+        outputData[outputIndex] = ${stored};
+      }
+    }
+  }
+}
+`;
+}
+
+/**
+ * One workgroup owns one output phase, so its GEMM rows share the same four
+ * combined upsampling taps. Skip inputs retain their original nine taps.
+ * The shared tiles and short FP16 reduction groups match the regular GEMM;
+ * only the decoder's mathematical decomposition and reduction order change.
+ */
+function createTiledSubpixelDecoderShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  sourceBlocks: readonly number[],
+  upsampledSource: 0 | 1,
+  outputBlocks: number,
+  gemm: Readonly<Required<NativeUNetGemmOptions>>
+) {
+  const tile = gemmTile(gemm);
+  const { workgroupX, workgroupY, rowsPerThread, tileM, tileNBlocks, tileKBlocks } = tile;
+  const threads = workgroupX * workgroupY;
+  const loads = tileM * tileKBlocks / threads;
+  const valueType = storageVecType(precision);
+  const packedInput = gemmPackedLoad(precision, gemm, false);
+  const packedWeights = gemmPackedLoad(precision, gemm, true);
+  const upBlocks = sourceBlocks[upsampledSource];
+  const skipSource = (1 - upsampledSource) as 0 | 1;
+  const skipBlocks = sourceBlocks[skipSource];
+  const reduction = (source: 0 | 1, upsampled: boolean) => {
+    const blocks = sourceBlocks[source];
+    const taps = upsampled ? 4 : 9;
+    const weightOffset = upsampled
+      ? `phase * ${4 * upBlocks * outputBlocks * 4}u`
+      : `${SUBPIXEL_MATRICES * upBlocks * outputBlocks * 4}u`;
+    const offset = upsampled
+      ? `(i32(tap / 2u) + i32(phaseY) - 1) * i32(params.source${source}Width) + i32(tap % 2u) + i32(phaseX) - 1`
+      : `(i32(tap / 3u) - 1) * i32(params.source${source}Width) + i32(tap % 3u) - 1`;
+    return /* wgsl */ `
+  for (var kBase = 0u; kBase < ${taps * blocks}u; kBase += ${tileKBlocks}u) {
+    let inputK = kBase + localLinear % ${tileKBlocks}u;
+    let tap = inputK / ${blocks}u;
+    let channel = inputK % ${blocks}u;
+    for (var load = 0u; load < ${loads}u; load++) {
+      let i = localLinear + load * ${threads}u;
+      var value = ${valueType}(0.0);
+      if (tap < ${taps}u && (mask${source}[load] & (1u << tap)) != 0u) {
+        let offset = ${offset};
+        let index = u32(base${source}[load] + offset) * ${blocks}u + channel;
+        value = ${gemmLoadExpression(`input${source}[index]`, packedInput)};
+      }
+      inputTile[${gemmSharedInputIndex('i', gemm)}] = value;
+    }
+    for (var i = localLinear; i < ${tileKBlocks * tileNBlocks * 4}u; i += ${threads}u) {
+      let k = kBase + i / ${tileNBlocks * 4}u;
+      let outputBlock = workgroupId.y * ${tileNBlocks}u + (i % ${tileNBlocks * 4}u) / 4u;
+      var value = ${valueType}(0.0);
+      if (k < ${taps * blocks}u && outputBlock < ${outputBlocks}u) {
+        let index = ${weightOffset} + (k * ${outputBlocks}u + outputBlock) * 4u + i % 4u;
+        value = ${gemmLoadExpression('weights[index]', packedWeights)};
+      }
+      weightTile[${gemmSharedWeightIndex('i', gemm)}] = value;
+    }
+    workgroupBarrier();
+    ${tiledAccumulationCode(precision, gemm)}
+    workgroupBarrier();
+  }`;
+  };
+  const cache = (source: 0 | 1, upsampled: boolean) => {
+    const taps = upsampled ? 4 : 9;
+    const side = upsampled ? 2 : 3;
+    const x = upsampled ? 'x' : 'x * 2u + phaseX';
+    const y = upsampled ? 'y' : 'y * 2u + phaseY';
+    return /* wgsl */ `
+    let x${source} = i32(${x});
+    let y${source} = i32(${y});
+    base${source}[load] = y${source} * i32(params.source${source}Width) + x${source};
+    var bits${source} = 0u;
+    for (var tap = 0u; tap < ${taps}u; tap++) {
+      let sx = x${source} + i32(tap % ${side}u) ${upsampled ? '+ i32(phaseX)' : ''} - 1;
+      let sy = y${source} + i32(tap / ${side}u) ${upsampled ? '+ i32(phaseY)' : ''} - 1;
+      if (valid && sx >= 0 && sy >= 0 && sx < i32(params.source${source}Width) && sy < i32(params.source${source}Height)) {
+        bits${source} |= 1u << tap;
+      }
+    }
+    mask${source}[load] = bits${source};`;
+  };
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  outputWidth: u32, outputHeight: u32, outputBlocks: u32, inputBlocks: u32,
+  source0Width: u32, source0Height: u32, source1Width: u32, source1Height: u32,
+}
+@group(0) @binding(0) var<storage, read> input0: array<${packedInput ? 'vec2<u32>' : valueType}>;
+@group(0) @binding(1) var<storage, read> input1: array<${packedInput ? 'vec2<u32>' : valueType}>;
+@group(0) @binding(2) var<storage, read> weights: array<${packedWeights ? 'vec2<u32>' : valueType}>;
+@group(0) @binding(3) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> outputData: array<${storageVecType(outputPrecision)}>;
+@group(0) @binding(5) var<uniform> params: Params;
+var<workgroup> inputTile: array<${valueType}, ${gemmSharedSizes(gemm).input}>;
+var<workgroup> weightTile: array<${valueType}, ${gemmSharedSizes(gemm).weights}>;
+
+@compute @workgroup_size(${workgroupX}, ${workgroupY}, 1)
+fn main(@builtin(local_invocation_id) localId: vec3<u32>, @builtin(workgroup_id) workgroupId: vec3<u32>) {
+  let phase = workgroupId.z;
+  let phaseX = phase & 1u;
+  let phaseY = phase >> 1u;
+  let phaseWidth = (params.outputWidth + 1u) / 2u;
+  let localLinear = localId.y * ${workgroupX}u + localId.x;
+  let outputBlock = workgroupId.y * ${tileNBlocks}u + localId.x;
+  var acc: array<vec4<f32>, ${rowsPerThread}>;
+  if (outputBlock < ${outputBlocks}u) {
+    for (var row = 0u; row < ${rowsPerThread}u; row++) { acc[row] = bias[outputBlock]; }
+  }
+  var base0: array<i32, ${loads}>;
+  var base1: array<i32, ${loads}>;
+  var mask0: array<u32, ${loads}>;
+  var mask1: array<u32, ${loads}>;
+  for (var load = 0u; load < ${loads}u; load++) {
+    let spatial = workgroupId.x * ${tileM}u + (localLinear + load * ${threads}u) / ${tileKBlocks}u;
+    let x = spatial % phaseWidth;
+    let y = spatial / phaseWidth;
+    let valid = x * 2u + phaseX < params.outputWidth && y * 2u + phaseY < params.outputHeight;
+    ${cache(upsampledSource, true)}
+    ${cache(skipSource, false)}
+  }
+  ${reduction(upsampledSource, true)}
+  ${reduction(skipSource, false)}
+  if (outputBlock < ${outputBlocks}u) {
+    for (var row = 0u; row < ${rowsPerThread}u; row++) {
+      let spatial = workgroupId.x * ${tileM}u + localId.y * ${rowsPerThread}u + row;
+      let x = (spatial % phaseWidth) * 2u + phaseX;
+      let y = (spatial / phaseWidth) * 2u + phaseY;
+      if (x < params.outputWidth && y < params.outputHeight) {
+        outputData[(y * params.outputWidth + x) * ${outputBlocks}u + outputBlock] = ${storeExpression(activationExpression('acc[row]', activation), outputPrecision)};
+      }
+    }
+  }
+}
+`;
+}
+
+function createFusedDecoderShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  sourceBlocks: readonly number[],
+  upsampledSource: 0 | 1,
+  outputBlocks: number
+) {
+  const valueType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const inputBlocks = sourceBlocks[0] + sourceBlocks[1];
+  const sourceCode = (source: 0 | 1, blockOffset: number) => {
+    const isUpsampled = source === upsampledSource;
+    return /* wgsl */ `
+      {
+        let sourceX = ${isUpsampled ? 'u32(inputX) / 2u' : 'u32(inputX)'};
+        let sourceY = ${isUpsampled ? 'u32(inputY) / 2u' : 'u32(inputY)'};
+        let sourcePixelBase = (sourceY * params.source${source}Width + sourceX) * ${sourceBlocks[source]}u;
+        for (var sourceBlock = 0u; sourceBlock < ${sourceBlocks[source]}u; sourceBlock++) {
+          let inputBlock = ${blockOffset}u + sourceBlock;
+          ${accumulationCode(
+            `input${source}[sourcePixelBase + sourceBlock]`,
+            `((((gid.z * 3u + ky) * 3u + kx) * ${inputBlocks}u + inputBlock) * 4u)`,
+            precision
+          )}
+        }
+      }
+`;
+  };
+  const stored = storeExpression(
+    activationExpression('acc', activation),
+    outputPrecision
+  );
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  outputWidth: u32,
+  outputHeight: u32,
+  outputBlocks: u32,
+  inputBlocks: u32,
+  source0Width: u32,
+  source0Height: u32,
+  source1Width: u32,
+  source1Height: u32,
+}
+@group(0) @binding(0) var<storage, read> input0: array<${valueType}>;
+@group(0) @binding(1) var<storage, read> input1: array<${valueType}>;
+@group(0) @binding(2) var<storage, read> weights: array<${valueType}>;
+@group(0) @binding(3) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE}, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= params.outputWidth || gid.y >= params.outputHeight || gid.z >= ${outputBlocks}u) {
+    return;
+  }
+  var acc = bias[gid.z];
+  for (var ky = 0u; ky < 3u; ky++) {
+    let inputY = i32(gid.y) + i32(ky) - 1;
+    if (inputY < 0 || inputY >= i32(params.outputHeight)) { continue; }
+    for (var kx = 0u; kx < 3u; kx++) {
+      let inputX = i32(gid.x) + i32(kx) - 1;
+      if (inputX < 0 || inputX >= i32(params.outputWidth)) { continue; }
+      ${sourceCode(0, 0)}
+      ${sourceCode(1, sourceBlocks[0])}
+    }
+  }
+  let outputIndex = (gid.y * params.outputWidth + gid.x) * ${outputBlocks}u + gid.z;
+  outputData[outputIndex] = ${stored};
+}
+`;
+}
+
+function createSpatialDecoderShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  sourceBlocks: readonly number[],
+  upsampledSource: 0 | 1,
+  outputBlocks: number
+) {
+  const valueType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const inputBlocks = sourceBlocks[0] + sourceBlocks[1];
+  const patchValues =
+    SPATIAL_CONV_PATCH * SPATIAL_CONV_PATCH * inputBlocks;
+  const workgroupThreads =
+    SPATIAL_CONV_WORKGROUP * SPATIAL_CONV_WORKGROUP;
+  const stored = storeExpression(
+    activationExpression('acc', activation),
+    outputPrecision
+  );
+  const sourceRead = (source: 0 | 1, blockExpression: string) => {
+    const sourceX =
+      source === upsampledSource ? 'u32(inputX) / 2u' : 'u32(inputX)';
+    const sourceY =
+      source === upsampledSource ? 'u32(inputY) / 2u' : 'u32(inputY)';
+    return /* wgsl */ `
+      let sourceBlock = ${blockExpression};
+      let sourceIndex =
+        (${sourceY} * params.source${source}Width + ${sourceX}) *
+        ${sourceBlocks[source]}u + sourceBlock;
+      value = input${source}[sourceIndex];`;
+  };
+
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  outputWidth: u32,
+  outputHeight: u32,
+  outputBlocks: u32,
+  inputBlocks: u32,
+  source0Width: u32,
+  source0Height: u32,
+  source1Width: u32,
+  source1Height: u32,
+}
+@group(0) @binding(0) var<storage, read> input0: array<${valueType}>;
+@group(0) @binding(1) var<storage, read> input1: array<${valueType}>;
+@group(0) @binding(2) var<storage, read> weights: array<${valueType}>;
+@group(0) @binding(3) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+var<workgroup> inputPatch: array<${valueType}, ${patchValues}>;
+
+@compute @workgroup_size(${SPATIAL_CONV_WORKGROUP}, ${SPATIAL_CONV_WORKGROUP}, 1)
+fn main(
+  @builtin(local_invocation_id) localId: vec3<u32>,
+  @builtin(workgroup_id) workgroupId: vec3<u32>
+) {
+  let localLinear =
+    localId.y * ${SPATIAL_CONV_WORKGROUP}u + localId.x;
+  for (
+    var loadIndex = localLinear;
+    loadIndex < ${patchValues}u;
+    loadIndex += ${workgroupThreads}u
+  ) {
+    let patchPixel = loadIndex / ${inputBlocks}u;
+    let inputBlock = loadIndex % ${inputBlocks}u;
+    let patchX = patchPixel % ${SPATIAL_CONV_PATCH}u;
+    let patchY = patchPixel / ${SPATIAL_CONV_PATCH}u;
+    let inputX =
+      i32(workgroupId.x * ${SPATIAL_CONV_WORKGROUP}u + patchX) - 1;
+    let inputY =
+      i32(workgroupId.y * ${SPATIAL_CONV_WORKGROUP}u + patchY) - 1;
+    var value = ${valueType}(0.0);
+    if (
+      inputX >= 0 && inputX < i32(params.outputWidth) &&
+      inputY >= 0 && inputY < i32(params.outputHeight)
+    ) {
+      if (inputBlock < ${sourceBlocks[0]}u) {
+        ${sourceRead(0, 'inputBlock')}
+      } else {
+        ${sourceRead(1, `inputBlock - ${sourceBlocks[0]}u`)}
+      }
+    }
+    inputPatch[loadIndex] = value;
+  }
+  workgroupBarrier();
+
+  let outputX =
+    workgroupId.x * ${SPATIAL_CONV_WORKGROUP}u + localId.x;
+  let outputY =
+    workgroupId.y * ${SPATIAL_CONV_WORKGROUP}u + localId.y;
+  let outputBlock = workgroupId.z;
+  if (
+    outputX >= params.outputWidth || outputY >= params.outputHeight ||
+    outputBlock >= ${outputBlocks}u
+  ) {
+    return;
+  }
+
+  var acc = bias[outputBlock];
+  for (var ky = 0u; ky < 3u; ky++) {
+    for (var kx = 0u; kx < 3u; kx++) {
+      let patchBase =
+        ((localId.y + ky) * ${SPATIAL_CONV_PATCH}u + localId.x + kx) *
+        ${inputBlocks}u;
+      for (var inputBlock = 0u; inputBlock < ${inputBlocks}u; inputBlock++) {
+        ${accumulationCode(
+          'inputPatch[patchBase + inputBlock]',
+          `((((outputBlock * 3u + ky) * 3u + kx) * ${inputBlocks}u + inputBlock) * 4u)`,
+          precision
+        )}
+      }
+    }
+  }
+  let outputIndex =
+    (outputY * params.outputWidth + outputX) * ${outputBlocks}u + outputBlock;
+  outputData[outputIndex] = ${stored};
+}
+`;
+}
+
+export function createInputPackShader(
+  precision: NativeUNetPrecision,
+  sourceCount: number
+) {
+  const outputType = storageVecType(precision);
+  const inputBindings = Array.from(
+    { length: sourceCount },
+    (_, index) =>
+      `@group(0) @binding(${index}) var<storage, read> input${index}: array<vec4<f32>>;`
+  ).join('\n');
+  const readBranches = Array.from({ length: sourceCount }, (_, index) => {
+    const firstChannel = index * 3;
+    return `if (channel < ${firstChannel + 3}u) { return input${index}[pixel][channel - ${firstChannel}u]; }`;
+  }).join('\n  ');
+  const outputBinding = sourceCount;
+  const paramsBinding = sourceCount + 1;
+  return /* wgsl */ `${shaderPreamble(precision)}
+struct Params {
+  width: u32,
+  height: u32,
+  outputBlocks: u32,
+  inputChannels: u32,
+}
+${inputBindings}
+@group(0) @binding(${outputBinding}) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(${paramsBinding}) var<uniform> params: Params;
+
+fn readChannel(pixel: u32, channel: u32) -> f32 {
+  ${readBranches}
+  return 0.0;
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE}, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= params.width || gid.y >= params.height || gid.z >= params.outputBlocks) {
+    return;
+  }
+  let pixel = gid.y * params.width + gid.x;
+  let firstChannel = gid.z * 4u;
+  let value = vec4<f32>(
+    readChannel(pixel, firstChannel),
+    readChannel(pixel, firstChannel + 1u),
+    readChannel(pixel, firstChannel + 2u),
+    readChannel(pixel, firstChannel + 3u)
+  );
+  outputData[pixel * params.outputBlocks + gid.z] = ${storeExpression('value', precision)};
+}
+`;
+}
+
+const SUBGROUP_MATRIX_FEATURE = 'chromium-experimental-subgroup-matrix';
+/** wgpu's feature name; native hosts report it through their device. */
+const COOPERATIVE_MATRIX_FEATURE = 'wgpu-cooperative-matrix';
+const SUBGROUP_MATRIX_TILE_WIDTH = 32;
+// Four subgroups own two output rows each, matching the 2x2 pooling windows.
+const SUBGROUP_MATRIX_TILE_HEIGHT = 8;
+const SUBGROUP_MATRIX_SUBGROUPS = 4;
+// Below this many workgroups a layer uses one output fragment per workgroup.
+const SUBGROUP_MATRIX_MIN_WORKGROUPS = 1024;
+
+interface AdapterSubgroupMatrixInfo {
+  subgroupMinSize?: number;
+  subgroupMaxSize?: number;
+  subgroupMatrixConfigs?: readonly {
+    componentType: string;
+    resultComponentType: string;
+    M: number;
+    N: number;
+    K: number;
+  }[];
+}
+
+/**
+ * Picks a square configuration, preferring f32 accumulation: mixed f16
+ * inputs first, then f32 inputs (whose f16-exact values give the same
+ * products), and f16 accumulation last.
+ */
+export function selectSubgroupMatrixConfig(
+  device: OIDNGPUDevice,
+  accumulation: 'f32' | 'f16' = 'f32'
+): NativeSubgroupMatrixConfig | undefined {
+  const dialect = device.features.has(SUBGROUP_MATRIX_FEATURE)
+    ? 'tint'
+    : device.features.has(COOPERATIVE_MATRIX_FEATURE)
+      ? 'naga'
+      : undefined;
+  if (!dialect || !device.features.has('subgroups')) return undefined;
+  const info = (device as OIDNGPUDevice & { adapterInfo?: OIDNGPUAdapterInfo }).adapterInfo;
+  const subgroupSize = info?.subgroupMaxSize ?? 0;
+  if (!info || !subgroupSize || info.subgroupMinSize !== subgroupSize) return undefined;
+  const preferences: readonly [string, string][] = accumulation === 'f16'
+    ? [['f16', 'f16'], ['f16', 'f32'], ['f32', 'f32']]
+    : [['f16', 'f32'], ['f32', 'f32'], ['f16', 'f16']];
+  const shader16 = device.features.has('shader-f16');
+  for (const [componentType, resultType] of preferences) {
+    if (!shader16 && (componentType === 'f16' || resultType === 'f16')) continue;
+    for (const size of [8, 16] as const) {
+      const match = info.subgroupMatrixConfigs?.find((config) =>
+        config.componentType === componentType &&
+        config.resultComponentType === resultType &&
+        config.M === size && config.N === size && config.K === size);
+      if (match) {
+        return {
+          componentType: componentType as 'f16' | 'f32',
+          resultType: resultType as 'f16' | 'f32',
+          size,
+          subgroupSize,
+          dialect
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+function subgroupMatrixFragments(
+  config: NativeSubgroupMatrixConfig,
+  options: NativeSubgroupMatrixOptions
+) {
+  return options.outputFragments ?? 2;
+}
+
+function subgroupMatrixSharedBytes(
+  config: NativeSubgroupMatrixConfig,
+  outputFragments: number,
+  subPixel: boolean,
+  doubleBuffer: boolean
+) {
+  const component = config.componentType === 'f16' ? 2 : 4;
+  const result = config.resultType === 'f16' ? 2 : 4;
+  const size = config.size;
+  const halo = (SUBGROUP_MATRIX_TILE_HEIGHT + 2) * (SUBGROUP_MATRIX_TILE_WIDTH + 2) * size;
+  const matrices = subPixel ? 16 : 9;
+  return component * (doubleBuffer ? 2 : 1) * (halo + matrices * size * size * outputFragments) +
+    result * SUBGROUP_MATRIX_SUBGROUPS * SUBGROUP_MATRIX_TILE_WIDTH * size;
+}
+
+/** WGSL spelling of the subgroup-matrix operations for one configuration. */
+function subgroupMatrixDialect(config: NativeSubgroupMatrixConfig) {
+  const size = config.size;
+  const naga = config.dialect === 'naga';
+  const matrixType = (scalar: string, tint: string, role: string) => naga
+    ? `coop_mat${size}x${size}<${scalar}, ${role}>`
+    : `subgroup_matrix_${tint}<${scalar}, ${size}, ${size}>`;
+  const result = matrixType(config.resultType, 'result', 'C');
+  return {
+    left: matrixType(config.componentType, 'left', 'A'),
+    right: matrixType(config.componentType, 'right', 'B'),
+    result,
+    load: (type: string, array: string, offset: string, stride: string) => naga
+      ? `coopLoadT<${type}>(&${array}[${offset}], ${stride})`
+      : `subgroupMatrixLoad<${type}, row_major>(&${array}, ${offset}, ${stride})`,
+    store: (array: string, offset: string, value: string, stride: string) => naga
+      ? `coopStoreT(${value}, &${array}[${offset}], ${stride});`
+      : `subgroupMatrixStore<row_major>(&${array}, ${offset}, ${value}, ${stride});`,
+    multiplyAdd: naga ? 'coopMultiplyAdd' : 'subgroupMatrixMultiplyAccumulate',
+    declare: (name: string) => naga ? `var ${name}: ${result};` : `var ${name} = ${result}();`,
+    // Naga provides subgroups without (and rejects) `enable subgroups`.
+    extensions: naga
+      ? 'enable wgpu_cooperative_matrix;'
+      : `enable subgroups;
+enable chromium_experimental_subgroup_matrix;
+diagnostic(off, chromium_experimental.subgroup_matrix_uniformity);`
+  };
+}
+
+/** One workgroup-memory array filled per input-channel chunk. */
+interface SubgroupMatrixStage {
+  array: string;
+  /** vec4 values staged per chunk. */
+  vectors: number;
+  /** vec4 capacity of one buffer half (default `vectors`). */
+  stride?: number;
+  /** WGSL that may assign `value` from `i` (vec4 index) and `stageChunk`. */
+  read: string;
+}
+
+/**
+ * Loop over input-channel chunks that stages `stages` and runs `body` on
+ * them. The body addresses each array at `<array>Base`. Double buffering
+ * prefetches the next chunk into registers while the body runs, then stores
+ * it into the other half of each array: one barrier per chunk instead of two.
+ */
+function subgroupMatrixChunkLoop(
+  chunks: number,
+  stages: readonly SubgroupMatrixStage[],
+  body: string,
+  threads: number,
+  valueType: string,
+  component: string,
+  doubleBuffer: boolean
+) {
+  const storeValue = (stage: SubgroupMatrixStage, value: string, base: string) => `{
+        let staged = vec4<${component}>(${value});
+        let base = ${base} + i * 4u;
+        ${stage.array}[base] = staged.x;
+        ${stage.array}[base + 1u] = staged.y;
+        ${stage.array}[base + 2u] = staged.z;
+        ${stage.array}[base + 3u] = staged.w;
+      }`;
+  // Keep staging loops' trip counts uniform before the matrix operations.
+  // A localIndex-dependent trip count produces nondeterministic results on
+  // NVIDIA Vulkan with runtime checks disabled, despite the following barrier.
+  const direct = (base: (stage: SubgroupMatrixStage) => string) => stages.map((stage) => `
+    for (var batch = 0u; batch < ${Math.ceil(stage.vectors / threads)}u; batch++) {
+      let i = localIndex + batch * ${threads}u;
+      if (i < ${stage.vectors}u) {
+        var value = ${valueType}(0.0);
+        ${stage.read}
+        ${storeValue(stage, 'value', base(stage))}
+      }
+    }`).join('');
+  const bases = (buffer: string) => stages
+    .map((stage) => `let ${stage.array}Base = ${buffer} * ${(stage.stride ?? stage.vectors) * 4}u;`)
+    .join('\n    ');
+  if (!doubleBuffer || chunks < 2) {
+    return /* wgsl */ `
+  for (var chunk = 0u; chunk < ${chunks}u; chunk++) {
+    let stageChunk = chunk;
+    ${bases('0u')}
+    ${direct((stage) => `${stage.array}Base`)}
+    workgroupBarrier();
+    ${body}
+    workgroupBarrier();
+  }`;
+  }
+  const registers = stages.map((stage) => Math.ceil(stage.vectors / threads));
+  const prefetch = stages.map((stage, index) =>
+    Array.from({ length: registers[index] }, (_, slot) => `
+      {
+        let i = localIndex + ${slot * threads}u;
+        var value = ${valueType}(0.0);
+        if (i < ${stage.vectors}u) {
+          ${stage.read}
+        }
+        prefetch${index}_${slot} = value;
+      }`).join('')).join('');
+  const declarations = stages.map((stage, index) =>
+    Array.from({ length: registers[index] }, (_, slot) =>
+      `var prefetch${index}_${slot} = ${valueType}(0.0);`).join('\n    ')).join('\n    ');
+  const storePrefetched = stages.map((stage, index) =>
+    Array.from({ length: registers[index] }, (_, slot) => `
+      {
+        let i = localIndex + ${slot * threads}u;
+        if (i < ${stage.vectors}u) ${storeValue(stage, `prefetch${index}_${slot}`, `next * ${(stage.stride ?? stage.vectors) * 4}u`)}
+      }`).join('')).join('');
+  return /* wgsl */ `
+  {
+    let stageChunk = 0u;
+    ${direct(() => '0u')}
+  }
+  workgroupBarrier();
+  for (var chunk = 0u; chunk < ${chunks}u; chunk++) {
+    let buffer = chunk & 1u;
+    let next = 1u - buffer;
+    ${bases('buffer')}
+    ${declarations}
+    if (chunk + 1u < ${chunks}u) {
+      let stageChunk = chunk + 1u;
+      ${prefetch}
+    }
+    ${body}
+    if (chunk + 1u < ${chunks}u) {
+      ${storePrefetched}
+    }
+    workgroupBarrier();
+  }`;
+}
+
+/** Fixed native tap offsets preserve the chunk/tap reduction order. */
+function subgroupMatrixTapLoop(config: NativeSubgroupMatrixConfig, body: string) {
+  // Explicit taps reduce native matrix latency on M4 Max. Keep the browser
+  // shader's loop form and both paths' original accumulation order.
+  return config.dialect === 'naga'
+    ? Array.from({ length: 9 }, (_, tap) => `{ let tap = ${tap}u; ${body} }`).join('\n')
+    : `for (var tap = 0u; tap < 9u; tap++) { ${body} }`;
+}
+
+/**
+ * 3x3 convolution as an implicit GEMM on subgroup matrices. Each workgroup
+ * computes 8 rows x 32 pixels x (fragments x S) output channels. For every
+ * chunk of S input channels it stages a zero-padded halo tile and the chunk's
+ * weights in workgroup memory, so each A fragment is a contiguous run of S
+ * pixels for one tap. A decoder reads its concatenated sources (one of them
+ * nearest-upsampled) while staging, like the other fused decoder kernels.
+ */
+function createSubgroupMatrixConvShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  inputBlocks: number,
+  outputBlocks: number,
+  config: NativeSubgroupMatrixConfig,
+  outputFragments: number,
+  doubleBuffer: boolean,
+  decoder?: { sourceBlocks: readonly number[]; upsampledSource: 0 | 1 },
+  pool = false
+) {
+  const size = config.size;
+  const component = config.componentType;
+  const result = config.resultType;
+  const tileWidth = SUBGROUP_MATRIX_TILE_WIDTH;
+  const haloWidth = tileWidth + 2;
+  const haloRows = SUBGROUP_MATRIX_TILE_HEIGHT + 2;
+  const buffers = doubleBuffer ? 2 : 1;
+  const chunkBlocks = size / 4;
+  const chunks = Math.ceil(inputBlocks / chunkBlocks);
+  const outputChannels = outputFragments * size;
+  const pixelFragments = tileWidth / size;
+  const threads = SUBGROUP_MATRIX_SUBGROUPS * config.subgroupSize;
+  const valueType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const { left, right, load, store, multiplyAdd, declare, extensions } = subgroupMatrixDialect(config);
+  const accumulators: string[] = [];
+  for (let row = 0; row < 2; row++) {
+    for (let pixel = 0; pixel < pixelFragments; pixel++) {
+      for (let fragment = 0; fragment < outputFragments; fragment++) {
+        accumulators.push(`acc${row}_${pixel}_${fragment}`);
+      }
+    }
+  }
+  const declarations = accumulators.map(declare).join('\n  ');
+  const rightLoads = Array.from({ length: outputFragments }, (_, fragment) =>
+    `let b${fragment} = ${load(right, 'weightTile', `weightTileBase + tap * ${size * outputChannels}u + ${fragment * size}u`, `${outputChannels}u`)};`
+  ).join('\n      ');
+  const multiplies: string[] = [];
+  for (let row = 0; row < 2; row++) {
+    for (let pixel = 0; pixel < pixelFragments; pixel++) {
+      multiplies.push(
+        `{
+        let a = ${load(left, 'inputTile', `inputTileBase + ((rowBase + ${row}u + ky) * ${haloWidth}u + ${pixel * size}u + kx) * ${size}u`, `${size}u`)};
+        ${Array.from({ length: outputFragments }, (_, fragment) =>
+          `acc${row}_${pixel}_${fragment} = ${multiplyAdd}(a, b${fragment}, acc${row}_${pixel}_${fragment});`
+        ).join('\n        ')}
+      }`
+      );
+    }
+  }
+  const tapBody = `let ky = tap / 3u;
+      let kx = tap % 3u;
+      ${rightLoads}
+      ${multiplies.join('\n      ')}`;
+  const taps = subgroupMatrixTapLoop(config, tapBody);
+  const epilogues: string[] = [];
+  if (pool) {
+    // Bias, ReLU and FP16 conversion are monotone, so pooling before them
+    // preserves the separate conv -> FP16 -> max-pool result for finite values.
+    for (let fragment = 0; fragment < outputFragments; fragment++) {
+      epilogues.push(`{
+    var pooled = vec4<f32>(-3.402823e38);
+    let pixel = lane / ${chunkBlocks}u;
+    let outputBlock = blockBase + ${fragment * chunkBlocks}u + lane % ${chunkBlocks}u;
+    ${Array.from({ length: 2 }, (_, row) => `
+    ${Array.from({ length: pixelFragments }, (_, pixel) =>
+      store('resultTile', `resultBase + ${pixel * size * size}u`, `acc${row}_${pixel}_${fragment}`, `${size}u`)
+    ).join('\n    ')}
+    workgroupBarrier();
+    {
+      let base = resultBase + pixel * ${size * 2}u + (lane % ${chunkBlocks}u) * 4u;
+      let first = vec4<f32>(resultTile[base], resultTile[base + 1u], resultTile[base + 2u], resultTile[base + 3u]);
+      let second = vec4<f32>(resultTile[base + ${size}u], resultTile[base + ${size + 1}u], resultTile[base + ${size + 2}u], resultTile[base + ${size + 3}u]);
+      if (tileY + rowBase + ${row}u < params.inputHeight) {
+        pooled = max(pooled, first);
+        if (tileX + pixel * 2u + 1u < params.inputWidth) { pooled = max(pooled, second); }
+      }
+    }
+    workgroupBarrier();`).join('\n    ')}
+    let outputX = tileX / 2u + pixel;
+    let outputY = (tileY + rowBase) / 2u;
+    if (outputX < params.outputWidth && outputY < params.outputHeight && outputBlock < ${outputBlocks}u) {
+      let acc = pooled + bias[outputBlock];
+      outputData[(outputY * params.outputWidth + outputX) * ${outputBlocks}u + outputBlock] = ${storeExpression(activationExpression('acc', activation), outputPrecision)};
+    }
+  }`);
+    }
+  } else {
+    for (let row = 0; row < 2; row++) {
+      for (let fragment = 0; fragment < outputFragments; fragment++) {
+        epilogues.push(`{
+    ${Array.from({ length: pixelFragments }, (_, pixel) =>
+      store('resultTile', `resultBase + ${pixel * size * size}u`, `acc${row}_${pixel}_${fragment}`, `${size}u`)
+    ).join('\n    ')}
+    workgroupBarrier();
+    let outputY = tileY + rowBase + ${row}u;
+    for (var e = lane; e < ${tileWidth * chunkBlocks}u; e += ${config.subgroupSize}u) {
+      let pixel = e / ${chunkBlocks}u;
+      let outputX = tileX + pixel;
+      let outputBlock = blockBase + ${fragment * chunkBlocks}u + e % ${chunkBlocks}u;
+      if (outputX < params.outputWidth && outputY < params.outputHeight && outputBlock < ${outputBlocks}u) {
+        let base = resultBase + pixel * ${size}u + (e % ${chunkBlocks}u) * 4u;
+        let acc = vec4<f32>(f32(resultTile[base]), f32(resultTile[base + 1u]),
+          f32(resultTile[base + 2u]), f32(resultTile[base + 3u])) + bias[outputBlock];
+        outputData[(outputY * params.outputWidth + outputX) * ${outputBlocks}u + outputBlock] = ${storeExpression(activationExpression('acc', activation), outputPrecision)};
+      }
+    }
+    workgroupBarrier();
+  }`);
+      }
+    }
+  }
+  const sourceRead = decoder
+    ? (() => {
+        const [blocks0, blocks1] = decoder.sourceBlocks;
+        const coordinates = (source: 0 | 1) => source === decoder.upsampledSource
+          ? `min(u32(inputY) / 2u, params.source${source}Height - 1u) * params.source${source}Width + min(u32(inputX) / 2u, params.source${source}Width - 1u)`
+          : `u32(inputY) * params.source${source}Width + u32(inputX)`;
+        return /* wgsl */ `if (block < ${blocks0}u) {
+          value = input0[(${coordinates(0)}) * ${blocks0}u + block];
+        } else {
+          value = input1[(${coordinates(1)}) * ${blocks1}u + block - ${blocks0}u];
+        }`;
+      })()
+    : `value = inputData[(u32(inputY) * params.inputWidth + u32(inputX)) * ${inputBlocks}u + block];`;
+  const params = decoder
+    ? `struct Params {
+  outputWidth: u32,
+  outputHeight: u32,
+  outputBlocks: u32,
+  inputBlocks: u32,
+  source0Width: u32,
+  source0Height: u32,
+  source1Width: u32,
+  source1Height: u32,
+}
+@group(0) @binding(0) var<storage, read> input0: array<${valueType}>;
+@group(0) @binding(1) var<storage, read> input1: array<${valueType}>;
+@group(0) @binding(2) var<storage, read> weights: array<${valueType}>;
+@group(0) @binding(3) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(5) var<uniform> params: Params;`
+    : `struct Params {
+  inputWidth: u32,
+  inputHeight: u32,
+  outputWidth: u32,
+  outputHeight: u32,
+  inputBlocks: u32,
+  outputBlocks: u32,
+}
+@group(0) @binding(0) var<storage, read> inputData: array<${valueType}>;
+@group(0) @binding(1) var<storage, read> weights: array<${valueType}>;
+@group(0) @binding(2) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(4) var<uniform> params: Params;`;
+  const imageWidth = decoder ? 'params.outputWidth' : 'params.inputWidth';
+  const imageHeight = decoder ? 'params.outputHeight' : 'params.inputHeight';
+  const needsF16 = precision === 'fp16' || outputPrecision === 'fp16' ||
+    component === 'f16' || result === 'f16';
+  return /* wgsl */ `${needsF16 ? 'enable f16;\n' : ''}${extensions}
+${params}
+
+var<workgroup> inputTile: array<${component}, ${buffers * haloRows * haloWidth * size}>;
+var<workgroup> weightTile: array<${component}, ${buffers * 9 * size * outputChannels}>;
+var<workgroup> resultTile: array<${result}, ${SUBGROUP_MATRIX_SUBGROUPS * tileWidth * size}>;
+
+@compute @workgroup_size(${threads})
+fn main(
+  @builtin(local_invocation_index) localIndex: u32,
+  @builtin(workgroup_id) workgroupId: vec3<u32>,
+  @builtin(subgroup_id) subgroup: u32,
+  @builtin(subgroup_invocation_id) lane: u32
+) {
+  let tileX = workgroupId.x * ${tileWidth}u;
+  let tileY = workgroupId.y * ${SUBGROUP_MATRIX_TILE_HEIGHT}u;
+  let blockBase = workgroupId.z * ${outputChannels / 4}u;
+  let rowBase = subgroup * 2u;
+  let resultBase = subgroup * ${tileWidth * size}u;
+  ${declarations}
+
+  ${subgroupMatrixChunkLoop(chunks, [
+    {
+      array: 'inputTile',
+      vectors: haloRows * haloWidth * chunkBlocks,
+      read: /* wgsl */ `let pixel = i / ${chunkBlocks}u;
+      let block = stageChunk * ${chunkBlocks}u + i % ${chunkBlocks}u;
+      let inputX = i32(tileX + pixel % ${haloWidth}u) - 1;
+      let inputY = i32(tileY + pixel / ${haloWidth}u) - 1;
+      if (block < ${inputBlocks}u && inputX >= 0 && inputY >= 0 &&
+          inputX < i32(${imageWidth}) && inputY < i32(${imageHeight})) {
+        ${sourceRead}
+      }`
+    },
+    {
+      array: 'weightTile',
+      vectors: 9 * size * outputChannels / 4,
+      read: /* wgsl */ `let quad = i % ${outputChannels / 4}u;
+      let row = i / ${outputChannels / 4}u;
+      let tap = row / ${size}u;
+      let inputChannel = stageChunk * ${size}u + row % ${size}u;
+      let outputBlock = blockBase + quad;
+      if (inputChannel < ${inputBlocks * 4}u && outputBlock < ${outputBlocks}u) {
+        value = weights[((tap * ${inputBlocks}u + inputChannel / 4u) * ${outputBlocks}u + outputBlock) * 4u + inputChannel % 4u];
+      }`
+    }
+  ], taps, threads, valueType, component, doubleBuffer)}
+
+  ${epilogues.join('\n  ')}
+}
+`;
+}
+
+// Sub-pixel decomposition of a 3x3 convolution of a 2x nearest-upsampled
+// source: along each axis, output phase p reads two source pixels at offsets
+// SUBPIXEL_OFFSETS[p] with the 3x3 weight rows SUBPIXEL_TAPS[p][d] summed.
+const SUBPIXEL_OFFSETS: readonly (readonly number[])[] = [[-1, 0], [0, 1]];
+const SUBPIXEL_TAPS: readonly (readonly (readonly number[])[])[] = [[[0], [1, 2]], [[0, 1], [2]]];
+
+/** Upsampled-source weight matrices per chunk: 4 phases x 2x2 taps. */
+const SUBPIXEL_MATRICES = 16;
+
+/**
+ * Packs a fused upsample/concat decoder for `createSubgroupMatrixSubpixelShader`:
+ * first the upsampled source's combined weights, vec4 index
+ * (((phase * 4 + tap) * upBlocks + block) * outputBlocks + outputBlock) * 4 + lane
+ * with phase = py * 2 + px and tap = dy * 2 + dx, then the other source's
+ * 3x3 weights in the k-major layout. Combined weights are summed in f32 and
+ * rounded once to the storage precision.
+ */
+function packSubpixelDecoderTensors(
+  device: OIDNGPUDevice,
+  id: string,
+  tensors: ValidatedConvTensor,
+  precision: NativeUNetPrecision,
+  sourceBlocks: readonly number[],
+  upsampledSource: 0 | 1
+): PackedConvBuffers {
+  const outputBlocks = blocksForChannels(tensors.outputChannels);
+  const upBlocks = sourceBlocks[upsampledSource];
+  const skipBlocks = sourceBlocks[1 - upsampledSource];
+  const upBase = upsampledSource === 0 ? 0 : sourceBlocks[0] * 4;
+  const skipBase = upsampledSource === 0 ? sourceBlocks[0] * 4 : 0;
+  const upValues = SUBPIXEL_MATRICES * upBlocks * outputBlocks * 16;
+  const values = new Float32Array(upValues + 9 * skipBlocks * outputBlocks * 16);
+  const source = tensorFloat32Values(tensors.weight);
+  const weight = (outputChannel: number, inputChannel: number, y: number, x: number) =>
+    outputChannel < tensors.outputChannels && inputChannel < tensors.inputChannels
+      ? source[((outputChannel * tensors.inputChannels + inputChannel) * 3 + y) * 3 + x]
+      : 0;
+  for (let outputChannel = 0; outputChannel < outputBlocks * 4; outputChannel++) {
+    const outputBlock = outputChannel >> 2;
+    const outputLane = outputChannel & 3;
+    for (let channel = 0; channel < upBlocks * 4; channel++) {
+      for (let phase = 0; phase < 4; phase++) {
+        for (let tap = 0; tap < 4; tap++) {
+          let sum = 0;
+          for (const y of SUBPIXEL_TAPS[phase >> 1][tap >> 1]) {
+            for (const x of SUBPIXEL_TAPS[phase & 1][tap & 1]) {
+              sum += weight(outputChannel, upBase + channel, y, x);
+            }
+          }
+          const vector = ((phase * 4 + tap) * upBlocks + (channel >> 2)) * outputBlocks + outputBlock;
+          values[vector * 16 + (channel & 3) * 4 + outputLane] = sum;
+        }
+      }
+    }
+    for (let channel = 0; channel < skipBlocks * 4; channel++) {
+      for (let tap = 0; tap < 9; tap++) {
+        const vector = (tap * skipBlocks + (channel >> 2)) * outputBlocks + outputBlock;
+        values[upValues + vector * 16 + (channel & 3) * 4 + outputLane] =
+          weight(outputChannel, skipBase + channel, (tap / 3) | 0, tap % 3);
+      }
+    }
+  }
+  let bytes: Uint8Array;
+  if (precision === 'fp16') {
+    const half = new Uint16Array(values.length);
+    for (let index = 0; index < values.length; index++) half[index] = numberToHalfBits(values[index]);
+    bytes = new Uint8Array(half.buffer);
+  } else {
+    bytes = new Uint8Array(values.buffer);
+  }
+  const packedBias = new Float32Array(outputBlocks * 4);
+  packedBias.set(tensorFloat32Values(tensors.bias));
+  const weights = createMappedBuffer(device, `oidn/${id}/weights/${precision}/subpixel`, bytes, BufferUsage.STORAGE);
+  try {
+    return {
+      weights,
+      weightLayout: 'k-major',
+      bias: createMappedBuffer(device, `oidn/${id}/bias`, new Uint8Array(packedBias.buffer), BufferUsage.STORAGE)
+    };
+  } catch (error) {
+    weights.destroy();
+    throw error;
+  }
+}
+
+/**
+ * Fused upsample/concat decoder convolution with the sub-pixel decomposition
+ * (weights from `packSubpixelDecoderTensors`). Subgroup s computes output
+ * phase (py, px) = (s >> 1, s & 1): rows py, py + 2, ... of the 8-row tile and
+ * every other pixel from px, so each fragment holds S same-phase pixels and
+ * each combined weight tile feeds all of the subgroup's fragments. The
+ * upsampled source is staged at half resolution, where a fragment is S
+ * contiguous source pixels; the other source keeps its 3x3 taps and loads
+ * its fragments from the full-resolution halo with a two-pixel stride.
+ */
+function createSubgroupMatrixSubpixelShader(
+  precision: NativeUNetPrecision,
+  outputPrecision: NativeUNetPrecision,
+  activation: Conv2DNodeSpec['activation'],
+  outputBlocks: number,
+  config: NativeSubgroupMatrixConfig,
+  outputFragments: number,
+  sourceBlocks: readonly number[],
+  upsampledSource: 0 | 1,
+  doubleBuffer: boolean
+) {
+  const size = config.size;
+  const buffers = doubleBuffer ? 2 : 1;
+  const component = config.componentType;
+  const result = config.resultType;
+  const tileWidth = SUBGROUP_MATRIX_TILE_WIDTH;
+  const tileHeight = SUBGROUP_MATRIX_TILE_HEIGHT;
+  const haloWidth = tileWidth + 2;
+  const haloRows = tileHeight + 2;
+  const upWidth = tileWidth / 2 + 2;
+  const upRows = tileHeight / 2 + 2;
+  const chunkBlocks = size / 4;
+  const upBlocks = sourceBlocks[upsampledSource];
+  const skipBlocks = sourceBlocks[1 - upsampledSource];
+  const upChunks = Math.ceil(upBlocks / chunkBlocks);
+  const skipChunks = Math.ceil(skipBlocks / chunkBlocks);
+  const outputChannels = outputFragments * size;
+  const rows = tileHeight / 2;
+  const segments = tileWidth / 2 / size;
+  const threads = SUBGROUP_MATRIX_SUBGROUPS * config.subgroupSize;
+  const valueType = storageVecType(precision);
+  const outputType = storageVecType(outputPrecision);
+  const { left, right, load, store, multiplyAdd, declare, extensions } = subgroupMatrixDialect(config);
+  const accumulator = (row: number, segment: number, fragment: number) =>
+    `acc${row}_${segment}_${fragment}`;
+  const declarations: string[] = [];
+  for (let row = 0; row < rows; row++) {
+    for (let segment = 0; segment < segments; segment++) {
+      for (let fragment = 0; fragment < outputFragments; fragment++) {
+        declarations.push(declare(accumulator(row, segment, fragment)));
+      }
+    }
+  }
+  const multiplyRows = (aOffset: (row: number, segment: number) => string, stride: string) => {
+    const lines: string[] = [];
+    for (let row = 0; row < rows; row++) {
+      for (let segment = 0; segment < segments; segment++) {
+        lines.push(`{
+        let a = ${load(left, 'inputTile', `inputTileBase + ${aOffset(row, segment)}`, stride)};
+        ${Array.from({ length: outputFragments }, (_, fragment) =>
+          `${accumulator(row, segment, fragment)} = ${multiplyAdd}(a, b${fragment}, ${accumulator(row, segment, fragment)});`
+        ).join('\n        ')}
+      }`);
+      }
+    }
+    return lines.join('\n      ');
+  };
+  const rightLoads = (matrix: string) => Array.from({ length: outputFragments }, (_, fragment) =>
+    `let b${fragment} = ${load(right, 'weightTile', `weightTileBase + ${matrix} * ${size * outputChannels}u + ${fragment * size}u`, `${outputChannels}u`)};`
+  ).join('\n      ');
+  const sourceIndex = (source: 0 | 1, x: string, y: string) =>
+    `(${y} * params.source${source}Width + ${x}) * ${sourceBlocks[source]}u`;
+  // Each half of a double-buffered array must fit the larger of the two loops.
+  const inputVectors = Math.max(haloRows * haloWidth, upRows * upWidth) * chunkBlocks;
+  const weightVectors = SUBPIXEL_MATRICES * size * outputChannels / 4;
+  const weightStage = (matrices: number, blocks: number, base: number): SubgroupMatrixStage => ({
+    array: 'weightTile',
+    vectors: matrices * size * outputChannels / 4,
+    stride: weightVectors,
+    read: /* wgsl */ `let quad = i % ${outputChannels / 4}u;
+      let row = i / ${outputChannels / 4}u;
+      let matrix = row / ${size}u;
+      let inputChannel = stageChunk * ${size}u + row % ${size}u;
+      let outputBlock = blockBase + quad;
+      if (inputChannel < ${blocks * 4}u && outputBlock < ${outputBlocks}u) {
+        value = weights[${base}u + ((matrix * ${blocks}u + inputChannel / 4u) * ${outputBlocks}u + outputBlock) * 4u + inputChannel % 4u];
+      }`
+  });
+  const inputStage = (rowsStaged: number, width: number, read: string): SubgroupMatrixStage => ({
+    array: 'inputTile',
+    vectors: rowsStaged * width * chunkBlocks,
+    stride: inputVectors,
+    read: /* wgsl */ `let pixel = i / ${chunkBlocks}u;
+      let block = stageChunk * ${chunkBlocks}u + i % ${chunkBlocks}u;
+      ${read}`
+  });
+  const upRead = /* wgsl */ `let inputX = i32(tileX / 2u + pixel % ${upWidth}u) - 1;
+      let inputY = i32(tileY / 2u + pixel / ${upWidth}u) - 1;
+      if (block < ${upBlocks}u && inputX >= 0 && inputY >= 0 &&
+          inputX < i32(params.source${upsampledSource}Width) && inputY < i32(params.source${upsampledSource}Height)) {
+        value = input${upsampledSource}[${sourceIndex(upsampledSource, 'u32(inputX)', 'u32(inputY)')} + block];
+      }`;
+  const skipSource = (1 - upsampledSource) as 0 | 1;
+  const skipRead = /* wgsl */ `let inputX = i32(tileX + pixel % ${haloWidth}u) - 1;
+      let inputY = i32(tileY + pixel / ${haloWidth}u) - 1;
+      if (block < ${skipBlocks}u && inputX >= 0 && inputY >= 0 &&
+          inputX < i32(params.outputWidth) && inputY < i32(params.outputHeight)) {
+        value = input${skipSource}[${sourceIndex(skipSource, 'u32(inputX)', 'u32(inputY)')} + block];
+      }`;
+  const upMultiplies: string[] = [];
+  for (let tapY = 0; tapY < 2; tapY++) {
+    for (let tapX = 0; tapX < 2; tapX++) {
+      // Source offsets of this tap for the subgroup's phase, plus the halo.
+      upMultiplies.push(`{
+      let matrix = phase * 4u + ${tapY * 2 + tapX}u;
+      let offsetY = select(${SUBPIXEL_OFFSETS[0][tapY] + 1}u, ${SUBPIXEL_OFFSETS[1][tapY] + 1}u, phaseY == 1u);
+      let offsetX = select(${SUBPIXEL_OFFSETS[0][tapX] + 1}u, ${SUBPIXEL_OFFSETS[1][tapX] + 1}u, phaseX == 1u);
+      ${rightLoads('matrix')}
+      ${multiplyRows((row, segment) => `((${row}u + offsetY) * ${upWidth}u + ${segment * size}u + offsetX) * ${size}u`, `${size}u`)}
+    }`);
+    }
+  }
+  const skipTapBody = `let ky = tap / 3u;
+      let kx = tap % 3u;
+      ${rightLoads('tap')}
+      ${multiplyRows((row, segment) => `((phaseY + ${row * 2}u + ky) * ${haloWidth}u + phaseX + kx + ${segment * size * 2}u) * ${size}u`, `${size * 2}u`)}`;
+  const skipTaps = subgroupMatrixTapLoop(config, skipTapBody);
+  const epilogues: string[] = [];
+  for (let row = 0; row < rows; row++) {
+    for (let fragment = 0; fragment < outputFragments; fragment++) {
+      epilogues.push(`{
+    ${Array.from({ length: segments }, (_, segment) =>
+      store('resultTile', `resultBase + ${segment * size * size}u`, accumulator(row, segment, fragment), `${size}u`)
+    ).join('\n    ')}
+    workgroupBarrier();
+    let outputY = tileY + phaseY + ${row * 2}u;
+    for (var e = lane; e < ${(tileWidth / 2) * chunkBlocks}u; e += ${config.subgroupSize}u) {
+      let pixel = e / ${chunkBlocks}u;
+      let outputX = tileX + phaseX + pixel * 2u;
+      let outputBlock = blockBase + ${fragment * chunkBlocks}u + e % ${chunkBlocks}u;
+      if (outputX < params.outputWidth && outputY < params.outputHeight && outputBlock < ${outputBlocks}u) {
+        let base = resultBase + pixel * ${size}u + (e % ${chunkBlocks}u) * 4u;
+        let acc = vec4<f32>(f32(resultTile[base]), f32(resultTile[base + 1u]),
+          f32(resultTile[base + 2u]), f32(resultTile[base + 3u])) + bias[outputBlock];
+        outputData[(outputY * params.outputWidth + outputX) * ${outputBlocks}u + outputBlock] = ${storeExpression(activationExpression('acc', activation), outputPrecision)};
+      }
+    }
+    workgroupBarrier();
+  }`);
+    }
+  }
+  const needsF16 = precision === 'fp16' || outputPrecision === 'fp16' ||
+    component === 'f16' || result === 'f16';
+  return /* wgsl */ `${needsF16 ? 'enable f16;\n' : ''}${extensions}
+struct Params {
+  outputWidth: u32,
+  outputHeight: u32,
+  outputBlocks: u32,
+  inputBlocks: u32,
+  source0Width: u32,
+  source0Height: u32,
+  source1Width: u32,
+  source1Height: u32,
+}
+@group(0) @binding(0) var<storage, read> input0: array<${valueType}>;
+@group(0) @binding(1) var<storage, read> input1: array<${valueType}>;
+@group(0) @binding(2) var<storage, read> weights: array<${valueType}>;
+@group(0) @binding(3) var<storage, read> bias: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> outputData: array<${outputType}>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+var<workgroup> inputTile: array<${component}, ${buffers * inputVectors * 4}>;
+var<workgroup> weightTile: array<${component}, ${buffers * weightVectors * 4}>;
+var<workgroup> resultTile: array<${result}, ${SUBGROUP_MATRIX_SUBGROUPS * (tileWidth / 2) * size}>;
+
+@compute @workgroup_size(${threads})
+fn main(
+  @builtin(local_invocation_index) localIndex: u32,
+  @builtin(workgroup_id) workgroupId: vec3<u32>,
+  @builtin(subgroup_id) subgroup: u32,
+  @builtin(subgroup_invocation_id) lane: u32
+) {
+  let tileX = workgroupId.x * ${tileWidth}u;
+  let tileY = workgroupId.y * ${tileHeight}u;
+  let blockBase = workgroupId.z * ${outputChannels / 4}u;
+  let phase = subgroup;
+  let phaseY = subgroup >> 1u;
+  let phaseX = subgroup & 1u;
+  let resultBase = subgroup * ${(tileWidth / 2) * size}u;
+  ${declarations.join('\n  ')}
+
+  ${subgroupMatrixChunkLoop(upChunks, [inputStage(upRows, upWidth, upRead), weightStage(SUBPIXEL_MATRICES, upBlocks, 0)],
+    upMultiplies.join('\n    '), threads, valueType, component, doubleBuffer)}
+
+  ${subgroupMatrixChunkLoop(skipChunks, [
+    inputStage(haloRows, haloWidth, skipRead),
+    weightStage(9, skipBlocks, SUBPIXEL_MATRICES * upBlocks * outputBlocks * 4)
+  ], skipTaps, threads, valueType, component, doubleBuffer)}
+
+  ${epilogues.join('\n  ')}
+}
+`;
+}
+
+function executableInputs(node: ExecutableModelNode): readonly string[] {
+  if (node.op === 'concat') return node.inputs;
+  if (node.op === 'fusedUpsampleConcatConv2d') {
+    return node.inputs.map((input) => input.value);
+  }
+  return [node.input];
+}
+
+export function resolveNativeUNetPrecision(
+  device: OIDNGPUDevice,
+  requested: NativeUNetPrecisionSetting = 'auto'
+): NativeUNetPrecision {
+  const hasShaderF16 = device.features.has('shader-f16');
+  if (requested === 'fp16' && !hasShaderF16) {
+    throw new Error(
+      'OIDN FP16 was requested but the OIDNGPUDevice does not have shader-f16 enabled'
+    );
+  }
+  if (requested === 'auto') return hasShaderF16 ? 'fp16' : 'fp32';
+  return requested;
+}
+
+/**
+ * Native, model-driven OIDN U-Net executor without asynchronous operations, so
+ * that scriptc can compile it for native hosts. `NativeUNetExecutor` adds the
+ * browser's asynchronous preparation, CPU readback and profiling.
+ */
+export class NativeUNetCore {
+  readonly usedKernels = new Set<NativeUNetKernel>();
+
+  /** Immutable packed weights and biases, for native resource sharing. */
+  get weightBuffers(): OIDNGPUBuffer[] {
+    return [...this._packedConvs.values()].flatMap(packed => [packed.weights, packed.bias]);
+  }
+
+  readonly precision: NativeUNetPrecision;
+  readonly kernelSetting: NativeUNetKernelSetting;
+  readonly gemm: Readonly<Required<NativeUNetGemmOptions>>;
+  readonly maxSpatialInputBlocks: number;
+  readonly subgroupsAvailable: boolean;
+  /** Selected configuration when the `subgroup-matrix` kernel can run. */
+  readonly subgroupMatrix?: NativeSubgroupMatrixConfig;
+  readonly subgroupMatrixOutputFragments: number;
+  readonly subgroupMatrixSubPixel: boolean;
+  readonly subgroupMatrixDoubleBuffer: boolean;
+  private _subgroupMatrixFixedFragments: boolean;
+
+  protected _model: UNetModelGraph;
+  private _gemmByOutputBlocks = new Map<number, Readonly<Required<NativeUNetGemmOptions>>>();
+  private _packedConvs = new Map<string, PackedConvBuffers>();
+  protected _pipelineCache: Map<string, OIDNGPUComputePipeline>;
+  private _executionCache = new Map<string, CachedExecution>();
+  protected _retiredExecutions = new Set<CachedExecution>();
+  private _clock = 0;
+  private _shapeCacheSize: number;
+  private _profileNextExecution = false;
+  protected _profileOperations = 0;
+  protected _resources = new OIDNResourceTracker();
+  protected _disposed = false;
+
+  constructor(
+    protected _device: OIDNGPUDevice,
+    model: ValidatedUNetModel,
+    options: NativeUNetOptions = {}
+  ) {
+    this._pipelineCache = sharedPipelineCache(_device);
+    this.precision = resolveNativeUNetPrecision(
+      _device,
+      options.precision ?? 'auto'
+    );
+    this.kernelSetting = options.kernel ?? 'auto';
+    const workgroupSize = options.gemm?.workgroupSize ?? [8, 8];
+    this.gemm = Object.freeze({
+      tilePolicy: options.gemm?.tilePolicy ?? (options.gemm?.workgroupSize ? 'fixed' : 'output-aligned'),
+      decoderLoad: options.gemm?.decoderLoad ?? 'per-load',
+      decoderSubPixel: options.gemm?.decoderSubPixel ?? (this.precision === 'fp16'),
+      unrollRows: options.gemm?.unrollRows ?? false,
+      poolLayout: options.gemm?.poolLayout ?? 'channels',
+      sharedLayout: options.gemm?.sharedLayout ?? (this.precision === 'fp16' ? 'padded-input' : 'padded'),
+      accumulationOrder: options.gemm?.accumulationOrder ?? 'k-major',
+      finalLayer: options.gemm?.finalLayer ?? 'shared-auto',
+      loadMode: options.gemm?.loadMode ?? 'native',
+      addressMode: options.gemm?.addressMode ?? 'incremental',
+      weightLayout: options.gemm?.weightLayout ?? 'k-major',
+      rowsPerThread: options.gemm?.rowsPerThread ?? 8,
+      workgroupSize: Object.freeze([workgroupSize[0], workgroupSize[1]]) as NativeUNetGemmWorkgroup
+    });
+    if (!['fixed', 'output-aligned'].includes(this.gemm.tilePolicy)) {
+      throw new Error(`Unsupported GEMM tile policy: ${this.gemm.tilePolicy}`);
+    }
+    if (!['per-load', 'source-first'].includes(this.gemm.decoderLoad)) {
+      throw new Error(`Unsupported GEMM decoder load: ${this.gemm.decoderLoad}`);
+    }
+    if (!['spatial', 'channels'].includes(this.gemm.poolLayout)) {
+      throw new Error(`Unsupported GEMM pool layout: ${this.gemm.poolLayout}`);
+    }
+    if (!['linear', 'padded', 'padded-input', 'padded-weights'].includes(this.gemm.sharedLayout)) {
+      throw new Error(`Unsupported GEMM shared layout: ${this.gemm.sharedLayout}`);
+    }
+    if (!['k-major', 'row-major'].includes(this.gemm.accumulationOrder)) {
+      throw new Error(`Unsupported GEMM accumulation order: ${this.gemm.accumulationOrder}`);
+    }
+    if (!['direct', 'shared-input', 'shared-input-weights', 'shared-auto'].includes(this.gemm.finalLayer)) {
+      throw new Error(`Unsupported GEMM final layer: ${this.gemm.finalLayer}`);
+    }
+    if (!['native', 'packed-weights', 'packed-all'].includes(this.gemm.loadMode)) {
+      throw new Error(`Unsupported GEMM load mode: ${this.gemm.loadMode}`);
+    }
+    if (!['analytic', 'incremental', 'base-offset'].includes(this.gemm.addressMode)) {
+      throw new Error(`Unsupported GEMM address mode: ${this.gemm.addressMode}`);
+    }
+    if (!['output-major', 'k-major'].includes(this.gemm.weightLayout)) {
+      throw new Error(`Unsupported GEMM weight layout: ${this.gemm.weightLayout}`);
+    }
+    const tile = gemmTile(this.gemm);
+    const tileStorageBytes =
+      (gemmSharedSizes(this.gemm).input + gemmSharedSizes(this.gemm).weights) *
+      4 * (this.precision === 'fp16' ? 2 : 4);
+    if (
+      ![2, 4, 8].includes(tile.rowsPerThread) ||
+      ![4, 8, 16].includes(tile.workgroupX) ||
+      ![4, 8].includes(tile.workgroupY) ||
+      workgroupSize.length !== 2 ||
+      tile.workgroupX > _device.limits.maxComputeWorkgroupSizeX ||
+      tile.workgroupY > _device.limits.maxComputeWorkgroupSizeY ||
+      tile.workgroupX * tile.workgroupY > _device.limits.maxComputeInvocationsPerWorkgroup ||
+      tileStorageBytes > _device.limits.maxComputeWorkgroupStorageSize
+    ) {
+      throw new Error('Unsupported GEMM tile configuration for this OIDNGPUDevice');
+    }
+    this.subgroupsAvailable = _device.features.has(
+      'subgroups'
+    );
+    const matrixOptions = options.subgroupMatrix ?? {};
+    const matrixConfig = this.kernelSetting === 'subgroup-matrix'
+      ? selectSubgroupMatrixConfig(_device, matrixOptions.accumulation)
+      : undefined;
+    this.subgroupMatrixOutputFragments = matrixConfig
+      ? subgroupMatrixFragments(matrixConfig, matrixOptions)
+      : 0;
+    this.subgroupMatrixSubPixel = matrixOptions.subPixel ?? true;
+    this._subgroupMatrixFixedFragments = matrixOptions.outputFragments !== undefined;
+    const fitsSharedMemory = (doubleBuffer: boolean) => matrixConfig !== undefined &&
+      subgroupMatrixSharedBytes(
+        matrixConfig, this.subgroupMatrixOutputFragments, this.subgroupMatrixSubPixel, doubleBuffer
+      ) <= _device.limits.maxComputeWorkgroupStorageSize;
+    // A 16x16 matrix with two fragments can exceed a browser's 32 KiB limit.
+    // Keep hardware matrices available with one fragment before using GEMM.
+    if (matrixConfig && matrixOptions.outputFragments === undefined && !fitsSharedMemory(false)) {
+      this.subgroupMatrixOutputFragments = 1;
+    }
+    this.subgroupMatrixDoubleBuffer = (matrixOptions.doubleBuffer ?? false) && fitsSharedMemory(true);
+    if (
+      matrixConfig &&
+      SUBGROUP_MATRIX_SUBGROUPS * matrixConfig.subgroupSize <= _device.limits.maxComputeInvocationsPerWorkgroup &&
+      SUBGROUP_MATRIX_SUBGROUPS * matrixConfig.subgroupSize <= _device.limits.maxComputeWorkgroupSizeX &&
+      fitsSharedMemory(this.subgroupMatrixDoubleBuffer)
+    ) {
+      this.subgroupMatrix = matrixConfig;
+    }
+    this.maxSpatialInputBlocks =
+      this.precision === 'fp16' &&
+      _device.limits.maxComputeInvocationsPerWorkgroup >=
+        SPATIAL_CONV_WORKGROUP * SPATIAL_CONV_WORKGROUP &&
+      _device.limits.maxComputeWorkgroupSizeX >= SPATIAL_CONV_WORKGROUP &&
+      _device.limits.maxComputeWorkgroupSizeY >= SPATIAL_CONV_WORKGROUP
+        ? Math.floor(
+            _device.limits.maxComputeWorkgroupStorageSize /
+              (SPATIAL_CONV_PATCH * SPATIAL_CONV_PATCH * 4 * 2)
+          )
+        : 0;
+    this._shapeCacheSize = Math.max(1, options.shapeCacheSize ?? 2);
+
+    if (
+      model.inputChannels % 3 !== 0 ||
+      model.inputChannels < 3 ||
+      model.inputChannels > 9
+    ) {
+      throw new Error(
+        `Native OIDN expects 3, 6, or 9 input channels, got ${model.inputChannels}`
+      );
+    }
+    this._model = {
+      spec: model.spec,
+      inputChannels: model.inputChannels,
+      outputChannels: model.outputChannels,
+      channelsByValue: new Map(model.channelsByValue),
+      convChannels: new Map(model.convChannels)
+    };
+    const subPixelDecoders = new Map<string, { sourceBlocks: number[]; upsampledSource: 0 | 1 }>();
+    for (const node of optimizeModelGraph(this._model, {
+      fuseConvPool: this._matrixPool()
+    }).nodes) {
+      if (node.op === 'fusedUpsampleConcatConv2d') {
+        const decoder = this._subPixelDecoder(node);
+        if (decoder) subPixelDecoders.set(node.conv.id, decoder);
+      }
+      if (
+        node.op !== 'conv2d' &&
+        node.op !== 'maxPool2d' &&
+        node.op !== 'fusedConvReluMaxPool2d' &&
+        node.op !== 'fusedUpsampleConcatConv2d'
+      ) {
+        throw new Error(
+          `Native OIDN descriptor ${model.spec.id} leaves unsupported ` +
+            `${node.op} node ${node.id} after graph optimization`
+        );
+      }
+    }
+    try {
+      for (const [id, tensors] of model.convTensors) {
+        // Kernel selection is shape-independent. Pack only the active layout
+        // for this executor, keeping direct/spatial/subgroup and final weights
+        // in their original ABI without duplicating GPU allocations.
+        const kernel = this._selectConvKernel(
+          blocksForChannels(tensors.inputChannels), id === model.spec.output
+        );
+        const weightLayout = kernel === 'implicit-gemm'
+          ? this.gemm.weightLayout
+          : kernel === 'subgroup-matrix'
+            ? 'k-major'
+            : 'output-major';
+        const decoder = subPixelDecoders.get(id);
+        const packed = decoder
+          ? packSubpixelDecoderTensors(
+              _device, id, tensors, this.precision, decoder.sourceBlocks, decoder.upsampledSource
+            )
+          : packConvTensors(
+              _device, id, tensors, this.precision, weightLayout
+            );
+        this._resources.track('gpu-buffer', packed.weights);
+        this._resources.track('gpu-buffer', packed.bias);
+        this._packedConvs.set(id, packed);
+      }
+    } catch (error) {
+      for (const packed of this._packedConvs.values()) {
+        this._releaseBuffer(packed.weights);
+        this._releaseBuffer(packed.bias);
+      }
+      this._packedConvs.clear();
+      throw error;
+    }
+  }
+
+  private _pipeline(key: string, code: string) {
+    let pipeline = this._pipelineCache.get(key);
+    if (!pipeline) {
+      pipeline = this._device.createComputePipeline({
+        label: `oidn/${key}`,
+        layout: 'auto',
+        compute: {
+          module: this._device.createShaderModule({
+            label: `oidn/${key}`,
+            code
+          }),
+          entryPoint: 'main'
+        }
+      });
+      this._pipelineCache.set(key, pipeline);
+    }
+    return pipeline;
+  }
+
+
+
+  protected _nodePipelineSpec(
+    node: ExecutableModelNode,
+    isFinal: boolean,
+    fragments = this.subgroupMatrixOutputFragments
+  ): NativePipelineSpec {
+    if (node.op === 'conv2d') {
+      const outputPrecision = isFinal ? 'fp32' : this.precision;
+      const inputBlocks = blocksForChannels(
+        this._model.convChannels.get(node.id)!.inputChannels
+      );
+      const outputBlocks = blocksForChannels(
+        this._model.convChannels.get(node.id)!.outputChannels
+      );
+      const gemm = this._gemmForOutput(outputBlocks);
+      const kernel = this._selectConvKernel(inputBlocks, isFinal);
+      const cacheFinalWeights = gemm.finalLayer === 'shared-input-weights' ||
+        (gemm.finalLayer === 'shared-auto' &&
+          finalRgbSharedMemoryBytes(this.precision, inputBlocks, true) <=
+            this._device.limits.maxComputeWorkgroupStorageSize);
+      if (
+        kernel !== 'subgroup-matrix' &&
+        isFinal && this._model.convChannels.get(node.id)!.outputChannels === 3 &&
+        (this.kernelSetting === 'auto' || this.kernelSetting === 'implicit-gemm' ||
+          this.kernelSetting === 'subgroup-matrix') &&
+        gemm.finalLayer !== 'direct' &&
+        this._device.limits.maxComputeWorkgroupSizeX >= 8 &&
+        this._device.limits.maxComputeWorkgroupSizeY >= 8 &&
+        this._device.limits.maxComputeInvocationsPerWorkgroup >= 64 &&
+        finalRgbSharedMemoryBytes(this.precision, inputBlocks, cacheFinalWeights) <=
+          this._device.limits.maxComputeWorkgroupStorageSize
+      ) {
+        return {
+          key: `conv-final-rgb/${this.precision}/${node.activation}/in${inputBlocks}/weights-${cacheFinalWeights ? 'shared' : 'storage'}`,
+          kernel: 'direct',
+          code: createFinalRgbShader(this.precision, node.activation, inputBlocks, cacheFinalWeights)
+        };
+      }
+      if (kernel === 'subgroup-matrix') {
+        return this._subgroupMatrixSpec(
+          `conv/${node.activation}/in${inputBlocks}/out${outputBlocks}`,
+          outputPrecision,
+          node.activation,
+          inputBlocks,
+          outputBlocks,
+          fragments
+        );
+      }
+      const key =
+        `conv-${kernel}/${this.precision}/` +
+        `${outputPrecision}/${node.activation}/` +
+        `in${inputBlocks}/out${outputBlocks}` +
+        (kernel === 'implicit-gemm'
+          ? `/address-${gemm.addressMode}/weights-${gemm.weightLayout}-v1` +
+            `/tile-${gemm.workgroupSize.join('x')}-r${gemm.rowsPerThread}/loads-${gemm.loadMode}/shared-${gemm.sharedLayout}/acc-${gemm.accumulationOrder}/unroll-${Number(gemm.unrollRows)}`
+          : '');
+      return {
+        key,
+        kernel,
+        code: kernel === 'implicit-gemm'
+          ? createTiledConvShader(
+              this.precision,
+              outputPrecision,
+              node.activation,
+              inputBlocks,
+              outputBlocks,
+              gemm
+            )
+          : kernel === 'spatial'
+            ? createSpatialConvShader(
+                this.precision,
+                outputPrecision,
+                node.activation,
+                inputBlocks,
+                outputBlocks
+              )
+            : kernel === 'subgroup'
+              ? createSubgroupConvShader(
+                  this.precision,
+                  outputPrecision,
+                  node.activation,
+                  inputBlocks,
+                  outputBlocks
+                )
+              : createConvShader(
+                  this.precision,
+                  outputPrecision,
+                  node.activation,
+                  inputBlocks,
+                  outputBlocks
+                )
+      };
+    }
+    if (node.op === 'maxPool2d') {
+      const outputBlocks = blocksForChannels(
+        this._model.channelsByValue.get(node.id)!
+      );
+      const coalesced = this._coalescedPool();
+      const key = `max-pool/${this.precision}/out${outputBlocks}/${coalesced ? 'channels' : 'spatial'}`;
+      return {
+        key,
+        kernel: 'direct',
+        code: createMaxPoolShader(this.precision, outputBlocks, coalesced)
+      };
+    }
+    if (node.op === 'fusedConvReluMaxPool2d') {
+      const inputBlocks = blocksForChannels(
+        this._model.convChannels.get(node.conv.id)!.inputChannels
+      );
+      const outputBlocks = blocksForChannels(
+        this._model.convChannels.get(node.conv.id)!.outputChannels
+      );
+      if (this._matrixPool()) {
+        return this._subgroupMatrixSpec(
+          `conv-pool/${node.conv.activation}/in${inputBlocks}/out${outputBlocks}`,
+          this.precision, node.conv.activation, inputBlocks, outputBlocks, fragments, undefined, true
+        );
+      }
+      const key =
+        `conv-pool/${this.precision}/${node.conv.activation}/` +
+        `in${inputBlocks}/out${outputBlocks}`;
+      return {
+        key,
+        kernel: 'direct',
+        code: createFusedConvPoolShader(
+          this.precision,
+          node.conv.activation,
+          inputBlocks,
+          outputBlocks
+        )
+      };
+    }
+    if (node.op === 'fusedUpsampleConcatConv2d') {
+      if (node.inputs.length !== 2) {
+        throw new Error(`Native fused decoder ${node.id} requires two inputs`);
+      }
+      const sourceBlocks = node.inputs.map((input) =>
+        blocksForChannels(this._model.channelsByValue.get(input.value)!)
+      );
+      const upsampledSource = node.inputs.findIndex((input) => input.upsample);
+      if (upsampledSource !== 0 && upsampledSource !== 1) {
+        throw new Error(`Native fused decoder ${node.id} has no upsample input`);
+      }
+      const inputBlocks = sourceBlocks[0] + sourceBlocks[1];
+      const outputPrecision = isFinal ? 'fp32' : this.precision;
+      const selectedKernel = this._selectConvKernel(inputBlocks, isFinal);
+      // The subgroup broadcast path currently targets the common standalone
+      // convolution layout; fused decoder reads use the direct kernel.
+      const kernel = selectedKernel === 'subgroup'
+        ? 'direct'
+        : selectedKernel;
+      const outputBlocks = blocksForChannels(
+        this._model.convChannels.get(node.conv.id)!.outputChannels
+      );
+      if (kernel === 'subgroup-matrix' && this._subPixelDecoder(node)) {
+        const config = this.subgroupMatrix!;
+        return {
+          key: `subgroup-matrix-subpixel/${this.precision}/${outputPrecision}/` +
+            `${config.dialect}/${config.componentType}-${config.resultType}-${config.size}-sg${config.subgroupSize}/` +
+            `n${fragments}${this.subgroupMatrixDoubleBuffer ? '-db' : ''}/${node.conv.activation}/${sourceBlocks.join('+')}/out${outputBlocks}/up${upsampledSource}`,
+          kernel: 'subgroup-matrix',
+          code: createSubgroupMatrixSubpixelShader(
+            this.precision,
+            outputPrecision,
+            node.conv.activation,
+            outputBlocks,
+            config,
+            fragments,
+            sourceBlocks,
+            upsampledSource,
+            this.subgroupMatrixDoubleBuffer
+          )
+        };
+      }
+      if (kernel === 'subgroup-matrix') {
+        return this._subgroupMatrixSpec(
+          `decoder/${node.conv.activation}/${sourceBlocks.join('+')}/out${outputBlocks}/up${upsampledSource}`,
+          outputPrecision,
+          node.conv.activation,
+          inputBlocks,
+          outputBlocks,
+          fragments,
+          { sourceBlocks, upsampledSource }
+        );
+      }
+      const gemm = this._gemmForOutput(outputBlocks);
+      const key =
+        `decoder-${kernel}${kernel === 'implicit-gemm' && this._subPixelDecoder(node) ? '-subpixel' : ''}/${this.precision}/${outputPrecision}/` +
+        `${node.conv.activation}/` +
+        `${sourceBlocks.join('+')}/out${outputBlocks}/up${upsampledSource}` +
+        (kernel === 'implicit-gemm'
+          ? `/address-${gemm.addressMode}/weights-${gemm.weightLayout}-v1` +
+            `/tile-${gemm.workgroupSize.join('x')}-r${gemm.rowsPerThread}/loads-${gemm.loadMode}/shared-${gemm.sharedLayout}/acc-${gemm.accumulationOrder}/unroll-${Number(gemm.unrollRows)}/decoder-${gemm.decoderLoad}`
+          : '');
+      return {
+        key,
+        kernel,
+        code: kernel === 'implicit-gemm'
+          ? (this._subPixelDecoder(node) ? createTiledSubpixelDecoderShader : createTiledDecoderShader)(
+              this.precision,
+              outputPrecision,
+              node.conv.activation,
+              sourceBlocks,
+              upsampledSource,
+              outputBlocks,
+              gemm
+            )
+          : kernel === 'spatial'
+            ? createSpatialDecoderShader(
+                this.precision,
+                outputPrecision,
+                node.conv.activation,
+                sourceBlocks,
+                upsampledSource,
+                outputBlocks
+              )
+            : createFusedDecoderShader(
+              this.precision,
+              outputPrecision,
+              node.conv.activation,
+              sourceBlocks,
+              upsampledSource,
+              outputBlocks
+            )
+      };
+    }
+    throw new Error(
+      `Native OIDN does not implement unfused ${node.op} node ${node.id}`
+    );
+  }
+
+  /** The decoder's sources when it runs with the sub-pixel decomposition. */
+  private _subPixelDecoder(node: FusedUpsampleConcatConvNodeSpec) {
+    if (node.id === this._model.spec.output || node.inputs.length !== 2) {
+      return undefined;
+    }
+    const kernel = this._selectConvKernel(
+      blocksForChannels(this._model.convChannels.get(node.conv.id)!.inputChannels), false
+    );
+    if (!(kernel === 'subgroup-matrix' && this.subgroupMatrixSubPixel) &&
+        !(kernel === 'implicit-gemm' && this.gemm.decoderSubPixel && this.gemm.weightLayout === 'k-major')) {
+      return undefined;
+    }
+    const upsampledSource = node.inputs[0].upsample ? 0 : node.inputs[1].upsample ? 1 : -1;
+    if (upsampledSource === -1) return undefined;
+    return {
+      sourceBlocks: node.inputs.map((input) =>
+        blocksForChannels(this._model.channelsByValue.get(input.value)!)
+      ),
+      upsampledSource: upsampledSource as 0 | 1
+    };
+  }
+
+  private _subgroupMatrixSpec(
+    key: string,
+    outputPrecision: NativeUNetPrecision,
+    activation: Conv2DNodeSpec['activation'],
+    inputBlocks: number,
+    outputBlocks: number,
+    fragments: number,
+    decoder?: { sourceBlocks: readonly number[]; upsampledSource: 0 | 1 },
+    pool = false
+  ): NativePipelineSpec {
+    const config = this.subgroupMatrix!;
+    return {
+      key: `subgroup-matrix/${this.precision}/${outputPrecision}/` +
+        `${config.dialect}/${config.componentType}-${config.resultType}-${config.size}-sg${config.subgroupSize}/` +
+        `n${fragments}${this.subgroupMatrixDoubleBuffer ? '-db' : ''}/${key}`,
+      kernel: 'subgroup-matrix',
+      code: createSubgroupMatrixConvShader(
+        this.precision,
+        outputPrecision,
+        activation,
+        inputBlocks,
+        outputBlocks,
+        config,
+        fragments,
+        this.subgroupMatrixDoubleBuffer,
+        decoder,
+        pool
+      )
+    };
+  }
+
+  /**
+   * Output fragments per workgroup for a subgroup-matrix layer: the default
+   * unless that leaves fewer than SUBGROUP_MATRIX_MIN_WORKGROUPS workgroups,
+   * where one fragment keeps more of the GPU busy (low-resolution layers).
+   * Never more fragments than the output channels fill (the final RGB layer).
+   */
+  private _subgroupMatrixFragmentsFor(shape: ModelValueShape) {
+    const fragments = Math.min(
+      this.subgroupMatrixOutputFragments,
+      Math.ceil(blocksForChannels(shape.channels) * 4 / this.subgroupMatrix!.size)
+    );
+    if (this._subgroupMatrixFixedFragments || fragments === 1) return fragments;
+    const workgroups = Math.ceil(shape.width / SUBGROUP_MATRIX_TILE_WIDTH) *
+      Math.ceil(shape.height / SUBGROUP_MATRIX_TILE_HEIGHT) *
+      Math.ceil(blocksForChannels(shape.channels) * 4 / (fragments * this.subgroupMatrix!.size));
+    return workgroups < SUBGROUP_MATRIX_MIN_WORKGROUPS ? 1 : fragments;
+  }
+
+  // Wider output tiles reuse each input load across twice as many channels.
+  // Require full output blocks and keep the validated base tile as fallback.
+  private _gemmForOutput(outputBlocks: number): Readonly<Required<NativeUNetGemmOptions>> {
+    if (this.gemm.tilePolicy !== 'output-aligned' ||
+        this.gemm.workgroupSize[0] !== 8 || outputBlocks <= 0 || outputBlocks % 16 !== 0) {
+      return this.gemm;
+    }
+    const cached = this._gemmByOutputBlocks.get(outputBlocks);
+    if (cached) return cached;
+    const candidate = Object.freeze({
+      ...this.gemm,
+      workgroupSize: Object.freeze([16, this.gemm.workgroupSize[1]]) as NativeUNetGemmWorkgroup
+    });
+    const tile = gemmTile(candidate);
+    const sizes = gemmSharedSizes(candidate);
+    const limits = this._device.limits;
+    const fits = tile.workgroupX <= limits.maxComputeWorkgroupSizeX &&
+      tile.workgroupY <= limits.maxComputeWorkgroupSizeY &&
+      tile.workgroupX * tile.workgroupY <= limits.maxComputeInvocationsPerWorkgroup &&
+      (sizes.input + sizes.weights) * 4 * (this.precision === 'fp16' ? 2 : 4) <= limits.maxComputeWorkgroupStorageSize;
+    const selected = fits ? candidate : this.gemm;
+    this._gemmByOutputBlocks.set(outputBlocks, selected);
+    return selected;
+  }
+
+  // Keep fusion on the Large native 8x8 mixed-precision configuration measured
+  // on Metal. Other matrix shapes and browser kernels retain separate pooling.
+  private _matrixPool() {
+    const config = this.subgroupMatrix;
+    return this._model.spec.family === 'oidn-unet-large' && this.precision === 'fp16' &&
+      config?.dialect === 'naga' && config.size === 8 && config.subgroupSize === 32 &&
+      config.componentType === 'f16' && config.resultType === 'f32';
+  }
+
+  private _coalescedPool() {
+    return this.gemm.poolLayout === 'channels' &&
+      (this.kernelSetting === 'auto' || this.kernelSetting === 'implicit-gemm' ||
+        this.kernelSetting === 'subgroup-matrix');
+  }
+
+  private _selectConvKernel(
+    inputBlocks: number,
+    isFinal: boolean
+  ): NativeUNetKernel {
+    const spatialFits =
+      this.precision === 'fp16' &&
+      inputBlocks <= this.maxSpatialInputBlocks;
+    if (this.kernelSetting === 'direct') return 'direct';
+    if (this.kernelSetting === 'spatial') {
+      return spatialFits ? 'spatial' : 'direct';
+    }
+    if (this.kernelSetting === 'implicit-gemm') {
+      return isFinal ? 'direct' : 'implicit-gemm';
+    }
+    if (this.kernelSetting === 'subgroup') {
+      return this.subgroupsAvailable ? 'subgroup' : 'direct';
+    }
+    if (this.kernelSetting === 'subgroup-matrix') {
+      // The 64-thread final RGB kernel is far below matrix throughput on
+      // native M4 Max; Chrome keeps it until measured there.
+      if (isFinal) return this.subgroupMatrix?.dialect === 'naga' ? 'subgroup-matrix' : 'direct';
+      return this.subgroupMatrix ? 'subgroup-matrix' : 'implicit-gemm';
+    }
+    if (!isFinal) return 'implicit-gemm';
+    return 'direct';
+  }
+
+  private _nodePipeline(node: ExecutableModelNode, isFinal: boolean) {
+    const { key, code } = this._nodePipelineSpec(node, isFinal);
+    return this._pipeline(key, code);
+  }
+
+  private _createExecution(width: number, height: number): CachedExecution {
+    const fuseConvPool = this._matrixPool();
+    const plan = planModelExecution(this._model, width, height, { fuseConvPool });
+    const valueBuffers = new Map<string, OIDNGPUBuffer>();
+    const slots: ActivationSlot[] = [];
+    const plannedSlots: { capacity: number; lastUse: number; values: string[] }[] = [];
+    const lastUses = new Map<string, number>();
+    plan.nodes.forEach((node, index) => {
+      for (const input of executableInputs(node)) lastUses.set(input, index);
+    });
+    lastUses.set(plan.spec.output, plan.nodes.length);
+    const createdBuffers: OIDNGPUBuffer[] = [];
+    const own = (buffer: OIDNGPUBuffer) => {
+      createdBuffers.push(buffer);
+      return this._resources.track('gpu-buffer', buffer);
+    };
+
+    try {
+      const allocate = (
+        value: string,
+        shape: ModelValueShape,
+        bytesPerScalar: number,
+        index: number
+      ) => {
+        const requiredSize = activationByteSize(shape, bytesPerScalar);
+        const free = plannedSlots.filter((slot) => slot.lastUse < index);
+        let slot = free
+          .filter((candidate) => candidate.capacity >= requiredSize)
+          .sort((a, b) => a.capacity - b.capacity)[0];
+        // Plan lifetimes before creating GPU buffers. A retired small slot can
+        // grow for the decoder after encoder pool fusion. Other paths keep
+        // their previous slot selection.
+        if (!slot && fuseConvPool) slot = free.sort((a, b) => b.capacity - a.capacity)[0];
+        if (!slot) {
+          slot = { capacity: 0, lastUse: -2, values: [] };
+          plannedSlots.push(slot);
+        }
+        slot.capacity = Math.max(slot.capacity, requiredSize);
+        slot.lastUse = lastUses.get(value) ?? -1;
+        slot.values.push(value);
+      };
+
+      allocate(
+        plan.spec.input,
+        plan.inputShape,
+        this.precision === 'fp16' ? 2 : 4,
+        -1
+      );
+      plan.plannedNodes.forEach(({ node, outputShape }, index) => {
+        const isFinal = node.id === plan.spec.output;
+        allocate(
+          node.id,
+          outputShape,
+          isFinal || this.precision === 'fp32' ? 4 : 2,
+          index
+        );
+      });
+      plannedSlots.forEach((slot, index) => {
+        const buffer = own(this._device.createBuffer({
+          label: `oidn/activation/${width}x${height}/${index}`,
+          size: roundUp(slot.capacity, 4),
+          usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST
+        }));
+        slots.push({ buffer, capacity: slot.capacity });
+        for (const value of slot.values) valueBuffers.set(value, buffer);
+      });
+
+    const inputSourceCount = this._model.inputChannels / 3;
+    const inputKey = `pack/${this.precision}/${inputSourceCount}`;
+    const inputPipeline = this._pipeline(
+      inputKey,
+      createInputPackShader(this.precision, inputSourceCount)
+    );
+    const nodePipelines: OIDNGPUComputePipeline[] = [];
+    const nodeKernels: NativeUNetKernel[] = [];
+    const nodeFragments: number[] = [];
+    const nodeBindings: OIDNGPUBindGroup[] = [];
+    const ownedBuffers: OIDNGPUBuffer[] = [];
+
+    plan.plannedNodes.forEach(({ node, outputShape }, index) => {
+      const isFinal = node.id === plan.spec.output;
+      const fragments = this.subgroupMatrix ? this._subgroupMatrixFragmentsFor(outputShape) : 0;
+      const pipelineSpec = this._nodePipelineSpec(node, isFinal, fragments);
+      if (pipelineSpec.kernel) this.usedKernels.add(pipelineSpec.kernel);
+      const pipeline = this._pipeline(pipelineSpec.key, pipelineSpec.code);
+      nodePipelines.push(pipeline);
+      nodeKernels.push(pipelineSpec.kernel ?? 'direct');
+      nodeFragments.push(pipelineSpec.kernel === 'subgroup-matrix' ? fragments : 0);
+      const output = valueBuffers.get(node.id)!;
+      let entries: OIDNGPUBindGroupEntry[];
+      let uniformValues: number[];
+      let convId: string;
+
+      if (node.op === 'conv2d') {
+        const inputShape = plan.valueShapes.get(node.input)!;
+        convId = node.id;
+        uniformValues = [
+          inputShape.width,
+          inputShape.height,
+          outputShape.width,
+          outputShape.height,
+          blocksForChannels(inputShape.channels),
+          blocksForChannels(outputShape.channels)
+        ];
+        const packed = this._packedConvs.get(convId)!;
+        entries = [
+          { binding: 0, resource: { buffer: valueBuffers.get(node.input)! } },
+          { binding: 1, resource: { buffer: packed.weights } },
+          { binding: 2, resource: { buffer: packed.bias } },
+          { binding: 3, resource: { buffer: output } }
+        ];
+      } else if (node.op === 'maxPool2d') {
+        const inputShape = plan.valueShapes.get(node.input)!;
+        uniformValues = [
+          inputShape.width,
+          inputShape.height,
+          outputShape.width,
+          outputShape.height,
+          blocksForChannels(outputShape.channels)
+        ];
+        entries = [
+          { binding: 0, resource: { buffer: valueBuffers.get(node.input)! } },
+          { binding: 1, resource: { buffer: output } }
+        ];
+      } else if (node.op === 'fusedConvReluMaxPool2d') {
+        const inputShape = plan.valueShapes.get(node.input)!;
+        convId = node.conv.id;
+        uniformValues = [
+          inputShape.width,
+          inputShape.height,
+          outputShape.width,
+          outputShape.height,
+          blocksForChannels(inputShape.channels),
+          blocksForChannels(outputShape.channels)
+        ];
+        const packed = this._packedConvs.get(convId)!;
+        entries = [
+          { binding: 0, resource: { buffer: valueBuffers.get(node.input)! } },
+          { binding: 1, resource: { buffer: packed.weights } },
+          { binding: 2, resource: { buffer: packed.bias } },
+          { binding: 3, resource: { buffer: output } }
+        ];
+      } else if (node.op === 'fusedUpsampleConcatConv2d') {
+        convId = node.conv.id;
+        const firstShape = plan.valueShapes.get(node.inputs[0].value)!;
+        const secondShape = plan.valueShapes.get(node.inputs[1].value)!;
+        uniformValues = [
+          outputShape.width,
+          outputShape.height,
+          blocksForChannels(outputShape.channels),
+          blocksForChannels(this._model.convChannels.get(convId)!.inputChannels),
+          firstShape.width,
+          firstShape.height,
+          secondShape.width,
+          secondShape.height
+        ];
+        const packed = this._packedConvs.get(convId)!;
+        entries = [
+          {
+            binding: 0,
+            resource: { buffer: valueBuffers.get(node.inputs[0].value)! }
+          },
+          {
+            binding: 1,
+            resource: { buffer: valueBuffers.get(node.inputs[1].value)! }
+          },
+          { binding: 2, resource: { buffer: packed.weights } },
+          { binding: 3, resource: { buffer: packed.bias } },
+          { binding: 4, resource: { buffer: output } }
+        ];
+      } else {
+        throw new Error(`Unexpected native node ${node.op}`);
+      }
+
+      const uniform = own(
+        createUniformBuffer(
+          this._device,
+          `oidn/${node.id}/params/${width}x${height}`,
+          uniformValues
+        )
+      );
+      ownedBuffers.push(uniform);
+      entries.push({ binding: entries.length, resource: { buffer: uniform } });
+      nodeBindings.push(
+        this._device.createBindGroup({
+          label: `oidn/${node.id}/bindings`,
+          layout: pipeline.getBindGroupLayout(0),
+          entries
+        })
+      );
+    });
+
+    const inputUniform = own(
+      createUniformBuffer(
+        this._device,
+        `oidn/input/params/${width}x${height}`,
+        [
+          width,
+          height,
+          blocksForChannels(this._model.inputChannels),
+          this._model.inputChannels
+        ]
+      )
+    );
+    ownedBuffers.push(inputUniform);
+
+      return {
+        plan,
+        valueBuffers,
+        slots,
+        nodeBindings,
+        nodePipelines,
+        nodeKernels,
+        nodeFragments,
+        inputPipeline,
+        inputUniform,
+        ownedBuffers,
+        lastUsed: ++this._clock
+      };
+    } catch (error) {
+      for (const buffer of createdBuffers) this._releaseBuffer(buffer);
+      throw error;
+    }
+  }
+
+  protected _execution(width: number, height: number) {
+    if (this._disposed) throw new Error('Native OIDN executor is disposed');
+    const key = `${width}x${height}`;
+    let execution = this._executionCache.get(key);
+    if (!execution) {
+      execution = this._createExecution(width, height);
+      this._executionCache.set(key, execution);
+      if (this._executionCache.size > this._shapeCacheSize) {
+        const oldest = [...this._executionCache.entries()]
+          .filter(([candidateKey]) => candidateKey !== key)
+          .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+        if (oldest) {
+          this._executionCache.delete(oldest[0]);
+          this._retireExecution(oldest[1]);
+        }
+      }
+    }
+    execution.lastUsed = ++this._clock;
+    return execution;
+  }
+
+  /**
+   * Releases an evicted plan. The synchronous core destroys it at once; the
+   * browser executor waits for the queue first.
+   */
+  protected _retireExecution(execution: CachedExecution) {
+    this._destroyExecution(execution);
+  }
+
+  /** Allocates shape-dependent execution resources before interactive use. */
+  prewarm(shapes: readonly { width: number; height: number }[]) {
+    for (const shape of shapes) {
+      this._execution(shape.width, shape.height);
+    }
+  }
+
+  /** Captures per-pass GPU timestamps for the next execute call when supported. */
+  profileNextExecution() {
+    if (!this._device.features.has('timestamp-query')) return false;
+    this._profileNextExecution = true;
+    return true;
+  }
+
+  /** Shape-owned packed input; external preprocessing must write all lanes. */
+  packedInputBuffer(width: number, height: number) {
+    const execution = this._execution(width, height);
+    return execution.valueBuffers.get(execution.plan.spec.input)!;
+  }
+
+  /** Executes after a preprocessing pass has filled packedInputBuffer. */
+  executePacked(width: number, height: number) {
+    return this._execute([], width, height, true);
+  }
+
+  execute(inputBuffers: readonly OIDNGPUBuffer[], width: number, height: number) {
+    return this._execute(inputBuffers, width, height, false);
+  }
+
+  private _execute(inputBuffers: readonly OIDNGPUBuffer[], width: number, height: number, packedInput: boolean) {
+    const sourceCount = this._model.inputChannels / 3;
+    if (!packedInput && inputBuffers.length !== sourceCount) {
+      throw new Error(
+        `Native OIDN expected ${sourceCount} input buffers, got ${inputBuffers.length}`
+      );
+    }
+    const execution = this._execution(width, height);
+    const profileLabels = [
+      ...(packedInput ? [] : ['input-pack']),
+      ...execution.plan.nodes.map((node) => node.id)
+    ];
+    const shouldProfile =
+      this._profileNextExecution &&
+      this._device.features.has('timestamp-query');
+    this._profileNextExecution = false;
+    const queryCount = profileLabels.length * 2;
+    const querySet = shouldProfile
+      ? this._resources.track(
+          'gpu-query-set',
+          this._device.createQuerySet({ type: 'timestamp', count: queryCount })
+        )
+      : undefined;
+    const queryBufferSize = queryCount * 8;
+    let queryResolveBuffer: OIDNGPUBuffer | undefined;
+    let queryReadbackBuffer: OIDNGPUBuffer | undefined;
+    try {
+      queryResolveBuffer = shouldProfile
+        ? this._resources.track(
+            'gpu-buffer',
+            this._device.createBuffer({
+              label: `oidn/profile/resolve/${width}x${height}`,
+              size: queryBufferSize,
+              usage: BufferUsage.QUERY_RESOLVE | BufferUsage.COPY_SRC
+            })
+          )
+        : undefined;
+      queryReadbackBuffer = shouldProfile
+        ? this._resources.track(
+            'gpu-buffer',
+            this._device.createBuffer({
+              label: `oidn/profile/readback/${width}x${height}`,
+              size: queryBufferSize,
+              usage: BufferUsage.COPY_DST | BufferUsage.MAP_READ
+            })
+          )
+        : undefined;
+    } catch (error) {
+      this._releaseBuffer(queryReadbackBuffer);
+      this._releaseBuffer(queryResolveBuffer);
+      this._releaseQuerySet(querySet);
+      throw error;
+    }
+    const passDescriptor = (label: string, index: number) => ({
+      label,
+      ...(querySet
+        ? {
+            timestampWrites: {
+              querySet,
+              beginningOfPassWriteIndex: index * 2,
+              endOfPassWriteIndex: index * 2 + 1
+            }
+          }
+        : {})
+    });
+    try {
+      const encoder = this._device.createCommandEncoder({
+        label: `oidn/native/${width}x${height}`
+      });
+
+    if (!packedInput) {
+      const inputEntries: OIDNGPUBindGroupEntry[] = inputBuffers.map(
+        (buffer, binding) => ({ binding, resource: { buffer } })
+      );
+      inputEntries.push({
+        binding: sourceCount,
+        resource: { buffer: execution.valueBuffers.get(execution.plan.spec.input)! }
+      });
+      inputEntries.push({
+        binding: sourceCount + 1,
+        resource: { buffer: execution.inputUniform }
+      });
+      const inputBindings = this._device.createBindGroup({
+        label: 'oidn/input/bindings',
+        layout: execution.inputPipeline.getBindGroupLayout(0),
+        entries: inputEntries
+      });
+      const pass = encoder.beginComputePass(
+        passDescriptor('oidn/input-pack', 0)
+      );
+      pass.setPipeline(execution.inputPipeline);
+      pass.setBindGroup(0, inputBindings);
+      pass.dispatchWorkgroups(
+        Math.ceil(width / WORKGROUP_SIZE),
+        Math.ceil(height / WORKGROUP_SIZE),
+        blocksForChannels(this._model.inputChannels)
+      );
+      pass.end();
+    }
+
+    execution.plan.plannedNodes.forEach(({ node, outputShape }, index) => {
+      const pass = encoder.beginComputePass(
+        passDescriptor(`oidn/${execution.plan.nodes[index].id}`, index + (packedInput ? 0 : 1))
+      );
+      pass.setPipeline(execution.nodePipelines[index]);
+      pass.setBindGroup(0, execution.nodeBindings[index]);
+      if (node.op === 'maxPool2d' && this._coalescedPool()) {
+        const groupsX = Math.ceil(
+          outputShape.width * blocksForChannels(outputShape.channels) / WORKGROUP_SIZE
+        );
+        const maxGroups = this._device.limits.maxComputeWorkgroupsPerDimension;
+        // Wide channel rows continue in Z instead of exceeding the X limit.
+        pass.dispatchWorkgroups(
+          Math.min(groupsX, maxGroups),
+          Math.ceil(outputShape.height / WORKGROUP_SIZE),
+          Math.ceil(groupsX / maxGroups)
+        );
+      } else if (execution.nodeKernels[index] === 'subgroup-matrix') {
+        pass.dispatchWorkgroups(
+          Math.ceil(outputShape.width * (node.op === 'fusedConvReluMaxPool2d' ? 2 : 1) / SUBGROUP_MATRIX_TILE_WIDTH),
+          Math.ceil(outputShape.height * (node.op === 'fusedConvReluMaxPool2d' ? 2 : 1) / SUBGROUP_MATRIX_TILE_HEIGHT),
+          Math.ceil(
+            blocksForChannels(outputShape.channels) /
+              (execution.nodeFragments[index] * this.subgroupMatrix!.size / 4)
+          )
+        );
+      } else if (execution.nodeKernels[index] === 'implicit-gemm') {
+        const tile = gemmTile(this._gemmForOutput(blocksForChannels(outputShape.channels)));
+        const subPixel = node.op === 'fusedUpsampleConcatConv2d' && this._subPixelDecoder(node) !== undefined;
+        pass.dispatchWorkgroups(
+          Math.ceil(
+            (subPixel ? Math.ceil(outputShape.width / 2) * Math.ceil(outputShape.height / 2)
+              : outputShape.width * outputShape.height) / tile.tileM
+          ),
+          Math.ceil(
+            blocksForChannels(outputShape.channels) / tile.tileNBlocks
+          ),
+          subPixel ? 4 : 1
+        );
+      } else {
+        pass.dispatchWorkgroups(
+          Math.ceil(outputShape.width / WORKGROUP_SIZE),
+          Math.ceil(outputShape.height / WORKGROUP_SIZE),
+          blocksForChannels(outputShape.channels)
+        );
+      }
+      pass.end();
+    });
+
+    if (querySet) {
+      encoder.resolveQuerySet(
+        querySet,
+        0,
+        queryCount,
+        queryResolveBuffer!,
+        0
+      );
+      encoder.copyBufferToBuffer(
+        queryResolveBuffer!,
+        0,
+        queryReadbackBuffer!,
+        0,
+        queryBufferSize
+      );
+    }
+
+      this._device.queue.submit([encoder.finish()]);
+    } catch (error) {
+      this._releaseBuffer(queryReadbackBuffer);
+      this._releaseBuffer(queryResolveBuffer);
+      this._releaseQuerySet(querySet);
+      throw error;
+    }
+    if (querySet) {
+      this._profileOperations++;
+      this._readProfile(querySet, queryResolveBuffer!, queryReadbackBuffer!, profileLabels);
+    }
+    return execution.valueBuffers.get(execution.plan.spec.output)!;
+  }
+
+  /**
+   * Receives the timestamp queries of a profiled execution. The synchronous
+   * core cannot read them back, so it releases them.
+   */
+  protected _readProfile(
+    querySet: OIDNGPUQuerySet,
+    resolveBuffer: OIDNGPUBuffer,
+    readbackBuffer: OIDNGPUBuffer,
+    labels: string[]
+  ) {
+    void labels;
+    this._releaseQuerySet(querySet);
+    this._releaseBuffer(resolveBuffer);
+    this._releaseBuffer(readbackBuffer);
+    this._profileOperations--;
+  }
+
+  protected _releaseBuffer(buffer: OIDNGPUBuffer | undefined) {
+    this._resources.release('gpu-buffer', buffer, () => buffer!.destroy());
+  }
+
+  protected _releaseQuerySet(querySet: OIDNGPUQuerySet | undefined) {
+    this._resources.release(
+      'gpu-query-set',
+      querySet,
+      () => querySet!.destroy()
+    );
+  }
+
+  protected _destroyExecution(execution: CachedExecution) {
+    execution.slots.forEach((slot) => this._releaseBuffer(slot.buffer));
+    execution.ownedBuffers.forEach((buffer) => this._releaseBuffer(buffer));
+  }
+
+  getResourceInfo(): OIDNResourceSnapshot {
+    return this._resources.snapshot(
+      this._retiredExecutions.size + this._profileOperations
+    );
+  }
+
+  dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+    for (const packed of this._packedConvs.values()) {
+      this._releaseBuffer(packed.weights);
+      this._releaseBuffer(packed.bias);
+    }
+    this._packedConvs.clear();
+    for (const execution of this._executionCache.values()) {
+      this._destroyExecution(execution);
+    }
+    this._executionCache.clear();
+    for (const execution of this._retiredExecutions) {
+      this._destroyExecution(execution);
+    }
+    this._retiredExecutions.clear();
+  }
+}

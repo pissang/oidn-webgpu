@@ -1,0 +1,29 @@
+[package]
+name = "oidn-webgpu-native"
+version = "0.1.0"
+edition = "2024"
+# Own code is MIT; bundled cores also contain scriptc, V8-derived code and Ryū.
+license = "MIT AND Apache-2.0 AND BSD-3-Clause AND BSL-1.0"
+description = "Experimental GPU denoising on host-owned wgpu devices and buffers, with a standalone C API"
+publish = ["crates-io"]
+repository = "https://github.com/pissang/oidn-webgpu"
+homepage = "https://github.com/pissang/oidn-webgpu"
+readme = "README.md"
+include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE", "licenses/**", "build.rs", "build_support/*.rs", "prebuilt/**", "src/**", "include/**", "examples/*.rs", "examples/*.c"]
+
+[lib]
+name = "oidn_webgpu"
+# rlib for Rust tools, cdylib/staticlib for the C API (include/oidn_webgpu.h).
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+wgpu = { version = "=30.0.1" }
+pollster = "0.4"
+
+[build-dependencies]
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+serde_json = "1"
+sha2 = "0.10"

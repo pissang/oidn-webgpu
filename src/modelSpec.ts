@@ -1,4 +1,4 @@
-import type { HostTensor } from './tza';
+import { HostTensor } from './tza.js';
 
 /**
  * Versioned, runtime-independent description of an OIDN network.
@@ -236,7 +236,7 @@ function tensorByteSize(tensor: HostTensor): number {
   return tensor.desc.getByteSize();
 }
 
-function describeNames(names: Iterable<string>): string {
+function describeNames(names: readonly string[]): string {
   return [...names].sort().join(', ');
 }
 
@@ -261,7 +261,7 @@ export function detectUNetModelSpec(
   }
 
   throw new Error(
-    `Unsupported OIDN model topology. TZA tensors: ${describeNames(tensors.keys())}`
+    `Unsupported OIDN model topology. TZA tensors: ${describeNames([...tensors.keys()])}`
   );
 }
 

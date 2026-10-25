@@ -6,6 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const chrome = process.env.CHROME_PATH ?? [
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/google-chrome', '/usr/bin/chromium',
+  ...['PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'].flatMap((key) =>
+    process.env[key] ? [path.join(process.env[key], 'Google/Chrome/Application/chrome.exe')] : [])
+].find(fs.existsSync);
+if (!chrome) throw new Error('Set CHROME_PATH to Chrome/Chromium');
 const mime = new Map([
   ['.js', 'text/javascript'],
   ['.mjs', 'text/javascript'],
@@ -40,7 +47,7 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
 const browser = await chromium.launch({
   headless: true,
-  executablePath: process.env.CHROME_PATH ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  executablePath: chrome,
   args: [
     '--enable-unsafe-webgpu',
     '--no-sandbox',

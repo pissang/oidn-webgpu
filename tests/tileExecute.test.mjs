@@ -56,6 +56,41 @@ function run(unet, overrides = {}) {
   });
 }
 
+test('normalizes CPU auxiliary images by their own storage type', () => {
+  const unet = Object.create(UNet.prototype);
+  unet._aux = true;
+  const image = (data) => ({ data, width: 2, height: 1 });
+  const albedo8 = new Uint8ClampedArray([51, 102, 153, 255, 204, 255, 0, 255]);
+  const normal8 = new Uint8ClampedArray([0, 128, 255, 255, 255, 64, 0, 255]);
+  const normalized = (data) => Float32Array.from(data, (value) => value / 255);
+  for (const hdr of [false, true]) {
+    const color = image(hdr
+      ? new Float32Array([0.5, 2, 4, 1, 8, 0.25, 1, 1])
+      : new Uint8ClampedArray([32, 64, 128, 255, 255, 0, 64, 255]));
+    const expected = new Float32Array(18);
+    for (let pixel = 0; pixel < 2; pixel++) {
+      for (let channel = 0; channel < 3; channel++) {
+        expected[pixel * 9 + channel] = color.data[pixel * 4 + channel] / (hdr ? 1 : 255);
+        expected[pixel * 9 + 3 + channel] = albedo8[pixel * 4 + channel] / 255;
+        expected[pixel * 9 + 6 + channel] = normal8[pixel * 4 + channel] / 255;
+      }
+    }
+    for (const albedo of [albedo8, normalized(albedo8)]) {
+      for (const normal of [normal8, normalized(normal8)]) {
+        assert.deepEqual(unet._processImageData(color, image(albedo), image(normal), hdr), expected);
+      }
+    }
+  }
+});
+
+test('validates sizes of floating-point CPU auxiliary images', () => {
+  const unet = Object.create(UNet.prototype);
+  unet._aux = true;
+  const image = (width, height) => ({ data: new Float32Array(width * height * 4), width, height });
+  assert.throws(() => unet._processImageData(image(2, 1), image(1, 2), image(1, 2), true), /Image size mismatch/);
+  assert.throws(() => unet._processImageData(image(2, 1), image(2, 1), image(1, 2), true), /Image size mismatch/);
+});
+
 test('replicates the image edge into padded model input tiles', () => {
   const unet = Object.create(UNet.prototype);
   const width = 300;
@@ -82,6 +117,25 @@ test('replicates the image edge into padded model input tiles', () => {
   assert.deepEqual(pixel(303, 299), [299, 299, 598]);
   assert.deepEqual(pixel(299, 303), [299, 299, 598]);
   assert.deepEqual(pixel(303, 303), [299, 299, 598]);
+});
+
+test('profiles every tile and sums matching network nodes for the complete image', async () => {
+  let captured = 0;
+  const unet = createUNet(async () => {});
+  unet._device.features = new Set(['timestamp-query']);
+  unet._nativeExecutor = {
+    profileNextExecution() { captured++; return true; },
+    getLastExecutionProfile: async () => ({ totalMs: captured + 0.5,
+      layers: [{ id: 'input-pack', durationMs: 0.5 }, { id: 'conv', durationMs: captured }] })
+  };
+  assert.equal(unet.profileNextExecution(), true);
+  assert.equal((await run(unet)).type, 'done');
+  assert.equal(captured, 2);
+  assert.deepEqual(await unet.getLastExecutionProfile(), {
+    totalMs: 4, layers: [{ id: 'input-pack', durationMs: 1 }, { id: 'conv', durationMs: 3 }]
+  });
+  await run(unet);
+  assert.equal(captured, 2);
 });
 
 test('reports first and later asynchronous tile failures exactly once', async () => {

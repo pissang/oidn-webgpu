@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { Float16Array } from '@petamoriken/float16';
 import { NativeUNetExecutor } from '../lib/nativeUNet.js';
 import { validateUNetModel } from '../lib/modelSpec.js';
-import { HostTensor, TensorDesc } from '../lib/tza.js';
+import { HostTensor, TensorDesc, parseTZA } from '../lib/tza.js';
 
 const GPU_USAGE = {
   STORAGE: 1,
@@ -276,6 +277,8 @@ test('freezes normalized GEMM configuration without mutating caller input', asyn
     );
     assert.deepEqual(executor.gemm, {
       decoderLoad: 'per-load',
+      decoderSubPixel: false,
+      unrollRows: false,
       poolLayout: 'channels',
       sharedLayout: 'padded',
       accumulationOrder: 'k-major',
@@ -340,6 +343,23 @@ test('rejects unsupported GEMM address, layout, register, workgroup, and storage
   });
 });
 
+function matrixDevice(storageBytes, size = 16) {
+  const device = fakeDevice({ maxComputeWorkgroupStorageSize: storageBytes });
+  device.features.add('subgroups');
+  device.features.add('chromium-experimental-subgroup-matrix');
+  device.adapterInfo = { subgroupMinSize: 32, subgroupMaxSize: 32,
+    subgroupMatrixConfigs: [{ componentType: size === 16 ? 'f16' : 'f32', resultComponentType: 'f32', M: size, N: size, K: size }] };
+  return device;
+}
+
+test('retains 16x16 matrices with one fragment when two exceed the shared-memory limit', () => {
+  const executor = new NativeUNetExecutor(matrixDevice(32768), testModel('Float16').model,
+    { precision: 'fp16', kernel: 'subgroup-matrix' });
+  assert.equal(executor.subgroupMatrix?.size, 16);
+  assert.equal(executor.subgroupMatrixOutputFragments, 1);
+  executor.dispose();
+});
+
 test('padded shared-memory layout accepts its exact storage limit and rejects one byte below it', async () => {
   await withGpuUsage(() => {
     const model = testModel('Float16').model;
@@ -366,4 +386,51 @@ test('padded shared-memory layout accepts its exact storage limit and rejects on
       /Unsupported GEMM tile configuration/
     );
   });
+});
+
+
+test('activation slots grow for retired values and never alias overlapping lifetimes', () => {
+  for (const weights of ['rt_hdr_alb_nrm_small.tza', 'rt_hdr_alb_nrm.tza', 'rt_hdr_calb_cnrm_large.tza']) {
+    const bytes = readFileSync(new URL(`../weights/${weights}`, import.meta.url));
+    const model = validateUNetModel(parseTZA(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
+    for (const [precision, kernel] of [['fp16', 'implicit-gemm'], ['fp32', 'implicit-gemm'], ['fp16', 'subgroup-matrix']]) {
+      const device = fakeDevice();
+      device.features.add('subgroups');
+      device.features.add('wgpu-cooperative-matrix');
+      device.adapterInfo = {
+        subgroupMinSize: 32, subgroupMaxSize: 32,
+        subgroupMatrixConfigs: [{ componentType: 'f16', resultComponentType: 'f32', M: 8, N: 8, K: 8 }]
+      };
+      const executor = new NativeUNetExecutor(device, model, { precision, kernel });
+      const execution = executor._execution(80, 48);
+      const { plan, valueBuffers, slots } = execution;
+      const lifetimes = new Map([[plan.spec.input, { first: -1, last: -1 }]]);
+      plan.nodes.forEach((node, index) => {
+        lifetimes.set(node.id, { first: index, last: index });
+        const inputs = node.op === 'fusedUpsampleConcatConv2d'
+          ? node.inputs.map((input) => input.value) : [node.input];
+        for (const input of inputs) lifetimes.get(input).last = index;
+      });
+      lifetimes.get(plan.spec.output).last = plan.nodes.length;
+      for (const [value, interval] of lifetimes) {
+        const buffer = valueBuffers.get(value);
+        const shape = plan.valueShapes.get(value);
+        const size = shape.width * shape.height * Math.ceil(shape.channels / 4) * 4 * (value === plan.spec.output || precision === 'fp32' ? 4 : 2);
+        assert.ok(buffer.data.byteLength >= size, `${weights}/${kernel}/${value}: capacity`);
+        for (const [other, otherInterval] of lifetimes) {
+          if (value === other || valueBuffers.get(other) !== buffer) continue;
+          assert.ok(interval.last < otherInterval.first || otherInterval.last < interval.first,
+            `${weights}/${kernel}: ${value} overlaps ${other}`);
+        }
+      }
+      if (model.spec.family === 'oidn-unet-large' && kernel === 'subgroup-matrix') {
+        assert.equal(plan.nodes.filter((node) => node.op === 'fusedConvReluMaxPool2d').length, 4);
+        assert.equal(slots.length, 6);
+        // Includes the slots that grow from pooled encoder values to decoder values.
+        assert.equal(slots.reduce((sum, slot) => sum + slot.capacity, 0), 1167360);
+      }
+      executor.dispose();
+      assert.ok(device.buffers.every((buffer) => buffer.destroyCalls === 1));
+    }
+  }
 });

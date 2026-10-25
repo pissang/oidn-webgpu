@@ -1,358 +1,90 @@
-# Open Image Denoise on the Web
+# oidn-webgpu
 
-This library brings the state-of-the-art AI-based denoising library [Open Image Denoise](https://github.com/RenderKit/oidn) to the web.
-Currently it's only available on the browsers support WebGPU.
+[Open Image Denoise](https://github.com/RenderKit/oidn) (OIDN) on WebGPU. It denoises path-traced images on the GPU, in browsers and natively through [wgpu](https://wgpu.rs).
 
-It's used in the [Vector to 3D](https://www.figma.com/community/plugin/1264600219316901594/) Figma plugin for high quality rendering and denoising.
+> Formerly published as `oidn-web`; versions up to 0.5.0 remain available under that name.
 
-|                                           2000 Samples                                           |                                     3 Samples                                      |                                   3 Samples + Denoised                                   |
-| :----------------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------: |
-| ![](https://github.com/pissang/oidn-web/blob/main/examples/test/ground-truth.png 'Ground Truth') | ![](https://github.com/pissang/oidn-web/blob/main/examples/test/noisy.png 'Noisy') | ![](https://github.com/pissang/oidn-web/blob/main/examples/test/denoised.png 'Denoised') |
+|                                            2000 samples                                             |                                       3 samples                                       |                                    3 samples + denoised                                    |
+| :-------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------: | :----------------------------------------------------------------------------------------: |
+| ![](https://github.com/pissang/oidn-webgpu/blob/main/examples/test/ground-truth.png 'Ground Truth') | ![](https://github.com/pissang/oidn-webgpu/blob/main/examples/test/noisy.png 'Noisy') | ![](https://github.com/pissang/oidn-webgpu/blob/main/examples/test/denoised.png 'Denoised') |
 
-## How it works
+## Runtimes
 
-The OIDN U-Net runs directly on WebGPU with model-driven WGSL compute
-pipelines. Convolution activations use a blocked
-four-channel layout, decoder `upsample + concat + conv` patterns are fused,
-and all network dispatches for a tile are submitted in one command buffer.
-FP16 and FP32 convolutions use channel-specialized implicit-GEMM tiles by
-default, with a direct convolution for the final output layer and separate
-max-pool passes.
+| Runtime | Status | Distribution | Guide |
+| --- | --- | --- | --- |
+| Browser (WebGPU) | Released (0.x) | GitHub Release package archive | [docs/web.md](docs/web.md) |
+| Rust, sharing the host's wgpu device and buffers | Experimental | Cargo Git dependency or bundled release crate | [native/README.md](native/README.md#rust-api) |
+| C, CPU images in and out | Experimental | GitHub Releases or build from source | [native/README.md](native/README.md#c-api) |
 
-TZA half-float weights stay half-float when the device enables `shader-f16`.
-FP16 products are accumulated in short half-precision groups and periodically
-folded into FP32 accumulators; the final output is FP32. Devices without
-`shader-f16` automatically use the native FP32 path. Shape-independent compute
-pipelines compile asynchronously before initialization resolves, so first-use
-shader compilation does not interrupt an interactive denoise.
+Every runtime executes the same WGSL kernels, planned by the same TypeScript core. The [native guide](native/README.md) records tested GPU configurations and output validation.
 
-## How to Use
-
-[Basic Example](https://oidn-web-example.vercel.app/) ([Code](https://github.com/pissang/oidn-web-example/blob/main/src/main.js))
-
-[Use with three-gpu-pathtracer](https://github.com/gkjohnson/three-gpu-pathtracer/blob/main/src/webgpu/API.md#oidndenoiser)
-
-### Install
+## Quick start (browser)
 
 ```shell
-npm i oidn-web
+npm i https://github.com/pissang/oidn-webgpu/releases/download/v0.6.0/oidn-webgpu-0.6.0.tgz
 ```
 
-The TZA weights files are not included in the package. You can find them in this repo or [oidn-weights](https://github.com/RenderKit/oidn-weights).
-
-### Denoise a noisy LDR image
+Version 0.6.0 is distributed through GitHub Releases; `oidn-webgpu` is not yet published to the npm registry. Weights are not in the package. Copy a `.tza` file from [`weights/`](weights/) or [oidn-weights](https://github.com/RenderKit/oidn-weights) and serve it with your app.
 
 ```ts
-import { UNet, initUNetFromURL } from 'oidn-web';
-initUNetFromURL('./weights/rt_ldr.tza').then((unet) => {
-  // Read the image data.
-  const noisyImageData = noisyCanvas
-    .getContext('2d')
-    .getImageData(0, 0, width, height);
+import { initUNetFromURL } from 'oidn-webgpu';
 
-  // Tile execute the denoising. High resolutions use balanced rectangular
-  // tiles with overlap only at boundaries shared by another tile.
-  const abortDenoising = unet.tileExecute({
-    // The color input for LDR image is 4 channels.
-    // In the format of Uint8ClampedArray or Uint8Array.
-    color: noisyImageData,
-    done(denoised) {
-      console.log('Finished');
-    },
-    progress(denoised, tileData, tile) {
-      // Put the denoised tile on the output canvas
-      outputCtx.putImageData(tileData, tile.x, tile.y);
-    }
-  });
-});
-```
+const unet = await initUNetFromURL('/weights/rt_ldr.tza');
+const noisy = ctx.getImageData(0, 0, width, height);
 
-### Denoise a noisy HDR image
-
-```ts
-import { UNet, initUNetFromURL } from 'oidn-web';
-initUNetFromURL('./weights/rt_hdr.tza', undefined, {
-  // It's hdr input.
-  hdr: true
-}).then((unet) => {
-  const abortDenoising = unet.tileExecute({
-    // The color input for HDR image is 4 channels.
-    // In the format of Float32Array.
-    color: { data: noisyColor, width, height },
-    done(denoised) {
-      console.log('Finished');
-    },
-    progress(denoised, tileData, tile) {
-      // The denoised data and tileData has same format with the input.
-    }
-  });
-});
-```
-
-HDR transfer defaults to the PU curve used by the regular RT models. Models
-trained for the RTLightmap filter use the logarithmic curve from upstream OIDN;
-select it explicitly when loading such weights:
-
-```ts
-const lightmap = await initUNetFromURL('./weights/rtlightmap_hdr.tza', undefined, {
-  hdr: true,
-  hdrTransfer: 'log'
-});
-```
-
-The `log` transfer maps `y` to `log(1 + y) / log(65505)` and reverses this
-before writing HDR output. For GPU-buffer inputs, callers may continue to
-pre-scale the complete image once and leave the runtime's `inputScale` at its
-existing default of `1`.
-
-### Use auxiliary images
-
-```ts
-import { UNet, initUNetFromURL } from 'oidn-web';
-initUNetFromURL('./weights/rt_hdr_alb_nrm.tza', undefined, {
-  aux: true,
-  hdr: true
-}).then((unet) => {
-  const abortDenoising = unet.tileExecute({
-    // Same as examples before. noisyColor of HDR image is Float32Array. LDR image is Uint8ClampedArray.
-    color: { data: noisyColor, width, height },
-    // Normal and albedo are both 4 channels in Uint8ClampedArray.
-    normal: { data: normalData, width, height },
-    albedo: { data: albedoData, width, height },
-
-    done(denoised) {
-      console.log('Finished');
-    },
-    progress(denoised, tileData, tile) {
-      ///...
-    }
-  });
-});
-```
-
-### Integrate into your WebGPU Pipeline
-
-If you already have a WebGPU path tracer. You can integrate the oidn-web into your pipeline. It supports input/output gpu buffers to avoid the cost of syncing between CPU and GPU.
-
-`hdr` and `aux` are required in the WebGPU pipeline.
-
-```ts
-initUNetFromURL(
-  './weights/rt_hdr_alb_nrm.tza',
-  {
-    // Share the GPUDevice with the native WGSL runtime.
-    device
+const abort = unet.tileExecute({
+  color: noisy,
+  progress(_image, tileData, tile) {
+    ctx.putImageData(tileData!, tile.x, tile.y);
   },
-  {
-    aux: true,
-    hdr: true
-  }
-).then((unet) => {
-  const abortDenoising = unet.tileExecute({
-    // Inputs are all GPUBuffer
-    color: { data: colorBuffer, width, height },
-    normal: { data: normalBuffer, width, height },
-    albedo: { data: albedoBuffer, width, height },
-
-    done(denoised) {
-      console.log('Finished');
-    },
-    progress(denoised) {
-      // Denoised data is also a GPUBuffer.
-      // tileData is undefined if using GPUBuffer as input/output
-    }
-  });
-});
-```
-
-### Use smaller and larger weights.
-
-OIDN also provides a large weights file, which provides a better quality, and a small weights file, which provides a better performance.
-
-```ts
-// Change the weights file to large and nothing else needs to do.
-initUNetFromURL('./weights/rt_hdr_calb_cnrm_large.tza', ...);
-```
-
-```ts
-// Change the weights file to small and nothing else needs to do.
-initUNetFromURL('./weights/rt_hdr_alb_nrm_small.tza', ...);
-```
-
-Other combinations can be found in the [oidn-weights](https://github.com/RenderKit/oidn-weights)
-
-### FP16 and runtime information
-
-Standalone initialization requests `shader-f16` when the adapter supports it.
-When sharing a device, optional features must be requested when that device is
-created; WebGPU features cannot be enabled afterward.
-
-```ts
-const requiredFeatures = adapter.features.has('shader-f16')
-  ? ['shader-f16']
-  : [];
-const device = await adapter.requestDevice({ requiredFeatures });
-
-const unet = await initUNetFromURL(
-  modelUrl,
-  { device },
-  {
-    aux: true,
-    hdr: true,
-    precision: 'auto' // 'fp16' enforces support; 'fp32' is deterministic fallback
-  }
-);
-
-console.log(unet.getRuntimeInfo());
-// { gpuEngine: 'wgsl', precision: 'fp16', model: 'oidn-unet-large-v1', ... }
-```
-
-For one-shot native GPU timings, request a profile immediately before an
-execution. This is available when the shared device enabled `timestamp-query`:
-
-```ts
-if (unet.profileNextExecution()) {
-  unet.tileExecute({
-    color,
-    albedo,
-    normal,
-    done: async () => {
-      console.table((await unet.getLastExecutionProfile()).layers);
-    }
-  });
-}
-```
-
-### Updating to a new OIDN model
-
-TZA stores tensors but not the executable graph. The runtime therefore keeps
-the graph in a versioned `UNetModelSpec`, separate from shader and precision
-code. Built-in descriptors cover the current OIDN small and large RT U-Nets.
-At load time the descriptor is detected from the complete tensor-name set, and
-tensor layout, dtype, byte length, kernel shape, bias shape, and graph channel
-flow are validated before GPU resources are created.
-
-If an OIDN update keeps one of these topologies and tensor names, changed
-channel widths are handled automatically. If it adds or renames nodes, add a
-new descriptor (or pass `modelSpec`) and its validation fixture. Existing graph
-fusion rules apply to the new descriptor without changes to WGSL kernels.
-
-Use the inspection command to get a stable SHA-256, full tensor signature, and
-descriptor compatibility result for an upstream weight file:
-
-```shell
-npm run model:inspect -- weights/rt_hdr_alb_nrm.tza
-```
-
-```ts
-const unet = await initUNetFromURL(newModelUrl, undefined, {
-  aux: true,
-  hdr: true,
-  modelSpec: newOidnModelSpec
-});
-```
-
-### GPU backpressure, scheduling, and dynamic tiles
-
-`tileExecute` waits for the submitted GPU work of a tile before scheduling the
-next tile. This keeps at most one OIDN tile in flight, which makes cancellation
-responsive instead of leaving queued denoising work ahead of interactive
-rendering.
-
-Between tiles, JavaScript yields according to `scheduling`:
-
-- `'event-loop'` (default) continues on the next macrotask. Execution finishes
-  as soon as the GPU allows and also completes in background tabs.
-- `'animation-frame'` waits for the next display frame, so at most one tile
-  runs per frame. Use it when OIDN shares the GPU with an interactive renderer
-  and frame rate matters more than denoise latency. If no frame arrives within
-  100 ms (for example in a hidden tab), the next tile runs anyway.
-
-Asynchronous failures, including WebGPU device loss and exceptions thrown by
-`progress` or `done`, are reported to the optional `error` callback. Unless the
-returned abort function is called first, every execution ends by calling `done`
-or `error`; without an `error` callback, failures are logged to the console.
-
-Tile sizing is adaptive by default. `maxTileSize` is a hard upper bound. Each
-execution partitions the image into balanced rectangular output regions and
-adds model context only on edges shared with another tile. Input shapes are
-bucketed to at most two sizes so the native execution cache remains stable.
-The smoothed P75 GPU time of completed tiled executions adjusts the maximum tile
-size used by the next execution. The potentially cold first tile is excluded,
-cancelled and single-tile work is ignored, and a layout is held for at least two
-complete executions. The default range starts at 432 pixels, does not go below
-256, changes in 16-pixel steps, and targets about 16 ms of GPU work per tile.
-
-```ts
-const unet = await initUNetFromURL('./weights/rt_hdr_alb_nrm.tza', undefined, {
-  aux: true,
-  hdr: true,
-  maxTileSize: 512,
-  dynamicTile: {
-    minTileSize: 256,
-    initialTileSize: 432,
-    targetTileTimeMs: 16
-  }
-});
-
-// An interactive renderer can pace tiles to display frames. A smaller halo
-// lowers per-tile cost; the default overlap is half of the model receptive
-// field rounded up to 16 pixels.
-const abortDenoising = unet.tileExecute({
-  color,
-  albedo,
-  normal,
-  tileOverlap: 80,
-  scheduling: 'animation-frame',
   done(denoised) {
-    // ...
+    ctx.putImageData(denoised, 0, 0);
   },
   error(reason) {
     console.error(reason);
   }
 });
-
-// Restore fixed-size behavior when deterministic tiling is preferred.
-initUNetFromURL('./weights/rt_hdr_alb_nrm.tza', undefined, {
-  aux: true,
-  hdr: true,
-  maxTileSize: 512,
-  dynamicTile: false
-});
 ```
 
-### Warm up and whole-image execution
+HDR input, auxiliary images, GPU buffers, tiling and performance options are in the [browser guide](docs/web.md).
 
-The native runtime creates per-shape GPU buffers and pipelines the first time
-it sees a tile input shape. Call `prepareForImage` with the expected image size while a loading
-state is still visible, so the first `tileExecute` does not stall:
+## Choose weights
 
-```ts
-await unet.prepareForImage(width, height);
-```
+Pick the weights from what your renderer produces. The same files work in every runtime.
 
-Pass `wholeImage: true` to `tileExecute` (and to `prepareForImage`) to run the
-complete image as one tile and skip tiling overhead. It ignores `maxTileSize`,
-so the image must fit the device's buffer and dispatch limits.
+| File | Color | Auxiliary inputs | Browser options |
+| --- | --- | --- | --- |
+| `rt_ldr.tza` | LDR | none | `{}` |
+| `rt_ldr_alb_nrm.tza` | LDR | albedo + normal | `{ aux: true }` |
+| `rt_hdr.tza` | HDR | none | `{ hdr: true }` |
+| `rt_hdr_alb_nrm.tza` | HDR | albedo + normal | `{ hdr: true, aux: true }` |
+| `rt_hdr_alb_nrm_small.tza` | HDR | albedo + normal; faster, lower quality | `{ hdr: true, aux: true }` |
+| `rt_hdr_calb_cnrm.tza` | HDR | noise-free albedo + normal | `{ hdr: true, aux: true }` |
+| `rt_hdr_calb_cnrm_large.tza` | HDR | noise-free albedo + normal; slower, higher quality | `{ hdr: true, aux: true }` |
+| `rtlightmap_hdr.tza` ([oidn-weights](https://github.com/RenderKit/oidn-weights)) | HDR lightmap | none | `{ hdr: true, hdrTransfer: 'log' }` |
 
-### Benchmark the native runtime against TFJS
+The model size (small, default, large) is chosen by the file alone; no option changes. Loading throws if `aux` does not match the file's inputs. An HDR/LDR mismatch cannot be detected from the file, so set `hdr` to match the weights.
 
-The browser benchmark automatically finds the nearest ancestor whose package
-still depends on TensorFlow.js, builds that commit in a temporary worktree, and
-compares it with the current WGSL FP32 and FP16 runtimes. Each measured run
-waits for the WebGPU queue to finish, so the result includes execution rather
-than only JavaScript command submission. It also samples output against the
-TFJS FP32 result and, when timestamp queries are supported, reports the five
-most expensive native network nodes.
+## Documentation
 
-```shell
-npm run benchmark -- --width 512 --height 512 --tile-size 512 --runs 5
-```
+| Document | Covers |
+| --- | --- |
+| [docs/web.md](docs/web.md) | Browser API: loading, inputs, `tileExecute`, GPU pipelines, tiling, precision, profiling |
+| [native/README.md](native/README.md) | Rust and C APIs, image contracts, builds and precompiled packages |
+| [docs/development.md](docs/development.md) | Architecture, build/test/benchmark commands, updating OIDN models, CI |
+| [AGENTS.md](AGENTS.md) | Repository map and working rules for coding agents and contributors |
+| [llms.txt](llms.txt) | Doc index for LLM tools |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes and migration steps |
 
-Results are printed as a table and written to
-`benchmarks/results/latest.{json,md}`. Use `--baseline <commit>` to pin an
-explicit historical version or `--chrome <path>` to select a browser.
+## Examples and users
 
-## Credits
+- [Basic example](https://oidn-web-example.vercel.app/) ([code](https://github.com/pissang/oidn-web-example/blob/main/src/main.js)), built on the earlier `oidn-web` 0.3 package
+- Local examples in [`examples/`](examples/): run `npm run dev` and open `/examples/basic.html`, `hdr.html`, `auxiliary.html` or `gpu.html`.
+- [three-gpu-pathtracer `OIDNDenoiser`](https://github.com/gkjohnson/three-gpu-pathtracer/blob/main/src/webgpu/API.md#oidndenoiser)
+- [Vector to 3D](https://www.figma.com/community/plugin/1264600219316901594/) Figma plugin
 
-Huge thanks to Max Liani for his series: https://maxliani.wordpress.com/2023/03/17/dnnd-1-a-deep-neural-network-dive/. My work is mostly inspired by it.
+## Credits and license
+
+Inspired by Max Liani's series [DNND: a deep neural network dive](https://maxliani.wordpress.com/2023/03/17/dnnd-1-a-deep-neural-network-dive/).
+
+Code is MIT licensed ([LICENSE](LICENSE)). The OIDN weights in [`weights/`](weights/) are Apache 2.0 ([weights/LICENSE.txt](weights/LICENSE.txt)).

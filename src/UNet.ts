@@ -21,8 +21,10 @@ import {
 } from './modelSpec';
 import {
   NativeUNetExecutor,
+  type NativeSubgroupMatrixOptions,
   type NativeUNetGemmOptions,
   type NativeUNetKernelSetting,
+  type NativeUNetExecutionProfile,
   type NativeUNetPrecisionSetting
 } from './nativeUNet';
 import { WebNNUNetExecutor } from './webnnUNet';
@@ -94,6 +96,8 @@ class UNet {
 
   private _dynamicTileController: DynamicTileController;
   private _lastExecution?: UNetExecutionStats;
+  private _profileNextImage = false;
+  private _lastImageProfile?: NativeUNetExecutionProfile;
   private _activeExecutionFailures = new Set<(reason: unknown) => void>();
   private _deviceLostObserved = false;
   private _deviceLostSettled = false;
@@ -122,6 +126,7 @@ class UNet {
       /** Model-independent convolution kernel selection. */
       kernel?: NativeUNetKernelSetting;
       gemm?: NativeUNetGemmOptions;
+      subgroupMatrix?: NativeSubgroupMatrixOptions;
       /** Explicit descriptor for a new OIDN topology not in the built-in registry. */
       modelSpec?: UNetModelSpec;
     } = {}
@@ -160,7 +165,12 @@ class UNet {
       this._nativeExecutor = new NativeUNetExecutor(
         this._device,
         validatedModel,
-        { precision: opts.precision, kernel: opts.kernel, gemm: opts.gemm }
+        {
+          precision: opts.precision,
+          kernel: opts.kernel,
+          gemm: opts.gemm,
+          subgroupMatrix: opts.subgroupMatrix
+        }
       );
     }
   }
@@ -236,7 +246,8 @@ class UNet {
             configured: this._nativeExecutor.kernelSetting,
             gemm: this._nativeExecutor.gemm,
             maxSpatialInputBlocks: this._nativeExecutor.maxSpatialInputBlocks,
-            subgroupsAvailable: this._nativeExecutor.subgroupsAvailable
+            subgroupsAvailable: this._nativeExecutor.subgroupsAvailable,
+            subgroupMatrix: this._nativeExecutor.subgroupMatrix
           }
         : undefined,
       webnn: this._webNNExecutor?.support,
@@ -292,19 +303,21 @@ class UNet {
     return () => this._activeExecutionFailures.delete(fail);
   }
 
-  /** Captures per-node GPU timestamps for the next native tile execution. */
+  /** Captures network GPU timestamps across every tile of the next image. */
   profileNextExecution() {
-    return this._nativeExecutor?.profileNextExecution() ?? false;
+    if (!this._nativeExecutor || !this._device.features.has('timestamp-query')) return false;
+    this._profileNextImage = true;
+    return true;
   }
 
   getLastExecutionProfile() {
-    return this._nativeExecutor?.getLastExecutionProfile();
+    return this._lastImageProfile ? Promise.resolve(this._lastImageProfile) : undefined;
   }
 
   private _processImageData(
     color: ImageData | HDRImageData,
-    albedo: ImageData | undefined,
-    normal: ImageData | undefined,
+    albedo: ImageData | HDRImageData | undefined,
+    normal: ImageData | HDRImageData | undefined,
     isHDR: boolean
   ) {
     const rawData = color.data;
@@ -328,6 +341,10 @@ class UNet {
 
     const albedoData = albedo?.data;
     const normalData = normal?.data;
+    // Each guide can be an 8-bit image or normalized float RGBA,
+    // independently of the color image's HDR setting and the other guide.
+    const albedoDivisor = albedoData instanceof Float32Array ? 1 : 255;
+    const normalDivisor = normalData instanceof Float32Array ? 1 : 255;
     for (let i = 0; i < rawData.length; i += 4) {
       const i2 = (i / 4) * channels;
 
@@ -338,10 +355,10 @@ class UNet {
           tensorData[i2 + c] = rawData[i + c] / 255;
         }
         if (albedoData) {
-          tensorData[i2 + c + 3] = albedoData[i + c] / 255;
+          tensorData[i2 + c + 3] = albedoData[i + c] / albedoDivisor;
         }
         if (normalData) {
-          tensorData[i2 + c + 6] = normalData[i + c] / 255;
+          tensorData[i2 + c + 6] = normalData[i + c] / normalDivisor;
         }
       }
     }
@@ -545,8 +562,8 @@ class UNet {
     error
   }: {
     color: T;
-    albedo?: ImageData | GPUImageData;
-    normal?: ImageData | GPUImageData;
+    albedo?: ImageData | HDRImageData | GPUImageData;
+    normal?: ImageData | HDRImageData | GPUImageData;
     /**
      * If denoise alpha channel. Otherwise denoise RGB channels.
      */
@@ -621,8 +638,8 @@ class UNet {
     if (!isGPUImageData(color)) {
       rawData = this._processImageData(
         color,
-        albedo as ImageData | undefined,
-        normal as ImageData | undefined,
+        albedo as ImageData | HDRImageData | undefined,
+        normal as ImageData | HDRImageData | undefined,
         hdr
       );
     }
@@ -650,6 +667,9 @@ class UNet {
       typeof performance === 'undefined' ? Date.now() : performance.now();
     const executionStartTime = now();
     const tileTimesMs: number[] = [];
+    const profileImage = this._profileNextImage === true;
+    this._profileNextImage = false;
+    const layerTimes = new Map<string, number>();
     const cancelScheduledTile = () => {
       if (scheduledTimer !== undefined) {
         clearTimeout(scheduledTimer);
@@ -714,6 +734,7 @@ class UNet {
         ? undefined
         : makeImageData(tile.output.width, tile.output.height);
       const tileStartTime = now();
+      if (profileImage) this._nativeExecutor!.profileNextExecution();
       const resGPUBuffer = await this._executeTile(
         isGPUImageData(color)
           ? {
@@ -731,6 +752,12 @@ class UNet {
         hdr,
         denoiseAlpha
       );
+      if (profileImage) {
+        const profile = await this._nativeExecutor!.getLastExecutionProfile();
+        for (const layer of profile?.layers ?? []) {
+          layerTimes.set(layer.id, (layerTimes.get(layer.id) ?? 0) + layer.durationMs);
+        }
+      }
       if (state !== 'active') return;
       const output = outputImageData || {
         data: resGPUBuffer,
@@ -800,6 +827,10 @@ class UNet {
           // execution. Deregister before the user callback resolves so a
           // completed execution never remains retained by the device watcher.
           unregisterDeviceLoss();
+          if (profileImage) {
+            const layers = [...layerTimes].map(([id, durationMs]) => ({ id, durationMs }));
+            this._lastImageProfile = { totalMs: layers.reduce((sum, layer) => sum + layer.durationMs, 0), layers };
+          }
           await done(output as any);
           if (state === 'active') {
             state = 'settled';

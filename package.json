@@ -1,7 +1,7 @@
 {
-  "name": "oidn-web",
-  "version": "0.5.0",
-  "description": "Run Open Image Denoiser on the Web",
+  "name": "oidn-webgpu",
+  "version": "0.6.0",
+  "description": "Open Image Denoise on WebGPU, in browsers and natively",
   "main": "lib/main.js",
   "types": "lib/main.d.ts",
   "files": [
@@ -22,9 +22,15 @@
     "prepare": "npm run build:lib",
     "prepublishOnly": "npm run build && npm run build:lib",
     "build:lib": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc",
-    "watch:lib": "tsc --watch"
+    "watch:lib": "tsc --watch",
+    "native:build": "node scripts/native-build.mjs"
   },
   "author": "pissang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pissang/oidn-webgpu.git"
+  },
+  "homepage": "https://github.com/pissang/oidn-webgpu#readme",
   "license": "MIT",
   "dependencies": {
     "@petamoriken/float16": "^3.8.7"

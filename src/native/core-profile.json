@@ -1,0 +1,40 @@
+{
+  "profile_format": 1,
+  "name": "oidn_webgpu_core",
+  "entry": "program.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "oidnw_core_",
+    "init_symbol": "oidnw_core_init",
+    "sink_register_symbol": "oidnw_core_sink",
+    "collect_symbol": "oidnw_core_collect",
+    "result_reset_symbol": "oidnw_core_reset",
+    "localize_runtime": true
+  },
+  "exports": [
+    {
+      "export": "inspectModelPacket",
+      "symbol": "oidnw_core_inspect_model",
+      "params": ["bytes"],
+      "returns": "bytes"
+    },
+    {
+      "export": "recordNetworkPacket",
+      "symbol": "oidnw_core_record_network",
+      "params": [
+        "bytes",
+        "bytes"
+      ],
+      "returns": "bytes"
+    },
+    {
+      "export": "recordDenoisePacket",
+      "symbol": "oidnw_core_record_denoise",
+      "params": [
+        "bytes",
+        "bytes"
+      ],
+      "returns": "bytes"
+    }
+  ]
+}

@@ -26,6 +26,12 @@ Options:
   --direct-gemm-only   Compare v0.4.0 Direct with current Direct and GEMM
   --baseline <commit>  Reference commit (default: nearest TFJS ancestor)
   --chrome <path>      Chrome/Chromium executable
+  --weights <name>     Model in weights/ (default: rt_hdr_calb_cnrm_large.tza)
+  --kernels <list>     Compare FP16 kernels (comma separated) against FP32
+                       implicit GEMM, e.g. implicit-gemm,subgroup-matrix
+  --matrix <list>      Subgroup-matrix variants for --kernels, as
+                       <fragments|default>[-f16], e.g. default,1,2,4-f16
+  --gemm-subpixel <list>  GEMM decoder variants: off,on (requires --kernels)
   --output <path>      JSON output (default: benchmarks/results/latest.json)
   --help               Show this message
 `);
@@ -41,6 +47,10 @@ function parseArgs(argv) {
     inputHDR: null,
     defaultOnly: false,
     directGemmOnly: false,
+    weights: 'rt_hdr_calb_cnrm_large.tza',
+    kernels: null,
+    matrix: null,
+    gemmSubpixel: null,
     output: path.join(benchmarkDirectory, 'results/latest.json')
   };
   const names = {
@@ -52,6 +62,10 @@ function parseArgs(argv) {
     'input-hdr': 'inputHDR',
     baseline: 'baseline',
     chrome: 'chrome',
+    weights: 'weights',
+    kernels: 'kernels',
+    matrix: 'matrix',
+    'gemm-subpixel': 'gemmSubpixel',
     output: 'output'
   };
   for (let index = 0; index < argv.length; index++) {
@@ -90,6 +104,9 @@ function parseArgs(argv) {
   }
   options.output = path.resolve(projectRoot, options.output);
   if (options.inputHDR) options.inputHDR = path.resolve(process.cwd(), options.inputHDR);
+  if (options.gemmSubpixel && (!options.kernels || options.gemmSubpixel.split(',').some((value) => !['off', 'on'].includes(value)))) {
+    throw new Error('--gemm-subpixel requires --kernels and a comma-separated list of off,on');
+  }
   if (options.defaultOnly && options.directGemmOnly) {
     throw new Error('--default-only and --direct-gemm-only cannot be combined');
   }
@@ -344,6 +361,12 @@ async function benchmarkVariant(browser, origin, options, variant) {
         }
         requiredFeatures.push('subgroups');
       }
+      if (config.kernel === 'subgroup-matrix') {
+        for (const feature of ['subgroups', 'chromium-experimental-subgroup-matrix']) {
+          if (!adapter.features.has(feature)) return { skipped: `${feature} is unavailable` };
+          requiredFeatures.push(feature);
+        }
+      }
       if (adapter.features.has('timestamp-query')) requiredFeatures.push('timestamp-query');
       const device = await adapter.requestDevice({
         requiredFeatures,
@@ -368,6 +391,8 @@ async function benchmarkVariant(browser, origin, options, variant) {
         runtimeOptions.engine = config.engine ?? 'auto';
         runtimeOptions.precision = config.precision;
         runtimeOptions.kernel = config.kernel;
+        if (config.gemm) runtimeOptions.gemm = config.gemm;
+        if (config.subgroupMatrix) runtimeOptions.subgroupMatrix = config.subgroupMatrix;
         runtimeOptions.dynamicTile = false;
       }
       let unet;
@@ -444,6 +469,7 @@ async function benchmarkVariant(browser, origin, options, variant) {
               color: image(buffers.color),
               albedo: image(buffers.albedo),
               normal: image(buffers.normal),
+              error: reject,
               done: (output) => {
                 lastOutput = output;
                 resolve();
@@ -503,6 +529,12 @@ async function benchmarkVariant(browser, origin, options, variant) {
         outputSamples,
         runtimeInfo,
         supportsFP16,
+        enabledFeatures: [...device.features],
+        deviceLimits: {
+          maxBufferSize: device.limits.maxBufferSize,
+          maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+          maxComputeWorkgroupStorageSize: device.limits.maxComputeWorkgroupStorageSize
+        },
         adapter: {
           vendor: adapterInfo.vendor ?? '',
           architecture: adapterInfo.architecture ?? '',
@@ -512,10 +544,12 @@ async function benchmarkVariant(browser, origin, options, variant) {
       };
     }, {
       moduleUrl: `${origin}/${variant.bundle}/oidn.js`,
-      modelUrl: `${origin}/weights/rt_hdr_calb_cnrm_large.tza`,
+      modelUrl: `${origin}/weights/model.tza`,
       baseline: variant.baseline,
       precision: variant.precision,
       kernel: variant.kernel,
+      gemm: variant.gemm,
+      subgroupMatrix: variant.subgroupMatrix,
       engine: variant.engine,
       nativeOptions: variant.nativeOptions,
       width: options.width,
@@ -574,7 +608,7 @@ function markdownReport(report) {
         `Profiled GPU total: ${formatNumber(result.executionProfile.totalMs)} ms\n\n` +
         `| Node | GPU ms |\n| --- | ---: |\n${hotLayers}`;
     });
-  return `# oidn-web benchmark\n\n` +
+  return `# oidn-webgpu benchmark\n\n` +
     `- Current: \`${report.currentCommit}\`\n` +
     (report.baselineCommit
       ? `- ${baselineKind[0].toUpperCase()}${baselineKind.slice(1)} baseline: \`${report.baselineCommit}\`\n`
@@ -600,7 +634,7 @@ async function main() {
   }
   const chrome = options.chrome || defaultChrome();
   if (!chrome) throw new Error('Chrome/Chromium not found; pass --chrome or CHROME_PATH');
-  const baselineCommit = options.defaultOnly
+  const baselineCommit = options.defaultOnly || options.kernels
     ? null
     : await findTFJSBaseline(options.baseline);
   const currentCommit = await gitText(['rev-parse', 'HEAD']);
@@ -650,7 +684,7 @@ async function main() {
 
     const serverFiles = [
       ['/current/oidn.js', path.join(projectRoot, 'dist/oidn.js')],
-      ['/weights/rt_hdr_calb_cnrm_large.tza', path.join(projectRoot, 'weights/rt_hdr_calb_cnrm_large.tza')]
+      ['/weights/model.tza', path.join(projectRoot, 'weights', options.weights)]
     ];
     if (baselineCommit) serverFiles.push(['/baseline/oidn.js', path.join(baselineRoot, 'dist/oidn.js')]);
     if (inputPath) serverFiles.push(['/input.bin', inputPath]);
@@ -659,11 +693,53 @@ async function main() {
       executablePath: chrome,
       headless: true,
       args: [
-        '--enable-unsafe-webgpu',
+        ...(options.kernels?.split(',').includes('subgroup-matrix') ? ['--enable-unsafe-webgpu'] : []),
         '--enable-features=UseSkiaRenderer,WebMachineLearningNeuralNetwork'
       ]
     });
-    const variants = options.directGemmOnly
+    const variants = options.kernels
+      ? [
+          {
+            label: 'WGSL FP32 Implicit GEMM (reference)',
+            bundle: 'current',
+            baseline: true,
+            nativeOptions: true,
+            engine: 'auto',
+            precision: 'fp32',
+            kernel: 'implicit-gemm'
+          },
+          ...options.kernels.split(',').flatMap((kernel) =>
+            kernel === 'subgroup-matrix'
+              ? (options.matrix ?? '').split(',').filter(Boolean).concat(options.matrix ? [] : ['default'])
+                  .map((item) => {
+                    const [fragments, ...flags] = item.split('-');
+                    const subgroupMatrix = item === 'default'
+                      ? undefined
+                      : { ...(fragments === 'default' ? {} : { outputFragments: Number(fragments) }),
+                          ...(flags.includes('f16') ? { accumulation: 'f16' } : {}) };
+                    return {
+                      label: `WGSL FP16 subgroup-matrix${subgroupMatrix ? ` ${item}` : ''}`,
+                      bundle: 'current',
+                      baseline: false,
+                      nativeOptions: true,
+                      engine: 'auto',
+                      precision: 'fp16',
+                      kernel,
+                      subgroupMatrix
+                    };
+                  })
+              : (kernel === 'implicit-gemm' && options.gemmSubpixel ? options.gemmSubpixel.split(',') : ['default']).map((subpixel) => ({
+                  label: `WGSL FP16 ${kernel}${subpixel === 'default' ? '' : ` subpixel ${subpixel}`}`,
+                  bundle: 'current',
+                  baseline: false,
+                  nativeOptions: true,
+                  engine: 'auto',
+                  precision: 'fp16',
+                  kernel,
+                  ...(subpixel === 'default' ? {} : { gemm: { decoderSubPixel: subpixel === 'on' } })
+                })))
+        ]
+      : options.directGemmOnly
       ? [
           {
             label: `v0.4.0 Direct (${baselineCommit.slice(0, 7)})`,
@@ -801,7 +877,7 @@ async function main() {
         defaultOnly: options.defaultOnly,
         directGemmOnly: options.directGemmOnly,
         referenceRuntime: Boolean(options.baseline),
-        model: 'rt_hdr_calb_cnrm_large.tza',
+        model: options.weights,
         gpuQueueCompletionIncluded: true
       },
       browser: chrome,
@@ -834,7 +910,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : error);
-  process.exitCode = 1;
-});
+export { benchmarkVariant, defaultChrome, startServer, summarize };
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : error);
+    process.exitCode = 1;
+  });
+}

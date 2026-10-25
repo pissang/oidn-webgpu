@@ -1,3 +1,5 @@
+import { FLT_MAX, sanitize } from './sanitize.js';
+
 /** HDR transfer functions used by the OIDN input and output processing passes. */
 export type HDRTransfer = 'pu' | 'log';
 
@@ -58,7 +60,7 @@ export function hdrTransferFuncCPU({
   for (let i = 0; i < newData.length; i += channels) {
     for (let channel = 0; channel < 3; channel++) {
       newData[i + channel] = forward(
-        newData[i + channel] * inputScale,
+        sanitize(newData[i + channel] * inputScale, 0, FLT_MAX),
         transfer
       );
     }
@@ -81,8 +83,87 @@ export function hdrTransferFuncInverseCPU({
   const outputScale = 1 / inputScale;
   for (let i = 0; i < newData.length; i += channels) {
     for (let channel = 0; channel < 3; channel++) {
-      newData[i + channel] = inverse(newData[i + channel], transfer) * outputScale;
+      // The network output may contain negative values or NaNs.
+      newData[i + channel] = inverse(sanitize(newData[i + channel], 0, FLT_MAX), transfer) * outputScale;
     }
   }
   return newData;
+}
+
+// TODO put in gpu
+export function avgLogLum({
+  data,
+  channels
+}: {
+  data: Float32Array;
+  channels: number;
+}) {
+  let totalLuminance = 0;
+
+  for (let i = 0; i < data.length; i += channels) {
+    const r = sanitize(data[i], 0, FLT_MAX);
+    const g = sanitize(data[i + 1], 0, FLT_MAX);
+    const b = sanitize(data[i + 2], 0, FLT_MAX);
+    const lum = 0.212671 * r + 0.71516 * g + 0.072169 * b;
+
+    // TODO performance
+    // https://github.com/RenderKit/oidn/blob/713ec7838ba650f99e0a896549c0dca5eeb3652d/devices/cpu/cpu_autoexposure.cpp#L43
+    totalLuminance += Math.log2(lum + 0.0001);
+  }
+  const numPixels = data.length / channels;
+  const averageLuminance = totalLuminance / numPixels;
+  const key = 0.18;
+
+  // https://github.com/RenderKit/oidn/blob/713ec7838ba650f99e0a896549c0dca5eeb3652d/training/color.py#L173
+  return key / Math.pow(2, averageLuminance);
+}
+
+const transferConstantsWGSL = `
+const a = ${a};
+const b = ${b};
+const c = ${c};
+const d = ${d};
+const e = ${e};
+const f = ${f};
+const g = ${g};
+const y0 =${y0};
+const y1 =${y1};
+const x0 =${x0};
+const x1 =${x1};
+
+const normScale = ${puNormScale};
+const rcpNormScale = ${puRcpNormScale};
+`;
+
+/** WGSL declarations of `fn HDRForward(y: f32) -> f32` for the input pass. */
+export function hdrForwardWGSL(transfer: HDRTransfer) {
+  const forwardCode = transfer === 'log'
+    ? `fn HDRForward(y: f32) -> f32 { return log(y + 1.0) * logNormScale; }`
+    : `fn HDRForward(y: f32) -> f32 {
+  if (y <= y0) { return a * y * normScale; }
+  else if (y <= y1) { return (b * pow(y, c) + d) * normScale; }
+  else { return (e * log(y + f) + g) * normScale; }
+}`;
+  return /* wgsl */ `
+${transferConstantsWGSL}
+const logXMax = ${logXMax};
+const logNormScale = ${logNormScale};
+${forwardCode}`;
+}
+
+/** WGSL declarations of `fn HDRInverse(x: f32) -> f32` for the output pass. */
+export function hdrInverseWGSL(transfer: HDRTransfer) {
+  const inverseCode = transfer === 'log'
+    ? `fn HDRInverse(x: f32) -> f32 { return exp(x * logXMax) - 1.0; }`
+    : `fn HDRInverse(x: f32) -> f32 {
+  let y = x * rcpNormScale;
+  if (y <= x0) { return y / a; }
+  else if (y <= x1) { return pow((y - d) / b, 1 / c); }
+  else { return exp((y - g) / e) - f; }
+}`;
+  return /* wgsl */ `
+${transferConstantsWGSL}
+const logXMax = ${logXMax};
+${inverseCode}
+`;
 }

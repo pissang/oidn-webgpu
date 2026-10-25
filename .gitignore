@@ -133,3 +133,10 @@ lib
 
 # Local browser benchmark output
 benchmarks/results/
+.native-build/
+/.zig-cache/
+/native/examples/rust-app/target/
+/native/examples/rust-app/Cargo.lock
+
+# Local working notes
+/plans/
