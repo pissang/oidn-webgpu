@@ -74,6 +74,8 @@ try {
   run(executable('plan'), [weights, '16', '16']);
 
   if (windows) {
+    // Compile the GPU validation host, but do not require a GPU on CI.
+    compile(path.join(directory, 'examples/validate_windows.c'), executable('validate-windows'));
     compile(path.join(root, 'native/tests/msvc-runtime.c'), executable('msvc-runtime'), true);
     const mask = (1n << 64n) - 1n;
     const max = (1n << 128n) - 1n;

@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Windows native packages include a standalone MSVC validation example that checks denoised output, repeated executions and CPU-to-CPU latency using the packaged DLL.
+
 ### Fixed
 
 - Windows native packages build and link with MSVC, including planner runtime initialization and the C and Rust interfaces. C consumers use the DLL CRT (`/MD`).

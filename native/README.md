@@ -2,7 +2,7 @@
 
 Experimental native GPU denoising through [wgpu](https://wgpu.rs) on Metal, Vulkan or Direct3D 12. It runs the same WGSL kernels as the browser package.
 
-**Status:** the API and results may change between versions. Denoised output has been checked for correctness only on macOS with Apple silicon (Metal). On Windows with an NVIDIA RTX 4060 Laptop (Vulkan), native denoising has been timed but its output has not been checked. CI builds and checks packages for Windows and Linux but does not run them on a GPU.
+**Status:** the API and results may change between versions. Denoised output has been checked on macOS with Apple silicon (Metal) and Windows with an NVIDIA RTX 4060 Laptop (Vulkan cooperative matrices and DX12 implicit GEMM). See the [Windows validation example](#validate-a-windows-package) for the tested runtime-check settings. CI builds and checks packages but does not run them on a GPU.
 
 - [Choose an API](#choose-an-api)
 - [Rust API](#rust-api)
@@ -203,6 +203,36 @@ Initialize with `oidnw_filter_desc_default`, then override fields.
 
 `oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 1.0.0 (`0x00010000`). Dynamic loaders should compare the major version before resolving optional functions. Libraries older than this query lack the symbol, so treat a missing symbol as an unknown version.
 
+### Validate a Windows package
+
+[`examples/validate_windows.c`](examples/validate_windows.c) is a standalone MSVC application that links a downloaded package. It generates deterministic HDR color/albedo/normal images, writes RGBA32F output, and prints JSON with the loaded DLL path, adapter, preparation time and individual execution times. Each execution checks finite, nonnegative RGB, preserved alpha and byte-identical repeated output. Execution timing includes uploads and readback; preparation and validation are outside the timed interval.
+
+In an x64 Visual Studio Native Tools PowerShell, run from the repository root. Set `$package` to the extracted download directory; `.native-build/package` below also works after a local package build. The example is included in Windows packages built after it was added; with an older package, compile `native/examples/validate_windows.c` from this repository instead.
+
+```powershell
+$package = (Resolve-Path .native-build/package).Path
+$work = Join-Path $PWD '.native-build/windows-validation'
+New-Item -ItemType Directory -Force $work | Out-Null
+cl.exe /nologo /std:c11 /O2 /MD "/I$package/include" "$package/examples/validate_windows.c" "/Fo$work/validate_windows.obj" "/Fe$work/validate_windows.exe" /link "$package/lib/oidn_webgpu.dll.lib"
+Copy-Item "$package/lib/oidn_webgpu.dll" $work
+& "$work/validate_windows.exe" weights/rt_hdr_calb_cnrm_large.tza 257 259 2 3 0 0 5 21 "$work/output.f32"
+```
+
+| Positional argument | Meaning |
+| --- | --- |
+| Weights, width, height | A three-input HDR TZA model and image dimensions |
+| Backend | `2` = Vulkan, `3` = DX12 |
+| Kernel | `0` = auto, `1` = implicit GEMM, `2` = direct, `3` = subgroup matrix; subgroup matrix requires Vulkan and cooperative-matrix support |
+| Runtime checks | `0` = disabled, `1` = enabled |
+| Maximum tile size | `0` = whole image; for example `128` tests overlapping tiles |
+| Warm-ups, samples | Untimed executions after the first, then timed executions; the first execution is reported separately |
+| Output | RGBA32F file path |
+| Input directory (optional) | `color.f32`, `albedo.f32`, `normal.f32` at the requested size; otherwise generated gradients |
+
+Set `OIDNW_EXPECT_ADAPTER` to a name substring (for example `RTX 4060`) to fail if another GPU is selected. The example needs only MSVC, the package and weights; Node, Rust and Zig are not needed.
+
+The downloaded Windows CI package at source `572efc0` was exercised on an RTX 4060 Laptop with NVIDIA 617.42. Vulkan checked/unchecked output matched byte-for-byte for Small/Base/Large at 720p, 1080p, 1440p, partial workgroups and 128-pixel tiles. Real 1024x1024 HDR images passed numerical comparisons with official OIDN 2.5.1 CUDA using the same weights. DX12 implicit GEMM passed with runtime checks disabled. The additional Small DX12 checked test did not finish within the harness's 240-second limit; checked DX12 is not validated by this run.
+
 ### Core planner
 
 Hosts with their own non-wgpu GPU executor can link the planner-only static library and replay its programs; see [`include/oidn_webgpu_core.h`](include/oidn_webgpu_core.h) and [`examples/plan.c`](examples/plan.c). Rust/wgpu hosts should use `Denoiser` instead.
@@ -230,6 +260,7 @@ Other architectures and Linux musl are not provided. The build host does not gua
 | `lib/liboidn_webgpu_core.a` or `oidn_webgpu_core.lib` | Core planner static library; also the Rust core override |
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `examples/denoise.c`, `examples/plan.c`, `examples/host_buffers.rs` | Complete examples |
+| `examples/validate_windows.c` | Windows DLL output and latency check |
 | `manifest.json`, `SHA256SUMS` | Source commit, target, compiler versions, file hashes |
 
 Package names contain the crate version, target triple and full source commit, for example `oidn-webgpu-native-0.1.0-aarch64-apple-darwin-<commit>.tar.gz`. Packages built from modified sources have a `-dirty` suffix and `source.dirty = true` in the manifest, so their commit alone does not reproduce the contents.

@@ -52,6 +52,7 @@ copy(core, path.join(output, 'lib', path.basename(core)));
 const bench = `oidn-webgpu-bench${windows ? '.exe' : ''}`;
 copy(path.join(release, bench), path.join(output, 'bin', bench));
 copy(path.join(root, 'native/examples/denoise.c'), path.join(output, 'examples/denoise.c'));
+copy(path.join(root, 'native/examples/validate_windows.c'), path.join(output, 'examples/validate_windows.c'));
 copy(path.join(root, 'native/examples/plan.c'), path.join(output, 'examples/plan.c'));
 copy(path.join(root, 'native/examples/host_buffers.rs'), path.join(output, 'examples/host_buffers.rs'));
 copy(path.join(root, 'native/README.md'), path.join(output, 'README.md'));
