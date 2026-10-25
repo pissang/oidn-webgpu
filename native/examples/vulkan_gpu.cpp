@@ -3,7 +3,7 @@
 // Shader assets are compiled from interop/common.rs by interop_shaders.
 #define VK_NO_PROTOTYPES
 #define NOMINMAX
-#include "oidn_webgpu_vulkan.h"
+#include "oidn_webgpu_vulkan.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -71,8 +71,8 @@ static void vkcheck(VkResult status) {
 }
 #define API(call) check(call)
 #define ERR error_text, sizeof error_text
-static void lock_queue(void *) { queue_mutex.lock(); }
-static void unlock_queue(void *) { queue_mutex.unlock(); }
+static void lock_queue(void *) noexcept { queue_mutex.lock(); }
+static void unlock_queue(void *) noexcept { queue_mutex.unlock(); }
 static VKAPI_ATTR VkBool32 VKAPI_CALL
 debug_message(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT,
               const VkDebugUtilsMessengerCallbackDataEXT *data, void *) {
@@ -337,15 +337,10 @@ int main(int argc, char **argv) {
     LOAD_GLOBAL(EnumerateInstanceExtensionProperties)
 #undef LOAD_GLOBAL
     uint32_t count = 0;
-    vkcheck(vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr));
-    std::vector<VkExtensionProperties> available(count);
-    vkcheck(vkEnumerateInstanceExtensionProperties(nullptr, &count, available.data()));
-    std::vector<const char *> extensions;
-    for (auto name : {"VK_KHR_surface", "VK_KHR_win32_surface", "VK_EXT_swapchain_colorspace",
-                      "VK_KHR_get_physical_device_properties2", "VK_EXT_debug_utils"})
-      if (std::any_of(available.begin(), available.end(),
-                      [=](auto &p) { return !strcmp(p.extensionName, name); }))
-        extensions.push_back(name);
+    auto extensions = oidnw::vulkan::instance_extensions(gipa, VK_API_VERSION_1_3);
+    if (std::none_of(extensions.begin(), extensions.end(), [](const char *name) {
+          return !strcmp(name, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        })) extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     const char *layer = "VK_LAYER_KHRONOS_validation";
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.apiVersion = VK_API_VERSION_1_3;
@@ -391,53 +386,22 @@ int main(int argc, char **argv) {
         break;
     if (family == count)
       throw std::runtime_error("requires three graphics+compute queues");
-    VkPhysicalDevice16BitStorageFeatures storage{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
-    VkPhysicalDeviceShaderFloat16Int8Features half{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
-    VkPhysicalDeviceRobustness2FeaturesEXT robust{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
-    VkPhysicalDeviceImageRobustnessFeatures image_robust{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_ROBUSTNESS_FEATURES};
-    VkPhysicalDeviceShaderIntegerDotProductFeatures dot{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES};
-    VkPhysicalDeviceSubgroupSizeControlFeatures subgroup{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
-    VkPhysicalDeviceTimelineSemaphoreFeatures timeline{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
-    VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures zero{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_WORKGROUP_MEMORY_FEATURES};
-    storage.pNext = &half;
-    half.pNext = &robust;
-    robust.pNext = &image_robust;
-    image_robust.pNext = &dot;
-    dot.pNext = &subgroup;
-    subgroup.pNext = &timeline;
-    timeline.pNext = &zero;
-    VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    features.pNext = &storage;
-    vkGetPhysicalDeviceFeatures2(physical, &features);
-    vkcheck(vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr));
-    available.resize(count);
-    vkcheck(vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, available.data()));
-    std::vector<const char *> device_extensions;
-    for (auto name : {"VK_KHR_swapchain", "VK_KHR_swapchain_mutable_format", "VK_EXT_robustness2",
-                      "VK_KHR_external_memory_win32", "VK_EXT_memory_budget"})
-      if (std::any_of(available.begin(), available.end(),
-                      [=](auto &p) { return !strcmp(p.extensionName, name); }))
-        device_extensions.push_back(name);
+    oidnw_gpu_vulkan_requirements_desc query;
+    oidnw_gpu_vulkan_requirements_desc_default(&query);
+    query.flags = fp32 ? OIDNW_GPU_VULKAN_FP32 : 0;
+    query.get_instance_proc_addr = gipa;
+    query.instance = instance;
+    query.physical_device = physical;
+    query.instance_create_info = &instance_create;
+    auto requirements = oidnw::vulkan::query_requirements(query);
+    auto device_create = oidnw::vulkan::device_create_info(requirements);
     float priorities[] = {1, 1, 1};
     VkDeviceQueueCreateInfo queue_create{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     queue_create.queueFamilyIndex = family;
     queue_create.queueCount = 3;
     queue_create.pQueuePriorities = priorities;
-    VkDeviceCreateInfo device_create{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-    device_create.pNext = &storage;
-    device_create.pEnabledFeatures = &features.features;
     device_create.queueCreateInfoCount = 1;
     device_create.pQueueCreateInfos = &queue_create;
-    device_create.enabledExtensionCount = uint32_t(device_extensions.size());
-    device_create.ppEnabledExtensionNames = device_extensions.data();
     vkcheck(vkCreateDevice(physical, &device_create, nullptr, &device));
 #define LOAD_DEVICE(name)                                                                          \
   vk##name = reinterpret_cast<PFN_vk##name>(vkGetDeviceProcAddr(device, "vk" #name));
@@ -469,12 +433,14 @@ int main(int argc, char **argv) {
       throw std::runtime_error("wrong backend");
     // Real DLL rejection of a missing HAL feature, extension and aggregate chain.
     oidnw_gpu_device *rejected = nullptr;
-    auto core = features.features;
-    features.features.robustBufferAccess = 0;
+    auto core = *device_create.pEnabledFeatures;
+    auto original_core = device_create.pEnabledFeatures;
+    core.robustBufferAccess = 0;
+    device_create.pEnabledFeatures = &core;
     if (oidnw_gpu_device_import_vulkan(&desc, &rejected, ERR) != OIDNW_ERROR_INVALID_ARGUMENT ||
         rejected)
       throw std::runtime_error("missing HAL feature accepted");
-    features.features = core;
+    device_create.pEnabledFeatures = original_core;
     auto extension_count = device_create.enabledExtensionCount;
     device_create.enabledExtensionCount = 0;
     if (oidnw_gpu_device_import_vulkan(&desc, &rejected, ERR) != OIDNW_ERROR_INVALID_ARGUMENT ||
@@ -696,6 +662,7 @@ int main(int argc, char **argv) {
     vkDestroyPipelineLayout(device, kernels.layout, nullptr);
     vkDestroyDescriptorSetLayout(device, kernels.sets, nullptr);
     vkcheck(vkDeviceWaitIdle(device));
+    requirements.reset();
     vkDestroyDevice(device, nullptr);
     vkDestroyDebugUtilsMessengerEXT(instance, messenger, nullptr);
     vkDestroyInstance(instance, nullptr);

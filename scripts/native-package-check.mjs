@@ -74,13 +74,22 @@ try {
   // DLL lookup finds the extracted DLL, not the copy in the Cargo target dir.
   const dllEnv = windows ? { PATH: `${lib}${path.delimiter}${process.env.PATH ?? ''}` } : {};
   run(executable('abi'), [], dllEnv);
+  const cppSource = path.join(root, 'native/tests/gpu_cpp.cpp');
+  if (windows) {
+    run('cl.exe', ['/nologo', '/std:c++17', '/EHsc', '/O2', '/MD', `/I${include}`, cppSource, `/Fe${executable('gpu-cpp')}`]);
+  } else {
+    run('c++', ['-std=c++17', '-O2', '-I', include, cppSource, '-o', executable('gpu-cpp')]);
+  }
+  run(executable('gpu-cpp'), []);
   const vulkanInclude = process.env.OIDNW_GPU_INTEROP_VULKAN_INCLUDE;
   const dx12Include = process.env.OIDNW_GPU_INTEROP_DX12_INCLUDE;
   if (windows) {
     const exports = execFileSync('dumpbin.exe', ['/nologo', '/exports', shared], { encoding: 'utf8' });
     for (const name of ['oidnw_gpu_device_import_vulkan', 'oidnw_gpu_buffer_import_vulkan',
       'oidnw_gpu_sync_import_vulkan', 'oidnw_gpu_device_create_dx12', 'oidnw_gpu_buffer_import_dx12',
-      'oidnw_gpu_sync_import_dx12', 'oidnw_gpu_device_destroy_quiescent', 'oidnw_gpu_poll', 'oidnw_gpu_wait']) {
+      'oidnw_gpu_sync_import_dx12', 'oidnw_gpu_device_destroy_quiescent', 'oidnw_gpu_poll', 'oidnw_gpu_wait', 'oidnw_gpu_vulkan_instance_extensions',
+      'oidnw_gpu_vulkan_requirements_create', 'oidnw_gpu_vulkan_requirements_get',
+      'oidnw_gpu_vulkan_requirements_destroy']) {
       assert(exports.includes(name), `missing DLL export ${name}`);
     }
     if (vulkanInclude) {
@@ -188,6 +197,9 @@ file(GENERATE OUTPUT "\${CMAKE_BINARY_DIR}/executables-$<CONFIG>.txt"
     const metalUsage = spawnSync(path.join(deployed, 'bin', 'metal_gpu'), [], { cwd: deployed, encoding: 'utf8' });
     assert.equal(metalUsage.status, 2, metalUsage.error?.message ?? metalUsage.stderr);
     assert.match(metalUsage.stderr, /usage:/);
+    const cppUsage = spawnSync(path.join(deployed, 'bin', 'metal_gpu_cpp'), [], { cwd: deployed, encoding: 'utf8' });
+    assert.equal(cppUsage.status, 2, cppUsage.error?.message ?? cppUsage.stderr);
+    assert.match(cppUsage.stderr, /usage:/);
   }
   console.log('CMake targets, relocated package and installed C examples: OK (no GPU requested)');
   console.log(`Verified ${manifest.name}`);

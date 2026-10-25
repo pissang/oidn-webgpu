@@ -134,7 +134,7 @@ pub(crate) unsafe fn guard(error: *mut c_char, capacity: usize, body: impl FnOnc
 
 #[unsafe(no_mangle)]
 pub extern "C" fn oidnw_api_version() -> u32 {
-    2 << 16
+    (2 << 16) | (1 << 8)
 }
 
 fn wanted_features() -> wgpu::Features {
@@ -509,7 +509,7 @@ mod tests {
         unsafe {
             let mut error = [0i8; 1024];
             let mut device = std::ptr::null_mut();
-            assert_eq!(oidnw_api_version(), 0x00020000);
+            assert_eq!(oidnw_api_version(), 0x00020100);
             assert_eq!(
                 oidnw_device_create(OIDNW_BACKEND_AUTO, &mut device, error.as_mut_ptr(), error.len()),
                 OIDNW_OK

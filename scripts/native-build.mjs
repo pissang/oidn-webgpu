@@ -45,7 +45,7 @@ const copy = (source, destination) => {
   if (!existsSync(source)) throw new Error(`Missing build output ${source}`);
   copyFileSync(source, destination);
 };
-for (const header of ['oidn_webgpu.h', 'oidn_webgpu_core.h', 'oidn_webgpu_gpu.h', 'oidn_webgpu_metal.h', 'oidn_webgpu_vulkan.h', 'oidn_webgpu_dx12.h']) {
+for (const header of ['oidn_webgpu.h', 'oidn_webgpu_core.h', 'oidn_webgpu_gpu.h', 'oidn_webgpu_metal.h', 'oidn_webgpu_vulkan.h', 'oidn_webgpu_dx12.h', 'oidn_webgpu_gpu.hpp', 'oidn_webgpu_metal.hpp', 'oidn_webgpu_vulkan.hpp', 'oidn_webgpu_dx12.hpp']) {
   copy(path.join(root, 'native/include', header), path.join(output, 'include', header));
 }
 for (const library of libraries) copy(path.join(release, library), path.join(output, 'lib', library));
@@ -56,6 +56,8 @@ copy(path.join(root, 'native/examples/denoise.c'), path.join(output, 'examples/d
 copy(path.join(root, 'native/examples/vulkan_gpu.cpp'), path.join(output, 'examples/vulkan_gpu.cpp'));
 copy(path.join(root, 'native/examples/dx12_gpu.cpp'), path.join(output, 'examples/dx12_gpu.cpp'));
 copy(path.join(root, 'native/examples/metal_gpu.m'), path.join(output, 'examples/metal_gpu.m'));
+copy(path.join(root, 'native/examples/metal_gpu_cpp.mm'), path.join(output, 'examples/metal_gpu_cpp.mm'));
+copy(path.join(root, 'native/examples/gpu-integration.md'), path.join(output, 'examples/gpu-integration.md'));
 copy(path.join(root, 'native/examples/validate_windows.c'), path.join(output, 'examples/validate_windows.c'));
 copy(path.join(root, 'native/examples/plan.c'), path.join(output, 'examples/plan.c'));
 copy(path.join(root, 'native/examples/CMakeLists.txt'), path.join(output, 'examples/CMakeLists.txt'));

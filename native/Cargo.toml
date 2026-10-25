@@ -9,7 +9,7 @@ publish = ["crates-io"]
 repository = "https://github.com/pissang/oidn-webgpu"
 homepage = "https://github.com/pissang/oidn-webgpu"
 readme = "README.md"
-include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE", "licenses/**", "build.rs", "build_support/*.rs", "prebuilt/**", "src/**", "include/**", "examples/**/*.rs", "examples/**/*.hlsl", "examples/*.c", "examples/*.m", "examples/*.cpp"]
+include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE", "licenses/**", "build.rs", "build_support/*.rs", "prebuilt/**", "src/**", "include/**", "examples/**/*.rs", "examples/**/*.hlsl", "examples/*.c", "examples/*.m", "examples/*.mm", "examples/*.cpp", "examples/*.md"]
 
 [lib]
 name = "oidn_webgpu"

@@ -24,11 +24,49 @@ fn vulkan_backpressure_and_failed_batch_preserve_external_completion() {
     unsafe {
         let entry = ash::Entry::load().unwrap();
         VALIDATION_ERRORS.store(0, Ordering::Relaxed);
-        let flags = wgpu::InstanceFlags::DEBUG | wgpu::InstanceFlags::VALIDATION;
-        let extensions =
-            wgpu::hal::vulkan::Instance::desired_extensions(&entry, vk::API_VERSION_1_3, flags)
-                .unwrap();
-        let names: Vec<_> = extensions.iter().map(|s| s.as_ptr()).collect();
+        let mut count = 0;
+        assert_eq!(
+            oidnw_gpu_vulkan_instance_extensions(
+                Some(entry.static_fn().get_instance_proc_addr),
+                vk::API_VERSION_1_3,
+                std::ptr::null_mut(),
+                &mut count,
+                std::ptr::null_mut(),
+                0
+            ),
+            OIDNW_OK
+        );
+        let mut names = vec![std::ptr::null(); count];
+        if count != 0 {
+            let mut short = count - 1;
+            assert_eq!(
+                oidnw_gpu_vulkan_instance_extensions(
+                    Some(entry.static_fn().get_instance_proc_addr),
+                    vk::API_VERSION_1_3,
+                    names.as_mut_ptr(),
+                    &mut short,
+                    std::ptr::null_mut(),
+                    0
+                ),
+                OIDNW_ERROR_INVALID_ARGUMENT
+            );
+            assert!(names.iter().all(|n| n.is_null()));
+            assert_eq!(short, count);
+        }
+        assert_eq!(
+            oidnw_gpu_vulkan_instance_extensions(
+                Some(entry.static_fn().get_instance_proc_addr),
+                vk::API_VERSION_1_3,
+                names.as_mut_ptr(),
+                &mut count,
+                std::ptr::null_mut(),
+                0
+            ),
+            OIDNW_OK
+        );
+        if !names.contains(&c"VK_EXT_debug_utils".as_ptr()) {
+            names.push(c"VK_EXT_debug_utils".as_ptr());
+        }
         let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
         let layers = [c"VK_LAYER_KHRONOS_validation".as_ptr()];
         let instance_create = vk::InstanceCreateInfo::default()
@@ -75,36 +113,44 @@ fn vulkan_backpressure_and_failed_batch_preserve_external_completion() {
                     .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
             })
             .unwrap() as u32;
-        let hal_instance = wgpu::hal::vulkan::Instance::from_raw(
-            entry.clone(),
-            instance.clone(),
-            vk::API_VERSION_1_3,
-            0,
-            None,
-            extensions,
-            flags,
-            Default::default(),
-            false,
-            Some(Box::new(|| {})),
-        )
-        .unwrap();
-        let exposed = hal_instance.expose_adapter(physical).unwrap();
-        let wg_instance = wgpu::Instance::from_hal::<wgpu::hal::api::Vulkan>(hal_instance);
-        let adapter = wg_instance.create_adapter_from_hal(exposed);
-        let hal = adapter.as_hal::<wgpu::hal::api::Vulkan>().unwrap();
-        let requested = Denoiser::recommended_features(&adapter);
-        let extensions = hal.required_device_extensions(requested);
-        let names: Vec<_> = extensions.iter().map(|s| s.as_ptr()).collect();
-        let mut features = hal.physical_device_features(&extensions, requested);
+        let query = VulkanRequirementsDesc {
+            flags: 0,
+            get_instance_proc_addr: Some(entry.static_fn().get_instance_proc_addr),
+            instance: instance.handle(),
+            physical_device: physical,
+            instance_create_info: (&instance_create as *const vk::InstanceCreateInfo).cast(),
+        };
+        let mut requirements = std::ptr::null_mut();
+        let mut error = [0i8; 4096];
+        assert_eq!(
+            oidnw_gpu_vulkan_requirements_create(
+                &query,
+                &mut requirements,
+                error.as_mut_ptr(),
+                error.len()
+            ),
+            OIDNW_OK,
+            "{}",
+            std::ffi::CStr::from_ptr(error.as_ptr()).to_string_lossy()
+        );
+        let mut create = vk::DeviceCreateInfo::default();
+        let mut enabled_features = 0;
+        assert_eq!(
+            oidnw_gpu_vulkan_requirements_get(
+                requirements,
+                &mut create,
+                &mut enabled_features,
+                error.as_mut_ptr(),
+                error.len()
+            ),
+            OIDNW_OK
+        );
         let priorities = [1.];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
             .queue_priorities(&priorities)];
-        let create = features.add_to_device_create(
-            vk::DeviceCreateInfo::default()
-                .queue_create_infos(&queues)
-                .enabled_extension_names(&names),
-        );
+        create.queue_create_info_count = queues.len() as u32;
+        create.p_queue_create_infos = queues.as_ptr().cast();
         let raw = instance.create_device(physical, &create, None).unwrap();
         struct Lock {
             held: std::sync::atomic::AtomicBool,
@@ -255,9 +301,7 @@ fn vulkan_backpressure_and_failed_batch_preserve_external_completion() {
         }
         raw.destroy_semaphore(ready, None);
         raw.destroy_semaphore(done, None);
-        drop(hal);
-        drop(adapter);
-        drop(wg_instance);
+        oidnw_gpu_vulkan_requirements_destroy(requirements);
         raw.destroy_device(None);
         debug.destroy_debug_utils_messenger(messenger, None);
         instance.destroy_instance(None);

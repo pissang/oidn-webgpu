@@ -21,6 +21,15 @@ int main(void) {
   oidnw_gpu_device *dx12_device = NULL;
   if (oidnw_gpu_device_create_dx12(&dx12, &dx12_device, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT || dx12_device) return 1;
 #if defined(OIDNW_TEST_VULKAN)
+  _Static_assert(sizeof(oidnw_gpu_vulkan_requirements_desc) == 40, "Vulkan requirements ABI");
+  oidnw_gpu_vulkan_requirements_desc query;
+  oidnw_gpu_vulkan_requirements_desc_default(&query);
+  if (query.flags || query.instance || query.physical_device || query.get_instance_proc_addr || query.instance_create_info) return 1;
+  oidnw_gpu_vulkan_requirements *requirements = NULL;
+  if (oidnw_gpu_vulkan_requirements_create(&query, &requirements, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT || requirements) return 1;
+  size_t extension_count = 99;
+  if (oidnw_gpu_vulkan_instance_extensions(NULL, VK_API_VERSION_1_2, NULL, &extension_count, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT || extension_count) return 1;
+  oidnw_gpu_vulkan_requirements_destroy(NULL);
   oidnw_gpu_vulkan_device_desc vulkan;
   oidnw_gpu_vulkan_device_desc_default(&vulkan);
   if (vulkan.instance || vulkan.device || vulkan.get_instance_proc_addr ||

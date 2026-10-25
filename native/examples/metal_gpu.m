@@ -29,6 +29,9 @@ static id<MTLComputePipelineState> pipeline(id<MTLDevice> device, id<MTLLibrary>
 int main(int argc, const char **argv) {
   @autoreleasepool {
     if (argc != 2) { fprintf(stderr, "usage: metal_gpu MODEL.tza\n"); return 2; }
+    if (oidnw_api_version() != OIDNW_API_VERSION) {
+      fprintf(stderr, "header/library version mismatch\n"); return 1;
+    }
     const NSUInteger edge = 31, count = edge * edge, offset = 256, bytes = offset + count * 16;
     id<MTLDevice> metal = MTLCreateSystemDefaultDevice();
     if (!metal) { fprintf(stderr, "Metal GPU required\n"); return 1; }

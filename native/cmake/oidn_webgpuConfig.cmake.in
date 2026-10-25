@@ -25,6 +25,14 @@ if(NOT TARGET oidn_webgpu::oidn_webgpu)
   endif()
 endif()
 
+if(NOT TARGET oidn_webgpu::cpp)
+  add_library(oidn_webgpu::cpp INTERFACE IMPORTED GLOBAL)
+  set_target_properties(oidn_webgpu::cpp PROPERTIES
+    INTERFACE_LINK_LIBRARIES oidn_webgpu::oidn_webgpu
+    INTERFACE_COMPILE_FEATURES cxx_std_17
+  )
+endif()
+
 if(NOT TARGET oidn_webgpu::oidn_webgpu_core)
   if("@OIDNW_PLATFORM@" STREQUAL "linux")
     include(CMakeFindDependencyMacro)

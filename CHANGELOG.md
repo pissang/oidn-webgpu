@@ -6,9 +6,17 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- GPU-resident C API for macOS Metal with host device/buffer/event import, asynchronous submission, external-signal completion queries, bounded in-flight work, binding caches and an Objective-C integration example. C ABI version is 2.0.0. GPU descriptions use fixed layouts and require explicit initialization; headers and libraries must match exactly.
+- C++17 GPU wrappers with shared context lifetime, asynchronous submission results, explicit shutdown and native-owner retention, plus an Objective-C++ integration example and `oidn_webgpu::cpp` CMake target.
+- Vulkan instance-extension and device-requirement queries for host device creation. C ABI version is 2.1.0; use matching headers and library.
+- A GPU C integration walkthrough for existing Metal, Vulkan and DX12 renderers, shipped with the native examples.
+- GPU-resident C API for macOS Metal with host device/buffer/event import, asynchronous submission, external-signal completion queries, bounded in-flight work, binding caches and an Objective-C integration example. GPU descriptions use fixed layouts and require explicit initialization; headers and libraries must match exactly.
 - A macOS Metal interoperability validation example that imports host GPU buffers and checks asynchronous execution without uploading or reading back image pixels.
 - Windows Vulkan host-device/buffer import and DX12 shared-buffer/fence validation prototypes, plus a reproducible GPU test runner. Both routes are exposed through the GPU C API and have independent C++ DLL consumers.
+
+### Fixed
+
+- GPU completion queries keep `completed=0` when rejecting unknown submission sequences, including zero.
+- The Metal C host example rejects a mismatched library version before creating GPU resources.
 
 ### Changed
 
@@ -16,7 +24,7 @@ All notable changes to this project are documented in this file.
 - Add the DX12 GPU C backend using an independent device on the host LUID, a matching required Agility SDK, shared committed UAV buffers and fences. Completion includes every external signal; native completion-query and debug-layer errors quarantine the context.
 - Vulkan GPU C imports borrow the host instance/device/queue, validate the complete HAL creation contract, and enforce conservative admission behind unresolved external waits. Add a standalone C++ DLL consumer and separate platform header. Timeline query errors quarantine the context rather than reporting completion.
 
-- Reduce the macOS ARM64 native C shared library from 6.49 MB to 4.65 MB before compression, including the new GPU C API and excluding model weights.
+- Reduce the macOS ARM64 native C shared library from 6.49 MB to 4.67 MB before compression, including the new GPU C API and excluding model weights.
 - Clarify that Windows native releases support `x86_64-pc-windows-msvc` only; Windows GNU has no bundled core or precompiled package, and its source builds are not validated.
 
 ## [Native 0.1.1] - 2026-10-25

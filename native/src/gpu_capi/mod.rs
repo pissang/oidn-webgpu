@@ -9,8 +9,11 @@ pub use dx12::{
 };
 mod vulkan;
 pub use vulkan::{
-    VulkanDeviceDesc, oidnw_gpu_buffer_import_vulkan, oidnw_gpu_device_import_vulkan,
-    oidnw_gpu_sync_import_vulkan, oidnw_gpu_vulkan_device_desc_default,
+    VulkanDeviceDesc, VulkanRequirements, VulkanRequirementsDesc, oidnw_gpu_buffer_import_vulkan,
+    oidnw_gpu_device_import_vulkan, oidnw_gpu_sync_import_vulkan,
+    oidnw_gpu_vulkan_device_desc_default, oidnw_gpu_vulkan_instance_extensions,
+    oidnw_gpu_vulkan_requirements_create, oidnw_gpu_vulkan_requirements_desc_default,
+    oidnw_gpu_vulkan_requirements_destroy, oidnw_gpu_vulkan_requirements_get,
 };
 #[cfg(all(test, target_os = "windows"))]
 mod dx12_tests;
@@ -1258,7 +1261,13 @@ unsafe fn poll_once(device: &GpuDevice, sequence: u64, completed: *mut u32) -> O
             Err(error) => {
                 // A controlled failed batch can complete its external signals
                 // while returning GPU. A lost/uncertain device never says done.
-                if error.0 != OIDNW_ERROR_DEVICE_LOST && sequence <= runtime.ledger.completed {
+                if error.0 != OIDNW_ERROR_DEVICE_LOST
+                    && sequence <= runtime.ledger.completed
+                    && runtime
+                        .failed
+                        .as_ref()
+                        .is_some_and(|(failed, _)| *failed == sequence)
+                {
                     unsafe {
                         completed.write(1);
                     }

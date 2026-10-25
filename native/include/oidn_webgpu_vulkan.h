@@ -8,6 +8,40 @@ extern "C" {
 
 #define OIDNW_GPU_VULKAN_FP32 1u
 #define OIDNW_GPU_VULKAN_NO_SUBGROUPS 2u
+typedef struct oidnw_gpu_vulkan_requirements oidnw_gpu_vulkan_requirements;
+typedef struct oidnw_gpu_vulkan_requirements_desc {
+  uint32_t flags;
+  PFN_vkGetInstanceProcAddr get_instance_proc_addr;
+  VkInstance instance;
+  VkPhysicalDevice physical_device;
+  const VkInstanceCreateInfo *instance_create_info;
+} oidnw_gpu_vulkan_requirements_desc;
+
+/* Query before vkCreateInstance. With names=NULL, writes the required count.
+ * Otherwise *count is the array capacity; always writes the required count.
+ * A short array returns INVALID_ARGUMENT without writing names. Returned names
+ * are immutable library strings valid until the library is unloaded.
+ * Does not add host-requested layers/extensions such as debug utilities. */
+int32_t oidnw_gpu_vulkan_instance_extensions(PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+  uint32_t api_version, const char **names, size_t *count, char *error, size_t capacity);
+void oidnw_gpu_vulkan_requirements_desc_default(oidnw_gpu_vulkan_requirements_desc *desc);
+/* Query after instance/physical-device selection, before vkCreateDevice.
+ * No logical device or GPU work is created. flags must match later import.
+ * Host loader, instance and creation declarations must be live during this call.
+ * Queries return UNAVAILABLE outside Windows/Linux. */
+int32_t oidnw_gpu_vulkan_requirements_create(const oidnw_gpu_vulkan_requirements_desc *desc,
+  oidnw_gpu_vulkan_requirements **requirements, char *error, size_t capacity);
+/* Writes a base VkDeviceCreateInfo with required extensions, core features and
+ * the canonical pNext chain; host supplies queue declarations before creation.
+ * All pointed-to data is read-only and lives until requirements_destroy. Keep
+ * this owner alive through library import, which reads the original declaration.
+ * Host additions require merging extension names and feature bits, without
+ * duplicate feature structs; aggregated Vulkan11/12/13 structs remain unsupported.
+ * enabled_features is optional and receives OIDNW_FEATURE_* bits. */
+int32_t oidnw_gpu_vulkan_requirements_get(const oidnw_gpu_vulkan_requirements *requirements,
+  VkDeviceCreateInfo *create_info, uint32_t *enabled_features, char *error, size_t capacity);
+void oidnw_gpu_vulkan_requirements_destroy(oidnw_gpu_vulkan_requirements *requirements);
+
 typedef struct oidnw_gpu_vulkan_device_desc {
   uint32_t flags;
   PFN_vkGetInstanceProcAddr get_instance_proc_addr;

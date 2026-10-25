@@ -60,7 +60,7 @@ Consequences:
 | `src/native/program.ts` | Native core entry; config and program wire formats |
 | `native/src/denoiser.rs` | `Model`, `Denoiser`, `PreparedDenoise`, `Error` |
 | `native/src/capi.rs` | `oidnw_*` C functions; must match `native/include/oidn_webgpu.h` |
-| `native/src/gpu_capi/` | GPU C handles, bounded completion ledger, binding cache and platform adapters; matches `oidn_webgpu_gpu.h` and `oidn_webgpu_metal.h` |
+| `native/src/gpu_capi/` | GPU C handles, bounded completion ledger, binding cache and platform adapters; matches the common GPU and platform C headers, including Vulkan creation requirements |
 | `native/src/bin/oidn-webgpu-bench.rs` | Native network benchmark |
 | `scripts/native-*.mjs` | Core build, C package build, package identity, package checks |
 
@@ -303,7 +303,9 @@ Windows builds use PowerShell to keep Git Bash's `link.exe` out of the MSVC link
 | --- | --- | --- |
 | `README.md` | Everyone; npm package page | Runtimes, weights table, doc index |
 | `docs/web.md` | Browser API users | `src/main.ts`, `src/UNet.ts`, `src/tileScheduler.ts` |
-| `native/README.md` | Rust and C users; also shipped as the package README | `native/src/denoiser.rs`, `native/src/gpu_capi/`, `native/include/`, `scripts/native-build.mjs` |
+| `native/README.md` | Rust, C and C++ users; also shipped as the package README | `native/src/denoiser.rs`, `native/src/gpu_capi/`, `native/include/`, `scripts/native-build.mjs` |
+| `native/examples/gpu-integration.md` | C API hosts adapting an existing renderer; shipped with native examples | `native/include/oidn_webgpu_gpu.h`, platform headers and native host examples |
+| `native/include/oidn_webgpu_*.hpp` | C++ GPU hosts | Common handle ownership and platform import helpers; mirrored by native examples |
 | `docs/native-release.md` | Maintainers releasing native packages and the crate | `.github/workflows/native*.yml`, `scripts/native-release.mjs`, `native/build.rs` |
 | `docs/development.md` | Contributors | Scripts, CI, architecture |
 | `AGENTS.md` | Coding agents | Repository rules |

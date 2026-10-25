@@ -116,7 +116,7 @@ typedef struct oidnw_filter oidnw_filter;
 
 /* API version = major << 16 | minor << 8 | patch. Use matching headers
  * and library; dynamic loaders must require the exact version. */
-#define OIDNW_API_VERSION 0x00020000u
+#define OIDNW_API_VERSION 0x00020100u
 uint32_t oidnw_api_version(void);
 
 void oidnw_filter_desc_default(oidnw_filter_desc *desc);

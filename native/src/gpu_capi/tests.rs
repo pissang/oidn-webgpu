@@ -207,6 +207,22 @@ pub(super) unsafe fn exercise_failure_contract(
     set_ready: impl Fn(u64),
 ) {
     unsafe {
+        let unknown = |sequence| {
+            let mut complete = 99;
+            assert_eq!(
+                oidnw_gpu_poll(device, sequence, &mut complete, std::ptr::null_mut(), 0),
+                OIDNW_ERROR_INVALID_ARGUMENT
+            );
+            assert_eq!(complete, 0);
+            complete = 99;
+            assert_eq!(
+                oidnw_gpu_wait(device, sequence, 0, &mut complete, std::ptr::null_mut(), 0),
+                OIDNW_ERROR_INVALID_ARGUMENT
+            );
+            assert_eq!(complete, 0);
+        };
+        unknown(0);
+        unknown(1);
         let mut error = [0i8; 1024];
         let text = |error: &[i8]| {
             std::ffi::CStr::from_ptr(error.as_ptr())
@@ -462,6 +478,8 @@ pub(super) unsafe fn exercise_failure_contract(
         );
         assert_eq!(complete, 1);
         assert!(get_done() >= 1);
+        unknown(0);
+        unknown(seq + 1);
         assert!(
             required(ready_handle, "ready")
                 .unwrap()
@@ -633,5 +651,46 @@ pub(super) unsafe fn exercise_failure_contract(
             "{}",
             text(&error)
         );
+    }
+}
+
+#[test]
+fn vulkan_requirement_outputs_reject_invalid_inputs() {
+    unsafe {
+        let mut desc: VulkanRequirementsDesc = std::mem::zeroed();
+        oidnw_gpu_vulkan_requirements_desc_default(&mut desc);
+        assert_eq!(desc.flags, 0);
+        assert!(desc.get_instance_proc_addr.is_none());
+        let mut value = std::ptr::dangling_mut();
+        assert_eq!(
+            oidnw_gpu_vulkan_requirements_create(&desc, &mut value, std::ptr::null_mut(), 0),
+            OIDNW_ERROR_INVALID_ARGUMENT
+        );
+        assert!(value.is_null());
+        let mut count = 99;
+        assert_eq!(
+            oidnw_gpu_vulkan_instance_extensions(
+                None,
+                ash::vk::API_VERSION_1_2,
+                std::ptr::null_mut(),
+                &mut count,
+                std::ptr::null_mut(),
+                0
+            ),
+            OIDNW_ERROR_INVALID_ARGUMENT
+        );
+        assert_eq!(count, 0);
+        let mut create = std::mem::MaybeUninit::<ash::vk::DeviceCreateInfo>::uninit();
+        assert_eq!(
+            oidnw_gpu_vulkan_requirements_get(
+                std::ptr::null(),
+                create.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0
+            ),
+            OIDNW_ERROR_INVALID_ARGUMENT
+        );
+        oidnw_gpu_vulkan_requirements_destroy(std::ptr::null_mut());
     }
 }

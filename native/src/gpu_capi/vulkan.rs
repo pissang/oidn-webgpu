@@ -1,5 +1,8 @@
 use super::*;
 use ash::{vk, vk::Handle};
+#[path = "vulkan_requirements.rs"]
+mod requirements;
+pub use requirements::*;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -85,9 +88,14 @@ unsafe fn platform_import(_: &VulkanDeviceDesc) -> Outcome<Context> {
 mod features;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-unsafe fn platform_import(desc: &VulkanDeviceDesc) -> Outcome<Context> {
+unsafe fn host_adapter(
+    get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
+    host_instance: vk::Instance,
+    physical_device: vk::PhysicalDevice,
+    instance_create_info: *const vk::InstanceCreateInfo<'_>,
+) -> Outcome<(wgpu::Adapter, ash::Instance)> {
     unsafe {
-        let create = required(desc.instance_create_info, "instance create info")?;
+        let create = required(instance_create_info, "instance create info")?;
         let app = required(create.p_application_info, "application info")?;
         if create.s_type != vk::StructureType::INSTANCE_CREATE_INFO
             || app.api_version < vk::API_VERSION_1_2
@@ -95,18 +103,18 @@ unsafe fn platform_import(desc: &VulkanDeviceDesc) -> Outcome<Context> {
             return Err(invalid("Vulkan 1.2 or newer instance is required"));
         }
         let entry = ash::Entry::from_static_fn(ash::StaticFn {
-            get_instance_proc_addr: desc.get_instance_proc_addr.unwrap(),
+            get_instance_proc_addr,
         });
-        let instance = ash::Instance::load(entry.static_fn(), desc.instance);
+        let instance = ash::Instance::load(entry.static_fn(), host_instance);
         if !instance
             .enumerate_physical_devices()
             .map_err(vk_error)?
-            .contains(&desc.physical_device)
+            .contains(&physical_device)
         {
             return Err(invalid("physical device does not belong to instance"));
         }
         if instance
-            .get_physical_device_properties(desc.physical_device)
+            .get_physical_device_properties(physical_device)
             .api_version
             < vk::API_VERSION_1_2
         {
@@ -130,6 +138,49 @@ unsafe fn platform_import(desc: &VulkanDeviceDesc) -> Outcome<Context> {
                 )));
             }
         }
+        let hal_instance = wgpu::hal::vulkan::Instance::from_raw(
+            entry,
+            instance.clone(),
+            app.api_version,
+            0,
+            None,
+            extensions,
+            flags,
+            Default::default(),
+            false,
+            Some(Box::new(|| {})),
+        )
+        .map_err(|e| gpu(e.to_string()))?;
+        let exposed = hal_instance
+            .expose_adapter(physical_device)
+            .ok_or_else(|| invalid("HAL cannot expose physical device"))?;
+        let wg_instance = wgpu::Instance::from_hal::<wgpu::hal::api::Vulkan>(hal_instance);
+        let adapter = wg_instance.create_adapter_from_hal(exposed);
+        Ok((adapter, instance))
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn requested_features(adapter: &wgpu::Adapter, flags: u32) -> wgpu::Features {
+    let mut requested = Denoiser::recommended_features(adapter);
+    if flags & 1 != 0 {
+        requested.remove(wgpu::Features::SHADER_F16);
+    }
+    if flags & 2 != 0 {
+        requested.remove(wgpu::Features::SUBGROUP);
+    }
+    requested
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+unsafe fn platform_import(desc: &VulkanDeviceDesc) -> Outcome<Context> {
+    unsafe {
+        let (adapter, instance) = host_adapter(
+            desc.get_instance_proc_addr.unwrap(),
+            desc.instance,
+            desc.physical_device,
+            desc.instance_create_info,
+        )?;
         let families = instance.get_physical_device_queue_family_properties(desc.physical_device);
         let family = families
             .get(desc.queue_family_index as usize)
@@ -142,31 +193,7 @@ unsafe fn platform_import(desc: &VulkanDeviceDesc) -> Outcome<Context> {
             return Err(invalid("queue must support graphics and compute"));
         }
         let native = ash::Device::load(instance.fp_v1_0(), desc.device);
-        let hal_instance = wgpu::hal::vulkan::Instance::from_raw(
-            entry,
-            instance,
-            app.api_version,
-            0,
-            None,
-            extensions,
-            flags,
-            Default::default(),
-            false,
-            Some(Box::new(|| {})),
-        )
-        .map_err(|e| gpu(e.to_string()))?;
-        let exposed = hal_instance
-            .expose_adapter(desc.physical_device)
-            .ok_or_else(|| invalid("HAL cannot expose physical device"))?;
-        let wg_instance = wgpu::Instance::from_hal::<wgpu::hal::api::Vulkan>(hal_instance);
-        let adapter = wg_instance.create_adapter_from_hal(exposed);
-        let mut requested = Denoiser::recommended_features(&adapter);
-        if desc.flags & 1 != 0 {
-            requested.remove(wgpu::Features::SHADER_F16);
-        }
-        if desc.flags & 2 != 0 {
-            requested.remove(wgpu::Features::SUBGROUP);
-        }
+        let requested = requested_features(&adapter, desc.flags);
         let mut limits = adapter.limits();
         limits.max_buffer_size = limits.max_buffer_size.min(u32::MAX as u64);
         let hal = adapter
@@ -253,6 +280,7 @@ unsafe fn checked_slice<'a, T>(ptr: *const T, count: usize) -> Outcome<&'a [T]> 
     check_pointer(ptr, "Vulkan declaration array")?;
     Ok(unsafe { std::slice::from_raw_parts(ptr, count) })
 }
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn vk_error(error: vk::Result) -> Failure {
     Failure(
         OIDNW_ERROR_DEVICE_LOST,
@@ -374,12 +402,12 @@ pub unsafe extern "C" fn oidnw_gpu_buffer_import_vulkan(
             with_runtime(&gpu.state, |r| {
                 ensure_backend(r, wgpu::Backend::Vulkan)?;
                 if desc.sharing_mode == vk::SharingMode::CONCURRENT {
-                    let families = checked_slice(
+                    let _families = checked_slice(
                         desc.p_queue_family_indices,
                         desc.queue_family_index_count as usize,
                     )?;
                     #[cfg(any(target_os = "windows", target_os = "linux"))]
-                    if !families.contains(
+                    if !_families.contains(
                         &r.context
                             .device
                             .as_hal::<wgpu::hal::api::Vulkan>()

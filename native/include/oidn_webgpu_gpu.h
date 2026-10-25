@@ -89,6 +89,8 @@ int32_t oidnw_gpu_submit(oidnw_gpu_prepared *prepared, const oidnw_gpu_submit_de
   uint64_t *sequence, char *error, size_t capacity);
 /* Completion includes all external signal values, not just wgpu's fence.
  * poll does not wait for GPU completion; serialized CPU queue access may block.
+ * On a healthy device, unknown sequences (including zero) return
+ * INVALID_ARGUMENT with completed=0.
  * completed=0 is not an error. wait uses nanoseconds;
  * timeout=0 performs one poll, UINT64_MAX waits without a deadline.
  * Completion permits input reuse, but output reuse also needs host-consumer
