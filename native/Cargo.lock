@@ -585,6 +585,9 @@ dependencies = [
 name = "oidn-webgpu-native"
 version = "0.1.1"
 dependencies = [
+ "ash",
+ "libloading",
+ "naga",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
@@ -592,6 +595,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "wgpu",
+ "windows",
 ]
 
 [[package]]

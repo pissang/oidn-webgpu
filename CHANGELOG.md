@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - A macOS Metal interoperability validation example that imports host GPU buffers and checks asynchronous execution without uploading or reading back image pixels.
+- Windows Vulkan host-device/buffer import and DX12 shared-buffer/fence validation prototypes, plus a reproducible GPU test runner. These source examples precede the GPU C ABI; the C filter API is unchanged.
 
 ### Changed
 

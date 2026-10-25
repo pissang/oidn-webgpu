@@ -86,6 +86,8 @@ queue.submit([encoder.finish()]);
 cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- weights/rt_hdr_alb_nrm_small.tza output.f32 256 192 128
 ```
 
+Raw Metal, Vulkan and DX12 interoperability is being tested in source-checkout examples before defining a GPU C ABI. Metal and Vulkan import a host device and buffers; DX12 opens shared buffers and fences on a separate library device. These examples use tightly packed RGBA32F buffers with fixed input/output roles and separate output allocations. See the [interop validation instructions and limitations](https://github.com/pissang/oidn-webgpu/blob/main/docs/development.md#native-windows-interoperability-prototypes). The C filter API continues to accept CPU images.
+
 ### Standalone Rust application
 
 [`examples/rust-app/Cargo.toml`](examples/rust-app/Cargo.toml) is an independent Cargo project using [`examples/validate.rs`](examples/validate.rs). It creates a wgpu device and image buffers, denoises generated HDR gradients or raw input files, checks the complete output, and optionally saves RGBA32F. JSON output includes the actual backend, kernels, runtime checks, initialization time, individual GPU execution times and median latency. Uploads, preparation, readback and output validation are excluded from the measured executions.
@@ -121,6 +123,7 @@ The example checks finite, nonnegative RGB, preserved input alpha, and byte-iden
 - Before requesting a device, add `Denoiser::required_features()`, `Denoiser::recommended_features(&adapter)` and `Denoiser::required_limits()`. Large images may need higher buffer limits.
 - The library uses only the features and limits enabled on an existing device; it cannot enable more later.
 - Precision is FP16 when the device enables `SHADER_F16`, otherwise FP32. Image buffers are always f32.
+- On DX12, exposing `SHADER_F16` also requires DXC with Shader Model 6.2 or later. Keep `dxcompiler.dll` and its matching `dxil.dll` available to the host; wgpu's FXC fallback uses Shader Model 5.1 and exposes FP32 only.
 - Kernels: cooperative-matrix kernels when the host enables `EXPERIMENTAL_COOPERATIVE_MATRIX` (which also requires accepting wgpu's experimental feature contract), otherwise implicit GEMM. On Windows and Linux the cooperative-matrix kernels need Vulkan; DX12 uses implicit GEMM.
 
 ### Image contract

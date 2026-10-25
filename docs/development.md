@@ -153,6 +153,76 @@ MTL_DEBUG_LAYER=1 native/target/release/examples/metal_interop --frames 1000 --s
 
 The queues use a command-buffer capacity of 4096, matching wgpu-hal 30.0.1. Metal's default queue capacity can block submission when gated tiled executions accumulate. A host supplying a shared queue must account for this capacity and serialize its own submissions with library queue access and destruction. Strict event synchronization is enabled before any library command encoding. It currently uses HAL's relay-event mechanism; do not mix `CommandEncoder::as_hal_mut` with wgpu command encoding, which wgpu 30 rejects.
 
+### Native Windows interoperability prototypes
+
+`native/examples/vulkan_interop.rs` and `native/examples/dx12_interop.rs` exercise native GPU production, the existing Rust `PreparedDenoise`, and native GPU consumption. Image allocations are never CPU mapped, uploaded or downloaded. A GPU consumer compares every output channel's bits with three serial references from the same device, model, kernel, precision and runtime-check setting. The CPU reads integer validation flags after execution. These correctness tests include artificial delays and provide no performance measurements.
+
+Both examples reuse one prepared workspace, rotate three image sets, bind at byte offset 256 and vary input patterns and exposure on each reuse of a slot. Producer, denoiser and consumer use GPU dependencies, including a consumer-completion dependency before a slot can be reused. The last producer stays gated while the application drops the prepared workspace and imported wgpu handles. Native command and descriptor objects are retired by completion values, with a maximum of 64 pending pairs. At that limit the test waits for the oldest consumer, rather than waiting for GPU idle or waiting after every frame. Allocator samples are included where the backend exposes them.
+
+| Route | Device creation and ownership | Current scope |
+| --- | --- | --- |
+| Vulkan A: host device import | Host creates `VkInstance`, `VkDevice`, three queues in one graphics/compute family, and device-local buffers. HAL uses the host loader table. Non-owning instance/device callbacks and `from_raw_externally_owned` retain host owners. | Executed on Windows. A dedicated denoise queue is the default; `--shared-queue` shares the producer queue. A single host mutex covers device import, queue submissions, polling, cleanup and final wgpu destruction. This is an example integration, not a public queue-lock callback API. |
+| Vulkan B: external memory | A separate library device would import Win32 memory/semaphore handles. | Only physical-device capability queries are implemented. The RTX 4060 reports `OPAQUE_WIN32` buffer and timeline semaphore import/export support. Cross-device binding, memory-type compatibility, dedicated allocations and `VK_QUEUE_FAMILY_EXTERNAL` release/acquire execution remain unverified. |
+| DX12: external memory | Host and library create distinct devices on the same adapter LUID using Agility independent devices. wgpu normally creates the library device. Host exports shared UAV-capable committed buffers and shared fences; the library uses `OpenSharedHandle` and HAL buffer wrapping. | Image roles stay fixed. Native DIRECT command lists use buffer promotion from COMMON and decay to COMMON at `ExecuteCommandLists` completion, plus UAV barriers. Fences order accesses across devices; fences do not establish resource states. Exporter-owned NT handles close immediately after opening; opened resources/fences retain COM references. |
+
+Vulkan A is appropriate for hosts that can satisfy HAL's device-creation contract. Before `vkCreateDevice`, the example queries `required_device_extensions` and `physical_device_features`, snapshots the complete feature chain, and checks the original host `VkDeviceCreateInfo` before import. This includes HAL's implicit robustness, timeline, shader-int8 and other requirements, not just denoise shader requirements. The prototype accepts HAL's canonical individual feature structs; aggregate Vulkan 1.1/1.2/1.3 feature structs are rejected until normalization is implemented. `--no-recommended` disables optional wgpu acceleration features; it does not waive HAL requirements. No experimental matrix features are requested. A host whose existing device does not satisfy that contract needs another route. Route B would avoid that enabled-feature constraint but adds allocation compatibility, external ownership transfers and handle management. It is not offered as a working fallback on the evidence of capability queries alone.
+
+Vulkan has two additional constraints with the pinned wgpu 30.0.1:
+
+- HAL chains submissions with binary relay semaphores. Unresolved future timeline signals in that dependency chain can trigger `VUID-vkQueueSubmit-pWaitSemaphores-03238`, observed in shared-queue testing. The delayed-producer test therefore submits one gated execution, checks that it cannot complete, and resolves its CPU gates before chaining further HAL submissions. Normal frames use GPU producer/consumer dependencies. Deep chains of unresolved future CPU signals are not validated as an integration contract.
+- Naga emits workgroup array layout decorations that trigger `VUID-StandaloneSpirv-None-10684` ([upstream issue](https://github.com/gfx-rs/wgpu/issues/7696)). HAL's own messenger suppresses that VUID. This example preserves the full diagnostic and counts the observed workgroup/ArrayStride case separately in `known_naga_workgroup_layout_diagnostics`; other validation errors fail the test. A run with a nonzero count is not clean shader validation.
+
+Run from an x64 Visual Studio developer PowerShell with Rust's `x86_64-pc-windows-msvc` toolchain, Node 22+ and Zig 0.16.0 on `PATH`. A source-matched `OIDN_WEBGPU_CORE_ARCHIVE` can replace the core build. Install the Khronos validation layer and point `VK_LAYER_PATH` at its manifest directory if it is not registered globally:
+
+```powershell
+$env:VK_LAYER_PATH = 'C:/VulkanSDK/<version>/Bin'
+pwsh -File scripts/native-interop-check.ps1 -Backend vulkan
+pwsh -File scripts/native-interop-check.ps1 -Backend vulkan -Frames 12 -GpuValidation
+```
+
+DX12 validation requires Windows Graphics Tools, DXC on the DLL search path for FP16, and a local [Agility SDK](https://devblogs.microsoft.com/directx/directx12agility/) with matching x64 `D3D12Core.dll` and `d3d12SDKLayers.dll`. The x64 VS developer environment used locally supplies DXC from the Windows SDK. The prototypes use the independent-device API without changing wgpu or its version. Set an absolute SDK binary directory ending in a slash:
+
+```powershell
+$env:WGPU_DX12_AGILITY_SDK_PATH = 'C:/SDKs/Agility/build/native/bin/x64/'
+$env:WGPU_DX12_AGILITY_SDK_VERSION = '619'
+$env:WGPU_DX12_AGILITY_SDK_REQUIRE = '1'
+pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -Unchecked
+pwsh -File scripts/native-interop-check.ps1 -Backend dx12 -Frames 12 -Unchecked -GpuValidation
+```
+
+The runner builds the explicit MSVC target and runs Small/Base at 16×16 and Large at 31×31 with tile edge 16, each in FP16 and FP32. Vulkan Base uses the shared queue; other cases use a dedicated denoise queue. `-NoDebug` is an explicit DX12 diagnostic mode if the debug layer cannot load; its reports contain `debug_layer=false` and `validation_errors=null`. It does not establish debug-layer validation. `-Unchecked` disables shader bounds checks and workgroup initialization for both the reference and asynchronous execution; the debug layer is a separate option. Checked DX12 Small did not finish a 1000-frame diagnostic run within 300 seconds on the local machine; that run has no correctness conclusion.
+
+Measured correctness on 2026-10-25: Windows 11 build 26200, RTX 4060 Laptop, NVIDIA 617.42, wgpu 30.0.1, Khronos layer API 1.4.366 and Agility SDK 1.619.6. Each row below covers the runner's six model/precision cases. The Intel Iris Xe in the same machine was not exercised.
+
+| Backend | Frames per case | Shader runtime checks | Native validation | Result |
+| --- | ---: | --- | --- | --- |
+| Vulkan host import | 1000 | enabled | Khronos layer | Byte equal; 8 or 10 known Naga layout diagnostics per case; zero other validation errors, including teardown |
+| Vulkan host import | 12 | enabled | GPU-assisted and synchronization validation | Byte equal; same Naga limitation; zero other validation errors |
+| DX12 shared memory | 1000 | disabled | D3D12 debug layer on both devices | Byte equal; zero validation errors |
+| DX12 shared memory | 12 | disabled | Debug layer and GPU validation on both devices | Byte equal; zero validation errors |
+
+All runs checked delayed production, delayed consumption, per-slot content changes, in-flight wrapper release, rejected parameters/imports and an empty failure batch retaining its wait/signal. Pending native command pairs never exceeded 64 and drained to zero. Allocator samples stayed within the prepared resources plus the bounded staging pool over the 1000-frame runs; this does not establish an unlimited-duration or device-loss reclamation bound. Vulkan also passed a 12-frame FP32 run with recommended wgpu features omitted. The Metal prototype was already present in this checkout; it was not rerun on Windows.
+
+| Example option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `--frames` | integer | `1000` | 1..=100000 executions, with at most 256 MiB of validation flags |
+| `--size` | integer | `16` | Square image edge, 1..=1024 |
+| `--tile` | integer | `0` | Output tile edge; 0 or 16..=16384 |
+| `--weights` | path | Small three-input HDR model | Model must read color/albedo/normal |
+| `--adapter` | string | `RTX 4060` | Host adapter name substring; no silent adapter fallback |
+| `--fp32` | flag | off | Omit `SHADER_F16` |
+| `--no-recommended` | flag | off | Request only required wgpu features |
+| `--shared-queue` | flag | off | Vulkan only; host producer and denoiser share one queue |
+| `--unchecked` | flag | off | Disable shader runtime checks for both paths |
+| `--no-debug` | flag | off | DX12 only; explicitly skip debug-layer validation |
+| `--trace` | flag | off | Print preparation and submission progress to stderr |
+
+Raw stdout, stderr, arguments, executable/weight hashes, drivers and validation settings go under `.native-build/interop/`; the runner writes a backend summary after each case. Invalid offsets and parameters are rejected before staging synchronization, duplicate native imports are rejected, and device/LUID mismatches are checked before wrapping. A controlled post-acceptance encoding failure uses an empty GPU batch with the original wait/signal; its output is not consumed. A zero-timeout wait exercises timeout reporting without inducing a GPU fault.
+
+Wait for the external completion value when testing host notification. DX12 HAL signals its internal wgpu fence before enqueuing external fence signals; GPU validation exposed a case where `Device::poll(Wait)` returned while the external counter still held its previous value. The example now waits for the external value before asserting it. A common C completion-query contract must specify whether it includes that external signal operation; an internal wgpu submission index alone does not establish that it has occurred.
+
+These examples do not define the GPU C ABI, bind-group range cache, production queue-lock callbacks, or a production submission/error state machine. The test executables terminate on device loss or an uncaptured wgpu error instead of reusing uncertain in-flight state; this process-exit policy is not a reusable library recovery contract. Device loss, uncertain submission, recovery across independently lost devices, hidden aliases and long-running reclamation beyond the recorded runs remain unverified. An empty batch after a controlled encoding failure does not establish that signaling is recoverable after device loss. A host CPU can advance a shared signal only while its own device and synchronization object remain usable. GPU denoise completion also does not permit output reuse until the host consumer has finished.
+
 ### Native Metal profiling
 
 On macOS with Xcode installed, Instruments' Metal System Trace records CPU/GPU scheduling and Metal activity. The `profiling` profile retains symbols and line tables for CPU stack traces. Run from the repository root:

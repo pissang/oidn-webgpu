@@ -9,7 +9,7 @@ publish = ["crates-io"]
 repository = "https://github.com/pissang/oidn-webgpu"
 homepage = "https://github.com/pissang/oidn-webgpu"
 readme = "README.md"
-include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE", "licenses/**", "build.rs", "build_support/*.rs", "prebuilt/**", "src/**", "include/**", "examples/*.rs", "examples/*.c"]
+include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE", "licenses/**", "build.rs", "build_support/*.rs", "prebuilt/**", "src/**", "include/**", "examples/**/*.rs", "examples/*.c"]
 
 [lib]
 name = "oidn_webgpu"
@@ -27,6 +27,12 @@ sha2 = "0.10"
 [dev-dependencies]
 serde_json = "1"
 sha2 = "0.10"
+ash = "0.38"
+naga = { version = "30.0.0", features = ["wgsl-in", "spv-out"] }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+libloading = "0.8"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = "0.6.4"
