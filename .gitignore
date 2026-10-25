@@ -134,6 +134,7 @@ lib
 # Local browser benchmark output
 benchmarks/results/
 .native-build/
+/.zig-cache/
 
 # Local working notes
 /plans/

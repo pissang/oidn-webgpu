@@ -80,7 +80,7 @@ Run from the repository root. Requirements: Node 22+; for native work also stabl
 | Native GPU tests | `cargo test --manifest-path native/Cargo.toml -- --ignored` | yes |
 | C package | `npm run native:build` (output in `.native-build/package`) | no |
 
-Tests import compiled output from `lib/` and `dist/`, so always run them through `npm test`. Generated directories (`lib/`, `dist/`, `.native-build/`, `native/target/`, `benchmarks/results/`) are git-ignored.
+Tests import compiled output from `lib/` and `dist/`, so always run them through `npm test`. Generated directories (`lib/`, `dist/`, `.native-build/`, `.zig-cache/`, `native/target/`, `benchmarks/results/`) are git-ignored. The Windows CI Zig setup action puts its compiler cache in `.zig-cache/`; it does not affect the package's clean-source check.
 
 ## Updating to a new OIDN model
 

@@ -27,8 +27,9 @@ export function packageContext(root, { target, requireClean = false } = {}) {
   const commit = capture(root, 'git', ['rev-parse', 'HEAD']);
   if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error('Expected a full source commit SHA');
   // Include untracked source files; ignored build outputs do not make a package dirty.
-  const dirty = capture(root, 'git', ['status', '--porcelain', '--untracked-files=normal']) !== '';
-  if (requireClean && dirty) throw new Error('Refusing to label a CI package from a dirty source checkout');
+  const status = capture(root, 'git', ['status', '--porcelain', '--untracked-files=normal']);
+  const dirty = status !== '';
+  if (requireClean && dirty) throw new Error(`Refusing to label a CI package from a dirty source checkout:\n${status}`);
   const cargo = JSON.parse(capture(root, 'cargo', ['metadata', '--no-deps', '--format-version', '1', '--manifest-path', 'native/Cargo.toml']));
   const crate = cargo.packages.find((entry) => entry.name === 'oidn-webgpu-native');
   const version = crate.version;
