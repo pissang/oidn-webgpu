@@ -27,3 +27,16 @@ sha2 = "0.10"
 [dev-dependencies]
 serde_json = "1"
 sha2 = "0.10"
+
+# Size-checked release settings shared by local and precompiled C builds.
+# Keep panic unwinding intact for the C API's catch_unwind. Downstream hosts
+# select their own profiles.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"

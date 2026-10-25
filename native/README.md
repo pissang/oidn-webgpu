@@ -35,7 +35,7 @@ oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.1" }
 # oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
 ```
 
-- The registry crate bundles cores for the four [supported targets](#precompiled-packages). It needs Rust and a platform linker, with no Node, npm, Zig or build-time GitHub download.
+- The registry crate bundles cores for the four [supported targets](#precompiled-packages) only; on Windows the supported target is `x86_64-pc-windows-msvc`. Run `rustc -vV` to see the toolchain's default target as `host`; an explicit Cargo `--target` overrides it. Building the registry crate needs Rust and a platform linker, with no Node, npm, Zig or build-time GitHub download.
 - A source build needs stable Rust, a C toolchain, Node 22+ and npm; on Windows also Zig 0.16.0 on `PATH`, which scriptc uses to link the core. `cargo build` installs the pinned scriptc compiler (the first build needs the npm registry) and builds the core static library. To skip Node, use a [precompiled core](#build-configuration).
 
 ### wgpu version
@@ -325,7 +325,9 @@ Published native versions are available from [GitHub Releases](https://github.co
 | Windows x86_64 | `x86_64-pc-windows-msvc` | Windows Server 2022, MSVC |
 | Linux x86_64 | `x86_64-unknown-linux-gnu` | Ubuntu 24.04, glibc |
 
-Other architectures and Linux musl are not provided. The build host does not guarantee compatibility with older systems; `manifest.json` records the actual OS and, on Linux, the glibc version.
+Windows GNU (`x86_64-pc-windows-gnu`), other architectures and Linux musl are not provided, and Windows GNU source builds are not validated. On Windows, build Rust applications for `x86_64-pc-windows-msvc`.
+
+The build host does not guarantee compatibility with older systems; `manifest.json` records the actual OS and, on Linux, the glibc version.
 
 | Package path | Contents |
 | --- | --- |

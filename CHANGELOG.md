@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Reduce the macOS ARM64 native C shared library from 6.49 MB to 4.38 MB before compression, excluding model weights.
+- Clarify that Windows native releases support `x86_64-pc-windows-msvc` only; Windows GNU has no bundled core or precompiled package, and its source builds are not validated.
+
 ## [Native 0.1.1] - 2026-10-25
 
 ### Added

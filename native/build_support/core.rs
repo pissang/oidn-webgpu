@@ -39,7 +39,17 @@ pub fn bundled_core(
         return Err("core manifest version or source revision mismatch".into());
     }
     let entry = &manifest["targets"][target];
-    let file = entry["file"].as_str().ok_or_else(|| format!("no bundled core for {target}; use a source checkout with a matching custom OIDN_WEBGPU_CORE_ARCHIVE"))?;
+    let file = entry["file"].as_str().ok_or_else(|| {
+        if target.contains("-windows-gnu") {
+            format!(
+                "no bundled core for {target}; build Windows Rust applications for x86_64-pc-windows-msvc; Windows GNU source builds are not validated"
+            )
+        } else {
+            format!(
+                "no bundled core for {target}; choose a supported target listed in the crate README; custom source builds for other targets are not validated"
+            )
+        }
+    })?;
     let extension = if target.ends_with("-msvc") {
         "lib"
     } else {

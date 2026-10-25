@@ -77,6 +77,18 @@ fn rejects_different_version_target_and_source() {
     assert!(f.load().is_err());
 }
 #[test]
+fn unsupported_target_error_is_not_bypassed_by_an_archive_override() {
+    let f = Fixture::new();
+    let supplied =
+        f.0.join("prebuilt/oidn-webgpu-core-0.1.0-x86_64-pc-windows-msvc.lib");
+    let error =
+        core::bundled_core(&f.0, "x86_64-pc-windows-gnu", "0.1.0", Some(&supplied)).unwrap_err();
+    assert!(error.contains("no bundled core for x86_64-pc-windows-gnu"));
+    assert!(error.contains("x86_64-pc-windows-msvc"));
+    assert!(error.contains("Windows GNU source builds are not validated"));
+    assert!(!error.contains("custom OIDN_WEBGPU_CORE_ARCHIVE"));
+}
+#[test]
 fn rejects_unsafe_asset_names_and_corruption() {
     let f = Fixture::new();
     let path = f.load().unwrap();

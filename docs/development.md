@@ -129,14 +129,14 @@ When one case is slower in every column, OIDN Metal included, remeasure only tha
 
 ### Native Metal profiling
 
-On macOS with Xcode installed, Instruments' Metal System Trace records CPU/GPU scheduling and Metal activity. Run from the repository root:
+On macOS with Xcode installed, Instruments' Metal System Trace records CPU/GPU scheduling and Metal activity. The `profiling` profile retains symbols and line tables for CPU stack traces. Run from the repository root:
 
 ```bash
-cargo build --release --manifest-path native/Cargo.toml --bins
+cargo build --profile profiling --manifest-path native/Cargo.toml --bins
 mkdir -p benchmarks/results
 xcrun xctrace record --template 'Metal System Trace' \
   --output benchmarks/results/large-native.trace --time-limit 12s --launch -- \
-  "$PWD/native/target/release/oidn-webgpu-denoise-bench" \
+  "$PWD/native/target/profiling/oidn-webgpu-denoise-bench" \
   --weights "$PWD/weights/rt_hdr_calb_cnrm_large.tza" \
   --width 1280 --height 720 --warmup 5 --runs 100
 ```
@@ -144,7 +144,7 @@ xcrun xctrace record --template 'Metal System Trace' \
 Xcode 27's `gpucapture` and `gpudebug` also capture and replay compute workloads for per-dispatch costs and shader statistics such as register use and spills. Start a longer run in one terminal:
 
 ```bash
-MTL_CAPTURE_ENABLED=1 native/target/release/oidn-webgpu-denoise-bench \
+MTL_CAPTURE_ENABLED=1 native/target/profiling/oidn-webgpu-denoise-bench \
   --weights weights/rt_hdr_calb_cnrm_large.tza \
   --width 1280 --height 720 --warmup 5 --runs 400
 ```
@@ -173,6 +173,8 @@ exit --terminate
 Capture enough command buffers to include complete network executions; a single buffer can contain only initialization, preprocessing or output conversion. Shader indices depend on the trace, and one pipeline can serve multiple layers. Replay costs help locate hotspots; they do not replace the synchronized full-image latency benchmark. Capture/replay adds overhead and can save hundreds of MiB, so run it separately from timing comparisons. Metal timestamp queries returned zero or invalid samples in local tests; validate them before using them as GPU timings.
 
 ## CI and native packages
+
+When `native/Cargo.toml` is the root manifest, release builds use one codegen unit for the native crate and its dependencies and request symbol stripping. Thin LTO applies to benchmark and test executables; Cargo skips it for the mixed `rlib`/`cdylib`/`staticlib` library target and downgrades symbol stripping there to debug-info stripping. The default optimization level and panic unwinding are retained: the C API relies on `catch_unwind` to convert Rust panics to status codes. Downstream Rust applications select their own workspace's profiles.
 
 [`.github/workflows/native.yml`](../.github/workflows/native.yml) runs on pull requests and pushes to `main` that touch `native/`, `src/`, `weights/` or the native scripts, on `v*` / `native-v*` tags, and on manual dispatch. For each target it:
 
