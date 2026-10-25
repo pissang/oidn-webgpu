@@ -9,7 +9,7 @@ uses that version and the selected source commit. It defaults to validation only
 | Distribution | Contents | Lifetime |
 | --- | --- | --- |
 | Native CI artifacts | Four C/native packages, an assembled crate and release assets | 30 days; for review and testing |
-| GitHub Release `native-v<VERSION>` | Native packages, four raw core archives, core manifest, `.crate`, `SHA256SUMS` | No automatic expiry |
+| GitHub Release `native-v<VERSION>` | Native packages, four raw core archives, core manifest, `.crate`, license notices, `SHA256SUMS` | No automatic expiry |
 | crates.io `oidn-webgpu-native` | Rust sources, license, examples and all four precompiled cores | Registry version archive |
 
 The crate includes cores for Windows x86_64 MSVC, Linux x86_64 GNU, macOS x86_64
@@ -19,6 +19,12 @@ Consumers need Rust and their platform linker; they do not need Node, npm, Zig,
 or a build-time download from GitHub. Offline builds work when Cargo dependencies
 are already cached. The assembled crate currently compresses to about 3.2 MiB;
 assembly rejects packages at or above 10,000,000 bytes.
+
+The crate and native packages carry `NOTICE` and the required scriptc runtime
+and V8 license texts under `licenses/scriptc/`. The same texts accompany raw
+Release cores. See [Licensing](../native/README.md#licensing) for the component
+licenses and the crate's SPDX expression. Recheck the bundled runtime code when
+updating scriptc or changing the planner's runtime feature usage.
 
 Git/path source checkouts retain automatic scriptc builds for shared-core
 development. `OIDN_WEBGPU_CORE_ARCHIVE` remains an explicit override; a release

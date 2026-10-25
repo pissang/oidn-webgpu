@@ -10,6 +10,7 @@ Experimental native GPU denoising through [wgpu](https://wgpu.rs) on Metal, Vulk
 - [Precompiled packages](#precompiled-packages)
 - [Build configuration](#build-configuration)
 - [Performance](#performance)
+- [Licensing](#licensing)
 
 ## Choose an API
 
@@ -317,3 +318,19 @@ Without `OIDN_WEBGPU_CORE_ARCHIVE`, a registry crate selects and verifies its bu
 The [0.6.0 release notes](https://github.com/pissang/oidn-webgpu/blob/main/CHANGELOG.md#060---2026-10-25) compare native denoising with official OIDN 2.5.1 on an Apple M4 Max (Metal) and an NVIDIA RTX 4060 Laptop (Vulkan). Those timings cover one whole image in GPU buffers, including preprocessing and output conversion, with runtime checks disabled; they exclude uploads and readback.
 
 On the M4 Max, the C example takes about 21 ms per 1024x1024 image with `rt_hdr_alb_nrm.tza`, including three input uploads and output readback. First preparation includes planning and shader compilation; there is no on-disk pipeline cache.
+
+## Licensing
+
+Project-owned code is licensed under MIT (see `LICENSE`). The published crate
+also bundles precompiled cores with separately licensed components:
+
+| Component | License | Distributed text |
+| --- | --- | --- |
+| scriptc runtime | Apache-2.0 | `licenses/scriptc/runtime-LICENSE.txt` |
+| V8-derived radix number conversion | BSD-3-Clause | `licenses/scriptc/v8-number-radix-LICENSE.txt` |
+| Ryū decimal conversion | BSL-1.0 | Object code only; this license exempts that form from reproducing its text |
+
+The crate declares `MIT AND Apache-2.0 AND BSD-3-Clause AND BSL-1.0` to describe
+these combined obligations. Each license applies to its respective component;
+this expression does not relicense project-owned code. `NOTICE` records the
+upstream version and component origins.

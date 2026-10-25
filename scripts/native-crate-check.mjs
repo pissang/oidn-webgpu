@@ -1,7 +1,7 @@
 // Verify the actual .crate outside the checkout, with no Node/core override.
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
+import {existsSync,mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -24,6 +24,11 @@ try {
   run('tar',['-xzf',path.basename(archive),'-C',work],{cwd:assets});
   const directory=path.join(work,name),cargo=path.join(directory,'Cargo.toml');
   assert.deepEqual(JSON.parse(readFileSync(path.join(directory,'prebuilt/manifest.json'),'utf8')),manifest);
+  for(const file of ['NOTICE','LICENSE','licenses/scriptc/runtime-LICENSE.txt','licenses/scriptc/v8-number-radix-LICENSE.txt']) {
+    assert(existsSync(path.join(directory,file)),`crate must retain ${file}`);
+  }
+  const metadata=JSON.parse(run('cargo',['metadata','--no-deps','--format-version','1','--manifest-path',cargo],{encoding:'utf8',stdio:'pipe'}));
+  assert.equal(metadata.packages.find(p=>p.name==='oidn-webgpu-native').license,'MIT AND Apache-2.0 AND BSD-3-Clause AND BSL-1.0','crate must declare bundled component licenses');
   const target=path.join(root,'.native-build/crate-check-target');
   const flags=['--locked','--manifest-path',cargo,'--target',host,'--target-dir',target];
   run('cargo',['publish','--dry-run',...flags]);

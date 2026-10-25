@@ -21,6 +21,9 @@ const assets=path.resolve(option('--assets',path.join(root,'.native-build/releas
 const stage=path.join(root,'.native-build/crate-stage');
 const dirty=capture('git',['status','--porcelain','--untracked-files=normal'])!=='';
 const allTargets=Object.keys(targets).sort();
+const compilerVersions=new Set(Object.values(JSON.parse(readFileSync(path.join(root,'native/toolchain/package.json'),'utf8')).optionalDependencies));
+assert.equal(compilerVersions.size,1,'all compiler platforms must use the same version');
+const compilerVersion=[...compilerVersions][0];
 const safeFile=name=>typeof name==='string'&&name===path.basename(name)&&!/[\\/]/.test(name)&&!['.','..'].includes(name);
 function reset(directory) {
   const relative=path.relative(path.join(root,'.native-build'),directory);
@@ -52,8 +55,8 @@ function checkAssets() {
 }
 function stageCrate() {
   const m=checkAssets();reset(stage);
-  for(const file of ['Cargo.toml','Cargo.lock','build.rs','LICENSE','README.md'])copyFileSync(path.join(root,'native',file),path.join(stage,file));
-  for(const dir of ['src','include','build_support'])cpSync(path.join(root,'native',dir),path.join(stage,dir),{recursive:true});
+  for(const file of ['Cargo.toml','Cargo.lock','build.rs','LICENSE','NOTICE','README.md'])copyFileSync(path.join(root,'native',file),path.join(stage,file));
+  for(const dir of ['src','include','build_support','licenses'])cpSync(path.join(root,'native',dir),path.join(stage,dir),{recursive:true});
   mkdirSync(path.join(stage,'examples'));
   for(const file of readdirSync(path.join(root,'native/examples')).filter(f=>/\.(rs|c)$/.test(f)))copyFileSync(path.join(root,'native/examples',file),path.join(stage,'examples',file));
   mkdirSync(path.join(stage,'prebuilt'));copyFileSync(path.join(assets,'core-manifest.json'),path.join(stage,'prebuilt/manifest.json'));
@@ -73,7 +76,8 @@ if(command==='plan') {
   const archives=files(input).filter(f=>f.endsWith('.tar.gz'));
   assert.equal(archives.length,allTargets.length,'expected exactly four native packages');
   reset(assets);
-  const m={schema_version:1,crate_version:version,release_tag:tag,source_commit:commit,source_dirty:dirty,targets:{}};
+  assert(readFileSync(path.join(root,'native/NOTICE'),'utf8').includes(`scriptc ${compilerVersion}`),'update runtime notices when changing the compiler');
+  const m={schema_version:1,crate_version:version,release_tag:tag,source_commit:commit,source_dirty:dirty,scriptc:compilerVersion,targets:{}};
   const unpack=path.join(root,'.native-build/release-unpack');reset(unpack);
   for(const archive of archives) {
     const name=path.basename(archive,'.tar.gz');
@@ -83,6 +87,7 @@ if(command==='plan') {
     run('tar',['-xzf',path.basename(archive),'-C',unpack],{cwd:path.dirname(archive)});
     const directory=path.join(unpack,name),p=JSON.parse(readFileSync(path.join(directory,'manifest.json'),'utf8'));
     assert.equal(p.source.commit,commit);assert.equal(p.source.dirty,false);assert.equal(p.crate_version,version);
+    assert.equal(p.build.scriptc,compilerVersion,'release cores must use the pinned compiler');
     assert(allTargets.includes(p.target)&&!m.targets[p.target],'duplicate or unsupported target');
     for(const f of p.files) {
       assert(!path.isAbsolute(f.path)&&!f.path.split(/[\\/]/).includes('..'));
@@ -94,6 +99,9 @@ if(command==='plan') {
     m.targets[p.target]={file,bytes:statSync(path.join(assets,file)).size,sha256:sha256(path.join(assets,file))};
     copyFileSync(archive,path.join(assets,path.basename(archive)));copyFileSync(archive+'.sha256',path.join(assets,path.basename(archive)+'.sha256'));
   }
+  copyFileSync(path.join(root,'native/LICENSE'),path.join(assets,'LICENSE'));
+  copyFileSync(path.join(root,'native/NOTICE'),path.join(assets,'NOTICE'));
+  for(const file of readdirSync(path.join(root,'native/licenses/scriptc')))copyFileSync(path.join(root,'native/licenses/scriptc',file),path.join(assets,'scriptc-'+file));
   writeFileSync(path.join(assets,'core-manifest.json'),JSON.stringify(m,null,2)+'\n');sums();stageCrate();
   run('cargo',['package','--locked','--allow-dirty','--no-verify','--manifest-path',path.join(stage,'Cargo.toml')]);
   const crate=`oidn-webgpu-native-${version}.crate`;

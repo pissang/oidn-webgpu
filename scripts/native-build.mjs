@@ -8,7 +8,7 @@
 // Requirements: Node 22+, npm, stable Rust, and a C toolchain. The pinned
 // scriptc is installed automatically (or use OIDN_WEBGPU_SCRIPTC).
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { archivePackage, packageContext, writeManifest } from './native-package.mjs';
@@ -64,6 +64,8 @@ writeFileSync(path.join(output, 'examples/rust-app/Cargo.toml'), rustExample.rep
 ));
 copy(path.join(root, 'native/README.md'), path.join(output, 'README.md'));
 copy(path.join(root, 'LICENSE'), path.join(output, 'LICENSE'));
+copy(path.join(root, 'native/NOTICE'), path.join(output, 'NOTICE'));
+cpSync(path.join(root, 'native/licenses'), path.join(output, 'licenses'), { recursive: true });
 if (args.includes('--require-clean')) {
   const afterBuild = packageContext(root, { target: context.target, requireClean: true });
   if (afterBuild.source.commit !== context.source.commit) throw new Error('Source commit changed during the build');

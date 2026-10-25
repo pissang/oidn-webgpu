@@ -1,0 +1,23 @@
+oidn-webgpu native
+
+The project's Rust, TypeScript and compatibility code is covered by LICENSE.
+
+Precompiled planner cores incorporate the following code from scriptc 0.3.2,
+upstream tag v0.3.2, commit c34925058d7f9b3cc3418c82861af9d82898df5b:
+https://github.com/vercel-labs/scriptc/tree/v0.3.2/packages/runtime
+
+- scriptc runtime: Apache-2.0; see licenses/scriptc/runtime-LICENSE.txt.
+- V8-derived radix number conversion in src/scr_json.c: BSD-3-Clause;
+  Copyright 2012 the V8 project authors. See
+  licenses/scriptc/v8-number-radix-LICENSE.txt.
+- Ryū decimal conversion included by src/scr_number.c: BSL-1.0, selected
+  from its Apache-2.0 / BSL-1.0 dual license. Only compiled object code is
+  distributed; BSL-1.0 exempts this form from reproducing its license text.
+
+The package SPDX expression combines these component licenses with AND;
+it does not offer a choice of license for the complete package.
+
+Windows cores adapt GNU constructor sections for MSVC and add CRT compatibility
+objects. The directory-access compatibility code comes from Zig's public-domain
+MinGW dirent implementation. See scripts/native-core-msvc.mjs in the source
+repository for the transformations.
