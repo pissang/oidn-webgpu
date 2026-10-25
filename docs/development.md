@@ -64,7 +64,7 @@ Consequences:
 
 ## Commands
 
-Run from the repository root. Requirements: Node 22+; for native work also stable Rust and a C toolchain (on Windows also Zig 0.16.0 on `PATH`).
+Run from the repository root. Requirements: Node 22+; for native work also stable Rust and a C toolchain (on Windows also Zig 0.16.0 on `PATH`). Building or checking C packages also needs CMake 3.20+.
 
 | Task | Command | Needs a GPU |
 | --- | --- | --- |
@@ -177,7 +177,7 @@ Capture enough command buffers to include complete network executions; a single 
 [`.github/workflows/native.yml`](../.github/workflows/native.yml) runs on pull requests and pushes to `main` that touch `native/`, `src/`, `weights/` or the native scripts, on `v*` / `native-v*` tags, and on manual dispatch. For each target it:
 
 1. builds the core archive and C package: `node scripts/native-build.mjs --target <triple> --archive --require-clean`;
-2. verifies the archive without a GPU: `node scripts/native-package-check.mjs <archive>` (checksum, C ABI test `native/tests/abi.c`, C examples, planner run, the packaged standalone Rust application linked to the packaged core and run with `--inspect-model`). Its Cargo manifest pins the package source commit; CI substitutes that same local checkout to stay offline. On Windows it also compiles the packaged `examples/validate_windows.c`; run GPU validation separately as described in the [native guide](../native/README.md);
+2. verifies the archive without a GPU: `node scripts/native-package-check.mjs <archive>` (checksum, C ABI test `native/tests/abi.c`, CMake consumers using the relocated package, planner run, installed applications with the SDK hidden, the packaged standalone Rust application linked to the packaged core and run with `--inspect-model`). Its Cargo manifest pins the package source commit; CI substitutes that same local checkout to stay offline. On Windows it also compiles the packaged `examples/validate_windows.c`; run GPU validation separately as described in the [native guide](../native/README.md);
 3. uploads the `.tar.gz` and `.sha256` as an artifact.
 
 The workflow also runs native unit/core-integrity tests and runs `npm test` on Linux. It assembles a crate containing all four verified cores, then runs isolated `cargo publish --dry-run` and Rust application checks on every target. No GPU execution runs in CI. The [native release guide](native-release.md) describes permanent assets and the manually triggered publication workflow.

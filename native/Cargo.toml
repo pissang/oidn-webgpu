@@ -1,6 +1,6 @@
 [package]
 name = "oidn-webgpu-native"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # Own code is MIT; bundled cores also contain scriptc, V8-derived code and Ryū.
 license = "MIT AND Apache-2.0 AND BSD-3-Clause AND BSL-1.0"

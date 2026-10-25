@@ -28,7 +28,7 @@ Weights are not bundled. Choose a `.tza` file from the [weights table](https://g
 
 ```toml
 [dependencies]
-oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.0" }
+oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.1" }
 # Git source:
 # oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
 # Local checkout:
@@ -175,7 +175,7 @@ Image dimensions must be in 1..=16384 and fit the device's buffer limits.
 
 ### Get the library
 
-Download a [precompiled package](#precompiled-packages), or build one from the repository root (needs Node 22+, npm, stable Rust and a C toolchain; on Windows also Zig 0.16.0):
+Download a [precompiled package](#precompiled-packages), or build one from the repository root (needs Node 22+, npm, CMake 3.20+, stable Rust and a C toolchain; on Windows also Zig 0.16.0):
 
 ```bash
 npm run native:build
@@ -205,6 +205,48 @@ oidnw_device_destroy(device);
 ```
 
 Check every `int32_t` status (`OIDNW_OK` = 0); [`examples/denoise.c`](examples/denoise.c) shows full error handling. Link with `-loidn_webgpu` and ship the shared library and your TZA weights.
+
+### CMake
+
+Precompiled packages provide a CMake 3.20+ config package. Set `CMAKE_PREFIX_PATH` to the extracted package root, then use:
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(my_app LANGUAGES C)
+
+find_package(oidn_webgpu CONFIG REQUIRED)
+add_executable(my_app main.c)
+target_link_libraries(my_app PRIVATE oidn_webgpu::oidn_webgpu)
+```
+
+| Target | Links |
+| --- | --- |
+| `oidn_webgpu::oidn_webgpu` | C filter shared library and public headers |
+| `oidn_webgpu::oidn_webgpu_core` | Planner-only static library, public headers and required system libraries |
+
+The package can be moved without regenerating its CMake files. An optional version in `find_package` uses the native crate version; compatible patch versions share the same major and minor numbers. The headers and libraries must match the application's target OS and CPU architecture.
+
+Windows applications must ship the DLL beside the executable or make it available on `PATH`. CMake can copy it after building:
+
+```cmake
+if(WIN32)
+  set_property(TARGET my_app PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+  add_custom_command(TARGET my_app POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+      "$<TARGET_FILE:oidn_webgpu::oidn_webgpu>" "$<TARGET_FILE_DIR:my_app>"
+    VERBATIM)
+endif()
+```
+
+The package's [`examples/CMakeLists.txt`](examples/CMakeLists.txt) builds `denoise`, `plan` and, on Windows, `validate_windows`. Its install step places executables in `bin/` and their shared library in `lib/` (Windows: `bin/`). Move the installed directory as a unit when deploying the examples. From the repository root after building a package:
+
+```bash
+cmake -S .native-build/package/examples -B .native-build/cmake-examples \
+  -DCMAKE_PREFIX_PATH="$PWD/.native-build/package" -DCMAKE_BUILD_TYPE=Release
+cmake --build .native-build/cmake-examples --config Release
+cmake --install .native-build/cmake-examples --config Release --prefix "$PWD/.native-build/cmake-app"
+.native-build/cmake-app/bin/plan weights/rt_hdr_alb_nrm_small.tza 16 16
+```
 
 ### Behavior
 
@@ -291,13 +333,15 @@ Other architectures and Linux musl are not provided. The build host does not gua
 | `include/oidn_webgpu_core.h` | Core planner API |
 | `lib/liboidn_webgpu.dylib`, `.so`, or `oidn_webgpu.dll` + `oidn_webgpu.dll.lib` | C filter shared library |
 | `lib/liboidn_webgpu_core.a` or `oidn_webgpu_core.lib` | Core planner static library; also the Rust core override |
+| `lib/cmake/oidn_webgpu/` | CMake config, version checks and imported targets |
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `examples/denoise.c`, `examples/plan.c`, `examples/host_buffers.rs` | Complete examples |
+| `examples/CMakeLists.txt` | C examples using the packaged CMake targets |
 | `examples/validate_windows.c` | Windows DLL output and latency check |
 | `examples/validate.rs`, `examples/rust-app/Cargo.toml` | Standalone Rust application with a source-pinned dependency |
 | `manifest.json`, `SHA256SUMS` | Source commit, target, compiler versions, file hashes |
 
-Package names contain the crate version, target triple and full source commit, for example `oidn-webgpu-native-0.1.0-aarch64-apple-darwin-<commit>.tar.gz`. Packages built from modified sources have a `-dirty` suffix and `source.dirty = true` in the manifest, so their commit alone does not reproduce the contents.
+Release package names contain the crate version and target triple, for example `oidn-webgpu-native-0.1.1-aarch64-apple-darwin.tar.gz`. The full source commit is recorded in `manifest.json` as `source.commit`. CI and local archives also include the full commit in their names. Local archives built from modified sources have a `-dirty` suffix and `source.dirty = true` in the manifest, so their commit alone does not reproduce the contents.
 
 - **C:** use the shared library directly; Node and Rust are not needed.
 - **Rust:** pin the Cargo `rev` to `source.commit` from `manifest.json` and set `OIDN_WEBGPU_CORE_ARCHIVE` to the package's core library. Cargo still compiles the Rust layer, and the [wgpu version](#wgpu-version) rule still applies. Precompiled `rlib` files are not provided.

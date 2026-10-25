@@ -1,8 +1,8 @@
 // Verify the archive a developer will download, including relocation, C ABI,
 // planner execution and a standalone Rust consumer. No GPU is required.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +24,10 @@ try {
     member.startsWith(`${name}/`) && !member.split('/').includes('..') && !member.includes('\\')
   ), 'archive must contain one named package directory');
   execFileSync('tar', ['-xzf', path.basename(archive), '-C', work], { cwd: path.dirname(archive), stdio: 'inherit' });
-  const directory = path.join(work, name);
+  // The configured package must work after extraction into a different path,
+  // including spaces, with no access to its original build-time prefix.
+  const directory = path.join(work, 'relocated package');
+  renameSync(path.join(work, name), directory);
   const manifest = JSON.parse(readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
   assert.equal(manifest.schema_version, 1);
   assert.equal(manifest.name, name);
@@ -65,17 +68,44 @@ try {
     }
   };
   compile(path.join(root, 'native/tests/abi.c'), executable('abi'));
-  compile(path.join(directory, 'examples/denoise.c'), executable('denoise'));
-  compile(path.join(directory, 'examples/plan.c'), executable('plan'), true);
   // DLL lookup finds the extracted DLL, not the copy in the Cargo target dir.
   const dllEnv = windows ? { PATH: `${lib}${path.delimiter}${process.env.PATH ?? ''}` } : {};
   run(executable('abi'), [], dllEnv);
   const weights = path.join(root, 'weights/rt_hdr_alb_nrm_small.tza');
-  run(executable('plan'), [weights, '16', '16']);
+
+  const cmakeConsumer = path.join(work, 'cmake-consumer');
+  const cmakeBuild = path.join(work, 'cmake-build');
+  const cmakePath = (value) => JSON.stringify(value.replaceAll('\\', '/'));
+  mkdirSync(cmakeConsumer);
+  writeFileSync(path.join(cmakeConsumer, 'CMakeLists.txt'), `
+cmake_minimum_required(VERSION 3.20)
+project(package_consumer LANGUAGES C)
+set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+find_package(oidn_webgpu 999 CONFIG QUIET)
+if(oidn_webgpu_FOUND)
+  message(FATAL_ERROR "An incompatible package version was accepted")
+endif()
+find_package(oidn_webgpu ${manifest.crate_version} EXACT CONFIG REQUIRED)
+add_subdirectory(${cmakePath(path.join(directory, 'examples'))} examples)
+add_executable(cmake_abi ${cmakePath(path.join(root, 'native/tests/abi.c'))})
+target_link_libraries(cmake_abi PRIVATE oidn_webgpu::oidn_webgpu)
+if(WIN32)
+  add_custom_command(TARGET cmake_abi POST_BUILD
+    COMMAND "\${CMAKE_COMMAND}" -E copy_if_different
+      "$<TARGET_FILE:oidn_webgpu::oidn_webgpu>" "$<TARGET_FILE_DIR:cmake_abi>"
+    VERBATIM)
+endif()
+file(GENERATE OUTPUT "\${CMAKE_BINARY_DIR}/executables-$<CONFIG>.txt"
+  CONTENT "$<TARGET_FILE:cmake_abi>\n$<TARGET_FILE:denoise>\n$<TARGET_FILE:plan>\n")
+`);
+  run('cmake', ['-S', cmakeConsumer, '-B', cmakeBuild, `-DCMAKE_PREFIX_PATH=${directory}`, '-DCMAKE_BUILD_TYPE=Release']);
+  run('cmake', ['--build', cmakeBuild, '--config', 'Release']);
+  const [cmakeAbi, , cmakePlan] = readFileSync(path.join(cmakeBuild, 'executables-Release.txt'), 'utf8').trim().split(/\r?\n/);
+  run(cmakeAbi, []);
+  run(cmakePlan, [weights, '16', '16']);
 
   if (windows) {
-    // Compile the GPU validation host, but do not require a GPU on CI.
-    compile(path.join(directory, 'examples/validate_windows.c'), executable('validate-windows'));
+    // CMake also compiles validate_windows, without requiring a GPU on CI.
     compile(path.join(root, 'native/tests/msvc-runtime.c'), executable('msvc-runtime'), true);
     const mask = (1n << 64n) - 1n;
     const max = (1n << 128n) - 1n;
@@ -112,6 +142,16 @@ try {
   });
   assert.deepEqual(JSON.parse(modelOutput), { modelInputs: 3, gpuRequested: false });
   console.log('Packaged Rust application linked to core: OK (no GPU requested)');
+
+  const deployed = path.join(work, 'deployed');
+  run('cmake', ['--install', cmakeBuild, '--config', 'Release', '--prefix', deployed]);
+  // Hide the SDK to prove installed applications find their shipped library.
+  renameSync(directory, path.join(work, 'hidden package'));
+  run(path.join(deployed, 'bin', windows ? 'plan.exe' : 'plan'), [weights, '16', '16']);
+  const usage = spawnSync(path.join(deployed, 'bin', windows ? 'denoise.exe' : 'denoise'), [], { cwd: deployed, encoding: 'utf8' });
+  assert.equal(usage.status, 2, usage.error?.message ?? usage.stderr);
+  assert.match(usage.stderr, /usage:/);
+  console.log('CMake targets, relocated package and installed C examples: OK (no GPU requested)');
   console.log(`Verified ${manifest.name}`);
 } finally {
   rmSync(work, { recursive: true, force: true });

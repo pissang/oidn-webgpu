@@ -1,0 +1,52 @@
+@PACKAGE_INIT@
+
+set(oidn_webgpu_VERSION "@OIDNW_VERSION@")
+set_and_check(_oidnw_include "@PACKAGE_OIDNW_INCLUDE_DIR@")
+set_and_check(_oidnw_lib "@PACKAGE_OIDNW_LIBRARY_DIR@")
+
+if(NOT TARGET oidn_webgpu::oidn_webgpu)
+  add_library(oidn_webgpu::oidn_webgpu SHARED IMPORTED GLOBAL)
+  set_target_properties(oidn_webgpu::oidn_webgpu PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_oidnw_include}"
+  )
+  if("@OIDNW_PLATFORM@" STREQUAL "windows")
+    set_and_check(_oidnw_shared "${_oidnw_lib}/oidn_webgpu.dll")
+    set_and_check(_oidnw_implib "${_oidnw_lib}/oidn_webgpu.dll.lib")
+    set_target_properties(oidn_webgpu::oidn_webgpu PROPERTIES
+      IMPORTED_LOCATION "${_oidnw_shared}"
+      IMPORTED_IMPLIB "${_oidnw_implib}"
+    )
+  elseif("@OIDNW_PLATFORM@" STREQUAL "macos")
+    set_and_check(_oidnw_shared "${_oidnw_lib}/liboidn_webgpu.dylib")
+    set_target_properties(oidn_webgpu::oidn_webgpu PROPERTIES IMPORTED_LOCATION "${_oidnw_shared}")
+  else()
+    set_and_check(_oidnw_shared "${_oidnw_lib}/liboidn_webgpu.so")
+    set_target_properties(oidn_webgpu::oidn_webgpu PROPERTIES IMPORTED_LOCATION "${_oidnw_shared}")
+  endif()
+endif()
+
+if(NOT TARGET oidn_webgpu::oidn_webgpu_core)
+  if("@OIDNW_PLATFORM@" STREQUAL "linux")
+    include(CMakeFindDependencyMacro)
+    find_dependency(Threads)
+  endif()
+  add_library(oidn_webgpu::oidn_webgpu_core STATIC IMPORTED GLOBAL)
+  if("@OIDNW_PLATFORM@" STREQUAL "windows")
+    set_and_check(_oidnw_core "${_oidnw_lib}/oidn_webgpu_core.lib")
+    set_property(TARGET oidn_webgpu::oidn_webgpu_core PROPERTY INTERFACE_LINK_LIBRARIES
+      ws2_32 bcrypt crypt32 iphlpapi userenv ntdll advapi32)
+  else()
+    set_and_check(_oidnw_core "${_oidnw_lib}/liboidn_webgpu_core.a")
+    if("@OIDNW_PLATFORM@" STREQUAL "linux")
+      set_property(TARGET oidn_webgpu::oidn_webgpu_core PROPERTY INTERFACE_LINK_LIBRARIES
+        m "${CMAKE_DL_LIBS}" Threads::Threads)
+    endif()
+  endif()
+  set_target_properties(oidn_webgpu::oidn_webgpu_core PROPERTIES
+    IMPORTED_LOCATION "${_oidnw_core}"
+    IMPORTED_LINK_INTERFACE_LANGUAGES C
+    INTERFACE_INCLUDE_DIRECTORIES "${_oidnw_include}"
+  )
+endif()
+
+check_required_components(oidn_webgpu)

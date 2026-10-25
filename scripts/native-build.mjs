@@ -2,10 +2,11 @@
 //   include/oidn_webgpu.h, include/oidn_webgpu_core.h
 //   lib/liboidn_webgpu.{dylib,so} or oidn_webgpu.dll (+ .dll.lib import library)
 //   lib/liboidn_webgpu_core.a or oidn_webgpu_core.lib (planner only, no GPU)
+//   lib/cmake/oidn_webgpu/{oidn_webgpuConfig,oidn_webgpuConfigVersion}.cmake
 //   bin/oidn-webgpu-bench, examples/{denoise,plan}.c, examples/host_buffers.rs
 //   README.md, LICENSE, manifest.json, SHA256SUMS
 // --archive also writes a target/SHA-labelled tarball and archive checksum.
-// Requirements: Node 22+, npm, stable Rust, and a C toolchain. The pinned
+// Requirements: Node 22+, npm, CMake 3.20+, stable Rust, and a C toolchain. The pinned
 // scriptc is installed automatically (or use OIDN_WEBGPU_SCRIPTC).
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -54,6 +55,7 @@ copy(path.join(release, bench), path.join(output, 'bin', bench));
 copy(path.join(root, 'native/examples/denoise.c'), path.join(output, 'examples/denoise.c'));
 copy(path.join(root, 'native/examples/validate_windows.c'), path.join(output, 'examples/validate_windows.c'));
 copy(path.join(root, 'native/examples/plan.c'), path.join(output, 'examples/plan.c'));
+copy(path.join(root, 'native/examples/CMakeLists.txt'), path.join(output, 'examples/CMakeLists.txt'));
 copy(path.join(root, 'native/examples/host_buffers.rs'), path.join(output, 'examples/host_buffers.rs'));
 copy(path.join(root, 'native/examples/validate.rs'), path.join(output, 'examples/validate.rs'));
 mkdirSync(path.join(output, 'examples/rust-app'), { recursive: true });
@@ -66,6 +68,10 @@ copy(path.join(root, 'native/README.md'), path.join(output, 'README.md'));
 copy(path.join(root, 'LICENSE'), path.join(output, 'LICENSE'));
 copy(path.join(root, 'native/NOTICE'), path.join(output, 'NOTICE'));
 cpSync(path.join(root, 'native/licenses'), path.join(output, 'licenses'), { recursive: true });
+run('cmake', [
+  `-DOIDNW_PACKAGE_DIR=${output}`, `-DOIDNW_VERSION=${context.crate_version}`,
+  `-DOIDNW_PLATFORM=${context.platform}`, '-P', path.join(root, 'native/cmake/package.cmake')
+]);
 if (args.includes('--require-clean')) {
   const afterBuild = packageContext(root, { target: context.target, requireClean: true });
   if (afterBuild.source.commit !== context.source.commit) throw new Error('Source commit changed during the build');

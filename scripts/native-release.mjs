@@ -5,7 +5,7 @@ import {execFileSync} from 'node:child_process';
 import {appendFileSync,copyFileSync,cpSync,existsSync,mkdirSync,readFileSync,readdirSync,rmSync,statSync,writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {sha256,targets} from './native-package.mjs';
+import {archivePackage,sha256,targets,writeManifest} from './native-package.mjs';
 import {uploadRelease} from './native-release-upload.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
@@ -97,7 +97,11 @@ if(command==='plan') {
     const file=`oidn-webgpu-core-${version}-${p.target}.${p.target.endsWith('-msvc')?'lib':'a'}`;
     copyFileSync(path.join(directory,'lib',core),path.join(assets,file));
     m.targets[p.target]={file,bytes:statSync(path.join(assets,file)).size,sha256:sha256(path.join(assets,file))};
-    copyFileSync(archive,path.join(assets,path.basename(archive)));copyFileSync(archive+'.sha256',path.join(assets,path.basename(archive)+'.sha256'));
+    // Keep CI archives source-labelled; release packages use the version and
+    // target, with the full source revision retained in their manifest.
+    const releaseName=`oidn-webgpu-native-${version}-${p.target}`;
+    writeManifest(directory,{...p,name:releaseName});
+    archivePackage(directory,assets,releaseName);
   }
   copyFileSync(path.join(root,'native/LICENSE'),path.join(assets,'LICENSE'));
   copyFileSync(path.join(root,'native/NOTICE'),path.join(assets,'NOTICE'));

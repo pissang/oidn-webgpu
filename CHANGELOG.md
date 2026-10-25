@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [Native 0.1.1] - 2026-10-25
+
+### Added
+
+- Native precompiled packages support CMake `find_package(oidn_webgpu CONFIG REQUIRED)` with `oidn_webgpu::oidn_webgpu` for the C filter and `oidn_webgpu::oidn_webgpu_core` for the static planner. Packaged CMake examples build and install the C applications with their shared library.
+
+### Changed
+
+- Native Release package filenames now contain only the crate version and target triple; download URLs no longer include the source commit. The full commit remains in `manifest.json`; CI and local archive names still include it.
+
 ## [0.6.0] - 2026-10-25
 
 oidn-webgpu 0.6.0 is the first release under the new package name. It adds experimental native Rust and C APIs, sanitizes inputs and outputs like OIDN, and lowers default FP16 latency in Chrome by up to 19% on the measured GPUs. The package name is the only breaking change.
