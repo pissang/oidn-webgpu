@@ -47,7 +47,7 @@ Use `npm run test:fast -- <related test files>` during iteration; it builds only
 4. **The C header is an ABI.** `native/include/oidn_webgpu.h` must match `native/src/capi.rs`: function signatures, struct layout and enum values. Follow the header's versioning (`OIDNW_API_VERSION` and `oidnw_api_version()`): a minor bump may only add; removals and layout changes need a major bump. `native/tests/abi.c` checks defaults and error reporting.
 5. **wgpu is pinned to `=30.0.1`.** Rust hosts must share the exact version, so changing it is a breaking change.
 6. **CI has no GPU.** Unit tests use mock devices. For kernel, precision or tiling changes, run the GPU checks on real hardware; if you cannot, say in your summary that GPU execution was not verified.
-7. **Changelog.** User-visible changes go under `[Unreleased]` in `CHANGELOG.md`, with migration notes for breaking changes. Experimental options (`engine: 'webnn'`, `kernel`, `gemm`, `subgroupMatrix`) are not covered by semver.
+7. **Changelog.** User-visible changes go under `[Unreleased]`, with migration notes for breaking changes: native library changes (Rust crate, C/C++ headers and packages, CUDA adapter) in `native/CHANGELOG.md`, browser package and repository tooling changes in `CHANGELOG.md`. Experimental options (`engine: 'webnn'`, `kernel`, `gemm`, `subgroupMatrix`) are not covered by semver.
 8. **Generated files stay out of git:** `lib/`, `dist/`, `.native-build/`, `native/target/`, `benchmarks/results/`. Do not modify files in `weights/`.
 9. **Plans stay local.** Do not add or commit files under `plans/`.
 10. **Keep validation reports in the conversation.** Do not include testing or validation details in notes, code comments, or commit messages. Report them separately in the conversation.
@@ -64,5 +64,5 @@ Use `npm run test:fast -- <related test files>` during iteration; it builds only
 - [ ] Run `npm test` once for JS/TypeScript implementation or JS build/test tooling changes. Browser-only changes need no native checks.
 - [ ] Run native unit tests once for shared implementation, native Rust or native build dependency changes. Rust-only changes need no npm checks.
 - [ ] Build affected examples, ABI consumers or packages only when those surfaces change; ordinary runtime edits need no release package or publication dry run.
-- [ ] Docs and `CHANGELOG.md` reflect user-visible changes.
+- [ ] Docs and the matching changelog (`CHANGELOG.md` or `native/CHANGELOG.md`) reflect user-visible changes.
 - [ ] Your summary says what was and was not verified on a GPU.

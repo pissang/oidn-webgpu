@@ -65,9 +65,9 @@ with a message directing the maintainer to this workflow.
 
 ## Manual release
 
-1. Set the native version, update the changelog, commit the sources, and run GPU
-   checks when changing kernels. Never reuse a published native version for a
-   different source commit.
+1. Set the native version, move `[Unreleased]` in `native/CHANGELOG.md` to
+   that version, commit the sources, and run GPU checks when changing kernels.
+   Never reuse a published native version for a different source commit.
 2. Run **Publish native release** from GitHub Actions. Select the intended branch
    or tag, enter the exact native crate version, and leave `publish` unchecked.
    All build and isolated-crate checks must pass.

@@ -4,7 +4,7 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 **Status:** experimental; APIs and results may change between versions. See [Tested configurations](#tested-configurations). CI builds and checks packages but does not run them on a GPU.
 
-**Availability:** the latest release, Native 0.1.1 (C ABI 1.0.0), contains the Rust API, the CPU C filter and the core planner. The GPU C API, C++17 wrappers and CUDA adapter (C ABI 3.0.0) are not released yet: [build from source](#build-from-source) or use a [CI package](#precompiled-packages) from a commit that contains them. Check `OIDNW_API_VERSION` in your `oidn_webgpu.h`; `0x00030000` identifies the interface described here.
+**Availability:** the latest release, Native 0.1.1 (C ABI 1.0.0; [changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)), contains the Rust API, the CPU C filter and the core planner. The GPU C API, C++17 wrappers and CUDA adapter (C ABI 3.0.0) are not released yet: [build from source](#build-from-source) or use a [CI package](#precompiled-packages) from a commit that contains them. Check `OIDNW_API_VERSION` in your `oidn_webgpu.h`; `0x00030000` identifies the interface described here.
 
 - [Choose an API](#choose-an-api)
 - [Get the library](#get-the-library)

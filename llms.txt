@@ -39,5 +39,6 @@
 
 ## Optional
 
-- [CHANGELOG](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/CHANGELOG.md): release notes and migration steps
+- [CHANGELOG](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/CHANGELOG.md): browser package release notes and migration steps
+- [Native CHANGELOG](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/CHANGELOG.md): native library release notes, C ABI changes and migration steps
 - [Examples](https://github.com/pissang/oidn-webgpu/tree/main/examples): browser demo pages (LDR, HDR, auxiliary images, GPU buffers)

@@ -75,7 +75,8 @@ The model size (small, default, large) is chosen by the file alone; no option ch
 | [docs/development.md](docs/development.md) | Architecture, build/test/benchmark commands, updating OIDN models, CI |
 | [AGENTS.md](AGENTS.md) | Repository map and working rules for coding agents and contributors |
 | [llms.txt](llms.txt) | Doc index for LLM tools |
-| [CHANGELOG.md](CHANGELOG.md) | Release notes and migration steps |
+| [CHANGELOG.md](CHANGELOG.md) | Browser package release notes and migration steps |
+| [native/CHANGELOG.md](native/CHANGELOG.md) | Native library (Rust crate, C/C++ packages) release notes and migration steps |
 
 ## Examples and users
 

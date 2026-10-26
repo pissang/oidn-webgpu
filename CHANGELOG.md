@@ -1,53 +1,16 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
+All notable changes to the browser package `oidn-webgpu` and the repository tooling are documented in this file. Native library changes (Rust crate and C/C++ packages) are in [native/CHANGELOG.md](native/CHANGELOG.md).
 
 ## [Unreleased]
-
-The runtime changes below affect the native library only; the npm package is unchanged. The native library adds a GPU C API for host-owned Metal, Vulkan and DX12 buffers, C++17 wrappers and an optional Windows CUDA adapter. C ABI 3.0.0 replaces the published 1.0.0 ABI and requires rebuilding C consumers.
-
-### Breaking changes
-
-- Rust `DenoiseParams`, `DenoiseInfo`, `Kernel`, `KernelPath`, `Transfer`, `Limit` and `Precision` are non-exhaustive. Construct execution parameters with `DenoiseParams::default().with_input_scale(scale)` and include wildcard arms when matching these enums. C ABI implementation modules are hidden from Rust documentation and outside Rust semver guarantees.
-- C ABI 3.0.0 replaces 1.0.0. `oidnw_filter_desc` no longer has a `size` field, and the library no longer accepts older descriptor layouts. Headers and library must come from the same version; no compatibility adapter is provided. Every descriptor starts with a NULL `next` extension pointer. CPU filter `input_scale` must be positive and finite; zero is rejected.
 
 ### Added
 
 - A local `npm run test:fast` loop with content-checked build reuse, per-stage timings and optional test filenames. `npm test` retains unconditional builds.
-- Rust `DenoiserOptions` exposes experimental `kernel` (default `Kernel::Auto`) and `quality` (default `Quality::High`). `Quality::Balanced` currently matches HIGH; `Quality::Fast` explicitly selects lower-precision f16 matrix accumulation. Explicit `Kernel::SubgroupMatrix` requires the enabled cooperative-matrix device feature or creation returns `Error::UnsupportedDevice`. Kernel/quality selection is outside semver guarantees.
-- `Denoiser::warm_up` compiles pipelines before image buffers exist. Preparation on the same denoiser and size reuses them, while still planning and allocating the workspace.
-- `oidnw_filter_set_input_scale` changes CPU filter exposure without rebuilding its workspace.
-- GPU C API ([`oidn_webgpu_gpu.h`](native/include/oidn_webgpu_gpu.h)): denoises host GPU buffers without uploads or readback. Submissions are asynchronous with up to 64 external waits and 64 signals each; `oidnw_gpu_poll` / `oidnw_gpu_wait` report completion including every external signal. Pending submissions are bounded by `max_pending_submissions` (default 64), and each workspace caches up to `binding_cache_capacity` binding sets (default 8). GPU errors and device loss quarantine the context; `oidnw_gpu_device_destroy_quiescent` releases it once the host knows the GPU is idle. `oidnw_gpu_filter_warm_up` compiles pipelines without image buffers or workspace allocation; prepare on the same filter and size reuses them. `oidnw_gpu_prepared_get_info` reports immutable precision, actual kernels, tile count, workspace/shared-weight bytes and runtime-check state, and may overlap submit on the same workspace. Filter `kernel` defaults to AUTO, selecting cooperative matrices when enabled and implicit GEMM otherwise; explicit SUBGROUP_MATRIX without the feature returns UNAVAILABLE. `quality` defaults to HIGH; FAST requires explicit selection. Kernel/quality options and the matrix flags below are experimental and outside semver guarantees. See the [GPU C API guide](native/README.md#gpu-c-api).
-  - **Metal (macOS):** imports the host `MTLDevice`, buffers and shared events, with an optional shared queue guarded by host lock callbacks. Supported cooperative matrices are enabled by default; `OIDNW_GPU_METAL_NO_COOPERATIVE_MATRIX` disables them.
-  - **Vulkan (Windows; Linux not GPU-tested):** borrows the host instance, physical device, device and queue, and imports storage buffers and timeline semaphores. `oidnw_gpu_vulkan_instance_extensions` and `oidnw_gpu_vulkan_requirements_create/get` report extensions and features before instance/device creation. Preflight includes cooperative-matrix requirements by default when supported unless `OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX` is set; import enables matrices only when the host enabled the extension and feature.
-  - **DX12 (Windows):** creates a separate library device on the host adapter's LUID with a matching Agility SDK, and imports shared committed UAV buffers and shared fences. Uses implicit GEMM by default; cooperative matrices are unavailable.
-- C++17 wrappers (`oidn_webgpu_gpu.hpp` and one header per platform) with move-only owners, shared context lifetime, status-returning submit/poll/wait, explicit `close(timeout_ns)` and optional host-object retention. Helpers expose device information, model input count and status names; `workspace::info()` exposes immutable workspace information, and `oidnw::gpu::warm_up` compiles pipelines before image buffers exist. CMake target `oidn_webgpu::cpp` enables C++17 and MSVC exception handling.
-- Vulkan C++ helpers in `oidn_webgpu_vulkan.hpp`: `merge_requirements` merges the library's device requirements into your `VkDeviceCreateInfo` (deduplicated extensions, OR-ed features, `VkPhysicalDeviceFeatures2` converted, unsupported structures rejected before `vkCreateDevice`); `queue_lock` is the shared queue mutex; and an `import_device(handles, instance_info, device_info, lock)` overload fills the import descriptor and retains the lock.
-- Optional Windows CUDA/DX12 C++17 adapter (`oidn_webgpu_cuda.hpp`, CMake target `oidn_webgpu::cuda`) for CUDA renderers: copies from ordinary CUDA device pointers or denoises adapter-allocated shared images without copies, and orders work on CUDA streams. Options select HDR/LDR and PU/log transfer; debug layers default to off, and GPU validation requires explicitly enabling debug. `resize(width, height)` reuses devices and weights after task/lease release and consumer retirement; `info().workspace` reports memory and selected kernels. It uses the DX12 backend and is built only when enabled, so CUDA is not otherwise required.
-- The [GPU C integration walkthrough](native/examples/gpu-integration.md) and complete hosts for each route: `metal_gpu.m`, `metal_gpu_cpp.mm`, `vulkan_gpu.cpp`, `dx12_gpu.cpp` and `cuda_dx12_gpu.cu`. All ship in native packages with their SPIR-V shaders.
 
 ### Changed
 
-- Native source builds watch the shared core input list and native source directory, so browser-only edits no longer trigger scriptc. Local test selection builds only the artifacts its imports require; contributor checks are scoped to the changed runtime.
-- The macOS ARM64 C shared library is 4.67 MB instead of 6.49 MB before compression, including the new GPU C API.
-- Windows native releases support `x86_64-pc-windows-msvc` only. Windows GNU has no bundled core or precompiled package, and its source builds are not validated.
-
-### Migration notes
-
-- Rebuild C consumers against the 3.0.0 headers and remove assignments to `oidnw_filter_desc.size`. Ship the library from the same release.
-- Initialize descriptors with their default functions, keep `next` NULL and replace zero CPU input scales with `1.0`.
-- Replace Rust `DenoiseParams { input_scale: scale }` literals with `DenoiseParams::default().with_input_scale(scale)`. Add wildcard arms when matching `Kernel` or the other newly non-exhaustive enums.
-- Dynamic loaders must check `oidnw_api_version() == OIDNW_API_VERSION` before calling the API.
-
-## [Native 0.1.1] - 2026-10-25
-
-### Added
-
-- Native precompiled packages support CMake `find_package(oidn_webgpu CONFIG REQUIRED)` with `oidn_webgpu::oidn_webgpu` for the C filter and `oidn_webgpu::oidn_webgpu_core` for the static planner. Packaged CMake examples build and install the C applications with their shared library.
-
-### Changed
-
-- Native Release package filenames now contain only the crate version and target triple; download URLs no longer include the source commit. The full commit remains in `manifest.json`; CI and local archive names still include it.
+- Local test selection builds only the artifacts its imports require; contributor checks are scoped to the changed runtime.
 
 ## [0.6.0] - 2026-10-25
 
@@ -222,7 +185,6 @@ oidn-web 0.4.0 replaces the TensorFlow.js inference stack with a purpose-built, 
 - Set `dynamicTile: false` to restore fixed-size tiling.
 
 [Unreleased]: https://github.com/pissang/oidn-webgpu/compare/v0.6.0...HEAD
-[Native 0.1.1]: https://github.com/pissang/oidn-webgpu/compare/native-v0.1.0...native-v0.1.1
 [0.6.0]: https://github.com/pissang/oidn-webgpu/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/pissang/oidn-webgpu/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/pissang/oidn-webgpu/compare/v0.3.5...v0.4.0

@@ -351,5 +351,6 @@ Windows builds use PowerShell to keep Git Bash's `link.exe` out of the MSVC link
 | `docs/development.md` | Contributors | Scripts, CI, architecture |
 | `AGENTS.md` | Coding agents | Repository rules |
 | `llms.txt` | LLM tools ([llmstxt.org](https://llmstxt.org)) | Doc index; absolute `main` branch URLs. Update when a doc is added, renamed or re-scoped. |
-| `CHANGELOG.md` | Users upgrading | Every user-visible change, under `[Unreleased]` |
+| `CHANGELOG.md` | Browser package users upgrading | Every user-visible browser package and repository tooling change, under `[Unreleased]` |
+| `native/CHANGELOG.md` | Native library users upgrading | Every user-visible Rust crate, C/C++ header, package and CUDA adapter change, under `[Unreleased]`; versions follow `native/Cargo.toml` |
 | `plans/` | Maintainers | Local working notes; ignored by Git |
