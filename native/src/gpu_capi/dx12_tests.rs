@@ -65,6 +65,7 @@ fn dx12_backpressure_and_failed_batch_preserve_external_completion() {
         info.PushRetrievalFilter(&filter).unwrap();
         assert!(info.GetNumStoredMessages() > info.GetNumStoredMessagesAllowedByRetrievalFilter());
         let desc = Dx12DeviceDesc {
+            next: std::ptr::null(),
             flags: 4,
             host_device: host.as_raw(),
             agility_sdk_version: sdk.sdk_version,

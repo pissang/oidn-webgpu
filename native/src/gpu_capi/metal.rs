@@ -48,13 +48,7 @@ mod platform {
                     "host Metal device has no matching adapter".into(),
                 )
             })?;
-        let mut features = Denoiser::recommended_features(&adapter);
-        if desc.flags & 1 != 0 {
-            features.remove(wgpu::Features::SHADER_F16);
-        }
-        if desc.flags & 2 != 0 {
-            features.remove(wgpu::Features::SUBGROUP);
-        }
+        let features = requested_features(adapter.features(), desc.flags);
         let limits = adapter.limits();
         let hal_device =
             unsafe { wgpu::hal::metal::Device::device_from_raw(raw.clone(), features, &limits) };
@@ -71,6 +65,7 @@ mod platform {
                 &wgpu::DeviceDescriptor {
                     label: Some("oidn GPU C API imported Metal device"),
                     required_features: features,
+                    experimental_features: wgpu::ExperimentalFeatures::enabled(),
                     required_limits: limits,
                     ..Default::default()
                 },

@@ -37,6 +37,12 @@ void oidnw_gpu_filter_destroy(oidnw_gpu_filter *p) { if (p) { --p->device->child
 int32_t oidnw_gpu_prepare(oidnw_gpu_filter *f, uint32_t, uint32_t, const oidnw_gpu_images *, oidnw_gpu_prepared **out, char *, size_t) {
   *out = new oidnw_gpu_prepared{f->device}; ++f->device->children; return OIDNW_OK;
 }
+int32_t oidnw_gpu_prepared_get_info(const oidnw_gpu_prepared *p, oidnw_gpu_prepared_info *out, char *, size_t) {
+  if (!p || out->next) return OIDNW_ERROR_INVALID_ARGUMENT;
+  *out = {}; out->precision = OIDNW_PRECISION_FP16; out->kernels = OIDNW_GPU_KERNEL_PATH_SUBGROUP_MATRIX;
+  out->tile_count = 1; out->workspace_bytes = 4096; out->shared_weight_bytes = 8192; out->runtime_checks = 1;
+  return OIDNW_OK;
+}
 void oidnw_gpu_prepared_destroy(oidnw_gpu_prepared *p) { if (p) { --p->device->children; delete p; } }
 void oidnw_gpu_buffer_destroy(oidnw_gpu_buffer *p) { if (p) { --p->device->children; delete p; } }
 void oidnw_gpu_sync_destroy(oidnw_gpu_sync *p) { if (p) { --p->device->children; delete p; } }
@@ -95,6 +101,9 @@ int main() {
     auto weights = load_model("x", 1);
     auto source = make_filter(context, weights);
     auto prepared = prepare(source, 16, 16, images);
+    const auto info = prepared.info();
+    ensure(info.precision == OIDNW_PRECISION_FP16 && info.kernels == OIDNW_GPU_KERNEL_PATH_SUBGROUP_MATRIX);
+    ensure(info.tile_count == 1 && info.workspace_bytes == 4096 && info.shared_weight_bytes == 8192 && info.runtime_checks);
     ++context.get()->children;
     buffer color(new oidnw_gpu_buffer{context.get()}, context.owner());
     buffer moved = std::move(color);

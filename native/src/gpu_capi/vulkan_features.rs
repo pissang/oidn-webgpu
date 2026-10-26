@@ -264,3 +264,33 @@ mod tests {
         }
     }
 }
+
+pub unsafe fn cooperative_matrix_enabled(create: &vk::DeviceCreateInfo<'_>) -> Result<bool> {
+    unsafe {
+        let actual = snapshot(create)?;
+        let matrix = actual.get("PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR")
+            .and_then(|bits| bits.first()).copied() == Some(1);
+        if create.enabled_extension_count > 4096 {
+            return Err("extension count exceeds 4096 entries".into());
+        }
+        if create.enabled_extension_count == 0 { return Ok(false); }
+        if create.pp_enabled_extension_names.is_null() || !create.pp_enabled_extension_names.is_aligned() {
+            return Err("invalid extension array".into());
+        }
+        let names = std::slice::from_raw_parts(create.pp_enabled_extension_names, create.enabled_extension_count as usize);
+        Ok(matrix && names.iter().any(|p| !p.is_null() && std::ffi::CStr::from_ptr(*p) == ash::khr::cooperative_matrix::NAME))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn matrix_import_requires_both_extension_and_feature() {
+    let names = [ash::khr::cooperative_matrix::NAME.as_ptr()];
+    let mut matrix = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default().cooperative_matrix(true);
+    let enabled = vk::DeviceCreateInfo::default().enabled_extension_names(&names).push_next(&mut matrix);
+    unsafe {
+        assert!(cooperative_matrix_enabled(&enabled).unwrap());
+        assert!(!cooperative_matrix_enabled(&vk::DeviceCreateInfo::default().enabled_extension_names(&names)).unwrap());
+        assert!(!cooperative_matrix_enabled(&vk::DeviceCreateInfo::default().push_next(&mut matrix)).unwrap());
+    }
+}

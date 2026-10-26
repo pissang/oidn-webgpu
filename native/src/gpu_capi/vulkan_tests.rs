@@ -114,6 +114,7 @@ fn vulkan_backpressure_and_failed_batch_preserve_external_completion() {
             })
             .unwrap() as u32;
         let query = VulkanRequirementsDesc {
+            next: std::ptr::null(),
             flags: 0,
             get_instance_proc_addr: Some(entry.static_fn().get_instance_proc_addr),
             instance: instance.handle(),
@@ -173,6 +174,7 @@ fn vulkan_backpressure_and_failed_batch_preserve_external_completion() {
             calls: AtomicUsize::new(0),
         };
         let desc = VulkanDeviceDesc {
+            next: std::ptr::null(),
             flags: 0,
             get_instance_proc_addr: Some(entry.static_fn().get_instance_proc_addr),
             instance: instance.handle(),

@@ -4,13 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-The runtime changes below affect the native library only; the npm package and the Rust `Denoiser` API are unchanged. The native C library adds a GPU C API that denoises Metal, Vulkan and DX12 buffers owned by the host renderer, with C++17 wrappers and an optional Windows CUDA adapter. The C ABI moves from 1.0.0 to 2.1.0, a breaking change.
+The runtime changes below affect the native library only; the npm package and the Rust `Denoiser` API are unchanged. The native C library adds a GPU C API that denoises Metal, Vulkan and DX12 buffers owned by the host renderer, with C++17 wrappers and an optional Windows CUDA adapter. The C ABI moves from 1.0.0 to 3.0.0, a breaking change.
 
 ### Breaking changes
 
-- C ABI 2.1.0 replaces 1.0.0. `oidnw_filter_desc` no longer has a `size` field, and the library no longer accepts older descriptor layouts. Headers and library must come from the same version; no compatibility adapter is provided. CPU image denoising through `oidnw_filter_*` is otherwise unchanged.
+- C ABI 3.0.0 replaces 1.0.0. `oidnw_filter_desc` no longer has a `size` field, and the library no longer accepts older descriptor layouts. Headers and library must come from the same version; no compatibility adapter is provided. Every descriptor starts with a NULL `next` extension pointer. CPU filter `input_scale` must be positive and finite; zero is rejected.
 
 ### Added
+
+- GPU workspace inspection through `oidnw_gpu_prepared_get_info` and C++ `workspace::info()`: immutable precision, actual kernels, tile count, workspace/shared-weight bytes and runtime-check state. Queries may overlap submit on the same workspace.
+- `oidnw_filter_set_input_scale` changes CPU filter exposure without rebuilding its workspace.
+- GPU filters accept `kernel` and `quality`. Metal and Vulkan enable cooperative matrices when supported; `OIDNW_GPU_METAL_NO_COOPERATIVE_MATRIX` and `OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX` disable them. Vulkan preflight reports the supported matrix requirements, and import uses matrices only when enabled by the host. AUTO falls back to implicit GEMM; explicit SUBGROUP_MATRIX without the feature returns UNAVAILABLE. FAST quality remains opt-in. These matrix flags and GPU kernel/quality options are experimental and outside semver guarantees.
 
 - A local `npm run test:fast` loop with content-checked build reuse, per-stage timings and optional test filenames. `npm test` retains unconditional builds.
 - GPU C API ([`oidn_webgpu_gpu.h`](native/include/oidn_webgpu_gpu.h)): denoises host GPU buffers without uploads or readback. Submissions are asynchronous with up to 64 external waits and 64 signals each, `oidnw_gpu_poll` / `oidnw_gpu_wait` report completion including every external signal, accepted submissions are bounded by `max_pending_submissions` (default 64), and each workspace caches up to `binding_cache_capacity` binding sets (default 8). GPU errors and device loss quarantine the context; `oidnw_gpu_device_destroy_quiescent` releases it once the host knows the GPU is idle. See the [GPU C API guide](native/README.md#gpu-c-api).
@@ -30,7 +34,8 @@ The runtime changes below affect the native library only; the npm package and th
 
 ### Migration notes
 
-- Rebuild C consumers against the 2.1.0 headers and remove assignments to `oidnw_filter_desc.size`. Ship the library from the same release.
+- Rebuild C consumers against the 3.0.0 headers and remove assignments to `oidnw_filter_desc.size`. Ship the library from the same release.
+- Initialize descriptors with their default functions, keep `next` NULL and replace zero CPU input scales with `1.0`.
 - Dynamic loaders must check `oidnw_api_version() == OIDNW_API_VERSION` before calling the API.
 
 ## [Native 0.1.1] - 2026-10-25

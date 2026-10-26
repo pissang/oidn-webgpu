@@ -7,6 +7,7 @@ pub use requirements::*;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VulkanDeviceDesc {
+    pub next: *const std::ffi::c_void,
     pub flags: u32,
     pub get_instance_proc_addr: Option<vk::PFN_vkGetInstanceProcAddr>,
     pub instance: vk::Instance,
@@ -45,7 +46,7 @@ pub unsafe extern "C" fn oidnw_gpu_device_import_vulkan(
         guard(error, capacity, || {
             output(result)?;
             let desc = descriptor(desc)?;
-            if desc.flags & !3 != 0
+            if desc.flags & !7 != 0
                 || !(1..=4096).contains(&desc.max_pending_submissions)
                 || desc.lock.is_none()
                 || desc.unlock.is_none()
@@ -83,7 +84,7 @@ unsafe fn platform_import(_: &VulkanDeviceDesc) -> Outcome<Context> {
     ))
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(test, target_os = "windows", target_os = "linux"))]
 #[path = "vulkan_features.rs"]
 mod features;
 
@@ -161,18 +162,6 @@ unsafe fn host_adapter(
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn requested_features(adapter: &wgpu::Adapter, flags: u32) -> wgpu::Features {
-    let mut requested = Denoiser::recommended_features(adapter);
-    if flags & 1 != 0 {
-        requested.remove(wgpu::Features::SHADER_F16);
-    }
-    if flags & 2 != 0 {
-        requested.remove(wgpu::Features::SUBGROUP);
-    }
-    requested
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 unsafe fn platform_import(desc: &VulkanDeviceDesc) -> Outcome<Context> {
     unsafe {
         let (adapter, instance) = host_adapter(
@@ -193,7 +182,11 @@ unsafe fn platform_import(desc: &VulkanDeviceDesc) -> Outcome<Context> {
             return Err(invalid("queue must support graphics and compute"));
         }
         let native = ash::Device::load(instance.fp_v1_0(), desc.device);
-        let requested = requested_features(&adapter, desc.flags);
+        let device_create = required(desc.device_create_info, "device create info")?;
+        let mut requested = requested_features(adapter.features(), desc.flags);
+        if !features::cooperative_matrix_enabled(device_create).map_err(|e| invalid(e.to_string()))? {
+            requested.remove(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX);
+        }
         let mut limits = adapter.limits();
         limits.max_buffer_size = limits.max_buffer_size.min(u32::MAX as u64);
         let hal = adapter
@@ -256,6 +249,7 @@ unsafe fn platform_import(desc: &VulkanDeviceDesc) -> Outcome<Context> {
                 &wgpu::DeviceDescriptor {
                     label: Some("oidn host Vulkan device"),
                     required_features: requested,
+                    experimental_features: wgpu::ExperimentalFeatures::enabled(),
                     required_limits: limits,
                     ..Default::default()
                 },

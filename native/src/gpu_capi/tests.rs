@@ -727,3 +727,50 @@ fn vulkan_requirement_outputs_reject_invalid_inputs() {
         oidnw_gpu_vulkan_requirements_destroy(std::ptr::null_mut());
     }
 }
+
+#[test]
+fn feature_defaults_opt_out_and_explicit_kernel_requirements() {
+    let stable = wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP;
+    let matrix = wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX;
+    assert_eq!(requested_features(stable | matrix, 0), stable | matrix);
+    assert_eq!(requested_features(stable | matrix, 4), stable);
+    assert_eq!(requested_features(stable, 0), stable);
+    assert_eq!(requested_features(stable | matrix, 7), wgpu::Features::empty());
+    assert_eq!(feature_bits(stable | matrix), 7);
+    assert_eq!(filter_kernel(stable | matrix, OIDNW_KERNEL_AUTO).unwrap(), crate::Kernel::SubgroupMatrix);
+    assert_eq!(filter_kernel(stable, OIDNW_KERNEL_AUTO).unwrap(), crate::Kernel::ImplicitGemm);
+    assert_eq!(filter_kernel(stable | matrix, OIDNW_KERNEL_IMPLICIT_GEMM).unwrap(), crate::Kernel::ImplicitGemm);
+    assert_eq!(filter_kernel(stable, OIDNW_KERNEL_SUBGROUP_MATRIX).unwrap_err().0, OIDNW_ERROR_UNAVAILABLE);
+    assert_eq!(filter_kernel(stable, 99).unwrap_err().0, OIDNW_ERROR_INVALID_ARGUMENT);
+}
+
+#[test]
+fn descriptor_defaults_and_unknown_extensions() {
+    unsafe {
+        let mut metal: MetalDeviceDesc = std::mem::zeroed();
+        let mut filter: FilterDesc = std::mem::zeroed();
+        let mut submit: SubmitDesc = std::mem::zeroed();
+        let mut dx12: Dx12DeviceDesc = std::mem::zeroed();
+        let mut vulkan: VulkanDeviceDesc = std::mem::zeroed();
+        let mut query: VulkanRequirementsDesc = std::mem::zeroed();
+        oidnw_gpu_metal_device_desc_default(&mut metal);
+        oidnw_gpu_filter_desc_default(&mut filter);
+        oidnw_gpu_submit_desc_default(&mut submit);
+        oidnw_gpu_dx12_device_desc_default(&mut dx12);
+        oidnw_gpu_vulkan_device_desc_default(&mut vulkan);
+        oidnw_gpu_vulkan_requirements_desc_default(&mut query);
+        assert!(metal.next.is_null() && filter.next.is_null() && submit.next.is_null());
+        assert!(dx12.next.is_null() && vulkan.next.is_null() && query.next.is_null());
+        assert_eq!(filter.kernel, OIDNW_KERNEL_AUTO);
+        assert_eq!(filter.quality, OIDNW_QUALITY_HIGH);
+        let unknown = std::ptr::dangling::<c_void>();
+        macro_rules! reject {
+            ($value:ident) => {{
+                $value.next = unknown;
+                assert_eq!(descriptor(&$value).err().unwrap().0, OIDNW_ERROR_INVALID_ARGUMENT);
+            }};
+        }
+        reject!(metal); reject!(filter); reject!(submit);
+        reject!(dx12); reject!(vulkan); reject!(query);
+    }
+}

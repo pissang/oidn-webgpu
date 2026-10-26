@@ -2,6 +2,7 @@ use super::*;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Dx12DeviceDesc {
+    pub next: *const std::ffi::c_void,
     pub flags: u32,
     pub host_device: *mut c_void,
     pub agility_sdk_version: u32,

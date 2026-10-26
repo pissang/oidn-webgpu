@@ -7,8 +7,12 @@ extern "C" {
 
 #define OIDNW_GPU_METAL_FP32 1u
 #define OIDNW_GPU_METAL_NO_SUBGROUPS 2u
+/* Cooperative matrices are enabled by default when supported. This flag disables
+ * wgpu's experimental matrix feature; matrix behavior is outside semver guarantees. */
+#define OIDNW_GPU_METAL_NO_COOPERATIVE_MATRIX 4u
 typedef struct oidnw_gpu_metal_device_desc {
-  uint32_t flags; /* Stable features only; experimental matrices not enabled. */
+  const void *next; /* NULL; non-NULL extensions are rejected. */
+  uint32_t flags;
   void *device; /* id<MTLDevice>, borrowed, use __bridge under ARC. */
   void *queue; /* Optional id<MTLCommandQueue>; NULL creates a dedicated queue. */
   oidnw_gpu_queue_lock_fn lock;

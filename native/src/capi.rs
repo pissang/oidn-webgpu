@@ -42,6 +42,7 @@ pub const OIDNW_FEATURE_COOPERATIVE_MATRIX: u32 = 4;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct OidnwFilterDesc {
+    pub next: *const std::ffi::c_void,
     pub hdr: u32,
     pub transfer: u32,
     pub quality: u32,
@@ -75,6 +76,7 @@ struct ExecutionState {
     execution: Option<Execution>,
     pipelines: PipelineMap,
     weights: WeightMap,
+    input_scale: Option<f32>,
 }
 
 /// Opaque `oidnw_filter`.
@@ -134,7 +136,7 @@ pub(crate) unsafe fn guard(error: *mut c_char, capacity: usize, body: impl FnOnc
 
 #[unsafe(no_mangle)]
 pub extern "C" fn oidnw_api_version() -> u32 {
-    (2 << 16) | (1 << 8)
+    3 << 16
 }
 
 fn wanted_features() -> wgpu::Features {
@@ -148,6 +150,7 @@ pub unsafe extern "C" fn oidnw_filter_desc_default(desc: *mut OidnwFilterDesc) {
     }
     unsafe {
         *desc = OidnwFilterDesc {
+            next: std::ptr::null(),
             hdr: 1,
             transfer: OIDNW_TRANSFER_PU,
             quality: OIDNW_QUALITY_HIGH,
@@ -250,6 +253,22 @@ pub unsafe extern "C" fn oidnw_device_destroy(device: *mut OidnwDevice) {
     }
 }
 
+fn validate_filter_desc(desc: &OidnwFilterDesc) -> Outcome<()> {
+    if desc.quality > OIDNW_QUALITY_FAST {
+        return Err(invalid(format!("unknown quality {}", desc.quality)));
+    }
+    if desc.transfer > OIDNW_TRANSFER_LOG {
+        return Err(invalid(format!("unknown transfer {}", desc.transfer)));
+    }
+    if !desc.next.is_null() {
+        return Err(invalid("unknown filter extension"));
+    }
+    if !(desc.input_scale.is_finite() && desc.input_scale > 0.0) {
+        return Err(invalid("input_scale must be positive and finite"));
+    }
+    Ok(())
+}
+
 fn network_config(gpu: &Gpu, desc: &OidnwFilterDesc, width: u32, height: u32) -> Outcome<NetworkConfig> {
     let kernel = match desc.kernel {
         OIDNW_KERNEL_AUTO
@@ -265,15 +284,7 @@ fn network_config(gpu: &Gpu, desc: &OidnwFilterDesc, width: u32, height: u32) ->
         OIDNW_KERNEL_SUBGROUP_MATRIX => Kernel::SubgroupMatrix,
         other => return Err(invalid(format!("unknown kernel {other}"))),
     };
-    if desc.quality > OIDNW_QUALITY_FAST {
-        return Err(invalid(format!("unknown quality {}", desc.quality)));
-    }
-    if desc.transfer > OIDNW_TRANSFER_LOG {
-        return Err(invalid(format!("unknown transfer {}", desc.transfer)));
-    }
-    if !(desc.input_scale.is_finite() && desc.input_scale >= 0.0) {
-        return Err(invalid("input_scale must be finite and non-negative"));
-    }
+    validate_filter_desc(desc)?;
     Ok(NetworkConfig {
         precision: Precision::Auto,
         kernel,
@@ -284,7 +295,7 @@ fn network_config(gpu: &Gpu, desc: &OidnwFilterDesc, width: u32, height: u32) ->
             hdr: desc.hdr != 0,
             log_transfer: desc.transfer == OIDNW_TRANSFER_LOG,
             max_tile_size: desc.max_tile_size,
-            input_scale: if desc.input_scale == 0.0 { 1.0 } else { desc.input_scale },
+            input_scale: desc.input_scale,
         }),
         ..NetworkConfig::new(width, height)
     })
@@ -302,7 +313,6 @@ pub unsafe extern "C" fn oidnw_filter_create(
 ) -> i32 {
     unsafe {
         guard(error, capacity, || {
-            let device = device.as_ref().ok_or_else(|| invalid("device is NULL"))?;
             if output.is_null() || weights.is_null() || weights_size == 0 {
                 return Err(invalid("weights and output are required"));
             }
@@ -311,6 +321,8 @@ pub unsafe extern "C" fn oidnw_filter_create(
             if let Some(desc) = desc.as_ref() {
                 filter_desc = *desc;
             }
+            validate_filter_desc(&filter_desc)?;
+            let device = device.as_ref().ok_or_else(|| invalid("device is NULL"))?;
             let weights = std::slice::from_raw_parts(weights, weights_size).to_vec();
             // Validate options and model without compiling shaders or allocating GPU buffers.
             let config = network_config(&device.gpu, &filter_desc, 16, 16)?;
@@ -460,6 +472,10 @@ pub unsafe extern "C" fn oidnw_filter_execute(
                 gpu.queue.write_buffer(buffer, 0, pixels);
             }
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let scale = slot.input_scale.unwrap_or(filter.desc.input_scale);
+            let frame = execution.network.metadata.as_ref().and_then(|meta| meta.frame)
+                .ok_or_else(|| Failure(OIDNW_ERROR_MODEL, "missing frame parameter buffer".into()))?;
+            gpu.queue.write_buffer(&execution.network.buffers[frame], 0, &scale.to_le_bytes());
             execution.network.encode(&gpu.queue, &mut encoder);
             encoder.copy_buffer_to_buffer(
                 execution.network.output_buffer(),
@@ -494,6 +510,27 @@ pub unsafe extern "C" fn oidnw_filter_execute(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn oidnw_filter_set_input_scale(
+    filter: *mut OidnwFilter,
+    scale: f32,
+    error: *mut c_char,
+    capacity: usize,
+) -> i32 {
+    unsafe {
+        guard(error, capacity, || {
+            let filter = filter.as_ref().ok_or_else(|| invalid("filter is NULL"))?;
+            if !(scale.is_finite() && scale > 0.0) {
+                return Err(invalid("input_scale must be positive and finite"));
+            }
+            let mut state = filter.execution.try_lock()
+                .map_err(|_| Failure(OIDNW_ERROR_BUSY, "filter is busy".into()))?;
+            state.input_scale = Some(scale);
+            Ok(())
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn oidnw_filter_destroy(filter: *mut OidnwFilter) {
     if !filter.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| drop(unsafe { Box::from_raw(filter) })));
@@ -504,12 +541,29 @@ pub unsafe extern "C" fn oidnw_filter_destroy(filter: *mut OidnwFilter) {
 mod tests {
     use super::*;
     #[test]
+    fn filter_descriptions_require_known_extensions_and_positive_scales() {
+        unsafe {
+            let mut desc: OidnwFilterDesc = std::mem::zeroed();
+            oidnw_filter_desc_default(&mut desc);
+            assert!(desc.next.is_null());
+            assert!(validate_filter_desc(&desc).is_ok());
+            for scale in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                desc.input_scale = scale;
+                assert_eq!(validate_filter_desc(&desc).unwrap_err().0, OIDNW_ERROR_INVALID_ARGUMENT);
+            }
+            desc.input_scale = 1.0;
+            desc.next = std::ptr::dangling();
+            assert_eq!(validate_filter_desc(&desc).unwrap_err().0, OIDNW_ERROR_INVALID_ARGUMENT);
+        }
+    }
+
+    #[test]
     #[ignore = "requires a native GPU adapter"]
     fn explicit_prepare_reuses_resources_and_matches_execution() {
         unsafe {
             let mut error = [0i8; 1024];
             let mut device = std::ptr::null_mut();
-            assert_eq!(oidnw_api_version(), 0x00020100);
+            assert_eq!(oidnw_api_version(), 0x00030000);
             assert_eq!(
                 oidnw_device_create(OIDNW_BACKEND_AUTO, &mut device, error.as_mut_ptr(), error.len()),
                 OIDNW_OK

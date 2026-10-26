@@ -208,6 +208,7 @@ unsafe fn setup(options: &Options) -> Result<(Host, Context, bool)> {
             {
                 let mut c_device = std::ptr::null_mut();
                 let desc = Dx12DeviceDesc {
+                    next: std::ptr::null(),
                     flags: u32::from(options.fp32)
                         | if !options.recommended { 3 } else { 0 }
                         | if options.debug { 4 } else { 0 }

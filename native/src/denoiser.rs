@@ -296,8 +296,14 @@ pub struct Denoiser {
     pipelines: PipelineMap,
     weights: Arc<SharedWeights>,
     unchecked: bool,
+    kernel: Kernel,
+    f16_accumulation: bool,
 }
 impl Denoiser {
+    pub(crate) fn configure_kernel(&mut self, kernel: Kernel, f16_accumulation: bool) {
+        self.kernel = kernel;
+        self.f16_accumulation = f16_accumulation;
+    }
     pub fn required_features() -> wgpu::Features {
         wgpu::Features::empty()
     }
@@ -332,6 +338,8 @@ impl Denoiser {
             pipelines: PipelineMap::new(),
             weights: model.shared_weights(device)?,
             unchecked: false,
+            kernel: Kernel::Auto,
+            f16_accumulation: false,
         })
     }
     /// Disables shader bounds checks and workgroup initialization.
@@ -367,7 +375,9 @@ impl Denoiser {
         )?;
         let input_buffers: Vec<_> = views[..self.model.inputs].iter().map(|v| v.buffer.clone()).collect();
         let config = NetworkConfig {
-            kernel: if device
+            kernel: if self.kernel != Kernel::Auto {
+                self.kernel
+            } else if device
                 .features()
                 .contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX)
             {
@@ -375,6 +385,7 @@ impl Denoiser {
             } else {
                 Kernel::ImplicitGemm
             },
+            f16_accumulation: self.f16_accumulation,
             denoise: Some(DenoiseConfig {
                 hdr: self.options.hdr,
                 log_transfer: self.options.transfer == Transfer::Log,

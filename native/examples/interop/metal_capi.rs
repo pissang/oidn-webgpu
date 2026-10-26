@@ -75,7 +75,7 @@ impl MetalCApi {
             oidnw_gpu_metal_device_desc_default(&mut desc);
             desc.device = raw_device;
             desc.queue = raw_queue;
-            desc.flags = u32::from(fp32);
+            desc.flags = u32::from(fp32) | 4; // Match the stable-feature Rust reference device.
             desc.max_pending_submissions = 8; // Exercise bounded admission/backpressure.
             desc.lock = Some(lock);
             desc.unlock = Some(unlock);

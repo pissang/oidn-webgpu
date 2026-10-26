@@ -344,6 +344,7 @@ unsafe fn setup(options: &Options) -> Result<(Arc<Host>, Context, serde_json::Va
                 .enabled_extension_names(&extension_names)
                 .enabled_layer_names(&layers);
             let desc = VulkanDeviceDesc {
+                next: std::ptr::null(),
                 flags: u32::from(options.fp32),
                 get_instance_proc_addr: Some(host._entry.static_fn().get_instance_proc_addr),
                 instance: host.instance.handle(),

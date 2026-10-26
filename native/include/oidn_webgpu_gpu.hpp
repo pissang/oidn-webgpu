@@ -214,6 +214,12 @@ class workspace : public detail::owned<oidnw_gpu_prepared, oidnw_gpu_prepared_de
   using base = detail::owned<oidnw_gpu_prepared, oidnw_gpu_prepared_destroy>;
 public:
   using base::base;
+  oidnw_gpu_prepared_info info() const {
+    oidnw_gpu_prepared_info result{};
+    std::array<char, 1024> message{};
+    require(oidnw_gpu_prepared_get_info(get(), &result, message.data(), message.size()), message.data());
+    return result;
+  }
   submission submit(const oidnw_gpu_submit_desc &desc) const noexcept {
     submission result;
     result.code = oidnw_gpu_submit(get(), &desc, &result.sequence,

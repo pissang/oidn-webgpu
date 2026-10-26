@@ -4,7 +4,7 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 **Status:** experimental; APIs and results may change between versions. See [Tested configurations](#tested-configurations). CI builds and checks packages but does not run them on a GPU.
 
-**Availability:** the latest release, Native 0.1.1 (C ABI 1.0.0), contains the Rust API, the CPU C filter and the core planner. The GPU C API, C++17 wrappers and CUDA adapter (C ABI 2.1.0) are not released yet: [build from source](#build-from-source) or use a [CI package](#precompiled-packages) from a commit that contains them. Check `OIDNW_API_VERSION` in your `oidn_webgpu.h`; `0x00020100` or later has the GPU C API.
+**Availability:** the latest release, Native 0.1.1 (C ABI 1.0.0), contains the Rust API, the CPU C filter and the core planner. The GPU C API, C++17 wrappers and CUDA adapter (C ABI 3.0.0) are not released yet: [build from source](#build-from-source) or use a [CI package](#precompiled-packages) from a commit that contains them. Check `OIDNW_API_VERSION` in your `oidn_webgpu.h`; `0x00030000` identifies the interface described here.
 
 - [Choose an API](#choose-an-api)
 - [Get the library](#get-the-library)
@@ -26,8 +26,8 @@ Use a GPU API whenever your images are already on the GPU. The images stay in yo
 | Your renderer | Use | Images | Available in | Start with |
 | --- | --- | --- | --- | --- |
 | Rust with wgpu `=30.0.1` | **Rust `Denoiser`** | Your `wgpu::Buffer`s, encoded into your command encoder | Native 0.1.0 | [Rust API](#rust-api) |
-| Metal, Vulkan or DX12, in C, C++ or Objective-C | **GPU C API** with the C++17 wrapper | Your GPU buffers | Unreleased (C ABI 2.1.0) | [GPU C API](#gpu-c-api) |
-| CUDA on Windows | **CUDA adapter** (C++17, on top of the DX12 route) | CUDA device pointers | Unreleased (C ABI 2.1.0) | [CUDA on Windows](#cuda-on-windows) |
+| Metal, Vulkan or DX12, in C, C++ or Objective-C | **GPU C API** with the C++17 wrapper | Your GPU buffers | Unreleased (C ABI 3.0.0) | [GPU C API](#gpu-c-api) |
+| CUDA on Windows | **CUDA adapter** (C++17, on top of the DX12 route) | CUDA device pointers | Unreleased (C ABI 3.0.0) | [CUDA on Windows](#cuda-on-windows) |
 | Offline tools, tests, any language with C FFI | CPU C filter | CPU arrays; each call uploads, denoises, reads back and blocks | Native 0.1.0 | [CPU C filter](#cpu-c-filter) |
 | Your own non-wgpu GPU executor | Core planner | Host-defined | Native 0.1.0 | [Core planner](#core-planner) |
 
@@ -177,7 +177,7 @@ cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- 
 
 ## GPU C API
 
-Unreleased: needs C ABI 2.1.0 headers and library; Native 0.1.1 packages do not contain them. See **Availability** at the [top of this guide](#oidn-webgpu-native).
+Unreleased: needs C ABI 3.0.0 headers and library; Native 0.1.1 packages do not contain them. See **Availability** at the [top of this guide](#oidn-webgpu-native).
 
 The GPU C API denoises your renderer's GPU buffers. It never uploads or reads back image pixels. Your render pass signals a timeline value when the inputs are ready, the library waits for it on the GPU, and signals another value when the output is written. Applications use only the C ABI (or the header-only C++17 wrapper); no Rust or wgpu types are involved.
 
@@ -330,26 +330,44 @@ A quarantined context can hold submissions whose outcome is unknown, so normal d
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `next` | pointer | NULL | Reserved for extensions; must be NULL |
 | `hdr` | u32 | `1` | `0` for LDR weights |
 | `transfer` | enum | `OIDNW_TRANSFER_PU` | `OIDNW_TRANSFER_LOG` for RTLightmap HDR weights |
+| `kernel` | enum | `OIDNW_KERNEL_AUTO` | Uses subgroup matrix when enabled on the device, otherwise implicit GEMM; explicit `SUBGROUP_MATRIX` returns `UNAVAILABLE` if not enabled |
+| `quality` | enum | `OIDNW_QUALITY_HIGH` | HIGH/BALANCED use f32 matrix accumulation; FAST explicitly enables f16 accumulation |
 | `max_tile_size` | u32 | `0` | `0` = whole image; otherwise 16..=16384, rounded down to a multiple of 16. Reduces workspace memory only |
 | `flags` | bitmask | `OIDNW_FILTER_RUNTIME_CHECKS` | `0` disables shader runtime checks, which can be faster |
 | `binding_cache_capacity` | u32 | `8` | 1..=64 cached image binding sets per workspace |
 
 Per-submit `input_scale` (default `1`, finite and positive) multiplies HDR color before the transfer and is undone on output. `get_limits` (C++: `context.limits()`) reports the image offset alignment, maximum buffer and image bytes and the pending-submission limit.
 
+`oidnw_gpu_prepared_get_info` (C++: `workspace.info()`) reports the prepared workspace:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `next` | pointer | Initialize to NULL; non-NULL extensions are rejected |
+| `precision` | enum | `OIDNW_PRECISION_FP16` or `OIDNW_PRECISION_FP32`; image buffers remain RGBA32F |
+| `kernels` | bitmask | Actual `OIDNW_GPU_KERNEL_PATH_*` paths; one workspace can use multiple paths |
+| `tile_count` | u32 | Number of output tiles |
+| `workspace_bytes` | u64 | Per-workspace GPU buffers, excluding host images, weights, transient uploads and driver overhead |
+| `shared_weight_bytes` | u64 | Immutable GPU weights; count once per Model/device |
+| `runtime_checks` | u32 | Nonzero when shader runtime checks are enabled |
+
+Initialize the output to `{0}`. Information is immutable after prepare, so queries may overlap submit on the same workspace; each query needs separate output storage and the workspace must remain alive.
+
 ### Metal
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `next` | pointer | NULL | Reserved for extensions; must be NULL |
 | `device` | `void *` | NULL | Required `id<MTLDevice>`; use `__bridge` under ARC |
 | `queue` | `void *` | NULL | Optional shared host queue; NULL creates a library queue |
-| `flags` | bitmask | `0` | `OIDNW_GPU_METAL_FP32` disables FP16; `OIDNW_GPU_METAL_NO_SUBGROUPS` disables subgroups |
+| `flags` | bitmask | `0` | `OIDNW_GPU_METAL_FP32` disables FP16; `OIDNW_GPU_METAL_NO_SUBGROUPS` disables subgroups; `OIDNW_GPU_METAL_NO_COOPERATIVE_MATRIX` disables cooperative matrices |
 | `lock`, `unlock`, `user_data` | callbacks, pointer | NULL | Required with a shared queue; your code must use the same lock for that queue |
 | `max_pending_submissions` | u32 | `64` | 1..=4096 |
 
 - A shared queue needs a command-buffer capacity of at least 4096. Lock callbacks run on the calling thread, must not reenter the library or unwind, and `user_data` must stay valid until the context is destroyed.
-- FP16 and subgroups are used when available; cooperative matrices are not enabled by this API.
+- FP16, subgroups and experimental cooperative matrices are enabled when supported. Cooperative-matrix kernels have been exercised on Apple M4 Max Metal and NVIDIA RTX 4060 Laptop Vulkan; other hardware is unverified. For problems, set the platform's `NO_COOPERATIVE_MATRIX` flag or select `kernel = OIDNW_KERNEL_IMPLICIT_GEMM`. Matrix flags and GPU filter kernel/quality options are experimental and outside semver guarantees. FAST quality requires explicit selection.
 
 Build and run both Metal hosts:
 
@@ -370,7 +388,7 @@ Vulkan 1.2 or newer. The library takes part in instance and device creation, as 
 | Helper | Does |
 | --- | --- |
 | `instance_extensions(loader, api_version)` | Instance extensions to enable before `vkCreateInstance` |
-| `query_requirements(desc)` | Device extensions and features the library needs, after choosing the physical device |
+| `query_requirements(desc)` | Device extensions and features after physical-device selection; includes `VK_KHR_cooperative_matrix` and its feature structure when supported, unless `NO_COOPERATIVE_MATRIX` is set |
 | `merge_requirements(requirements, host_info)` | Returns a `merged_device_info` that enables yours and the library's: extensions deduplicated, features OR-ed, `VkPhysicalDeviceFeatures2` converted to `pEnabledFeatures`. Throws `INVALID_ARGUMENT` for declarations import rejects (aggregate `VkPhysicalDeviceVulkan1xFeatures`, other `pNext` structures, duplicates). Owns copies of names and features; borrows your queue and layer arrays. `requirements` may be released afterwards |
 | `queue_lock` | Mutex the library and your code share for the queue; lock it with `std::lock_guard` around your queue calls |
 | `import_device(handles, instance_info, device_info, lock, flags = 0, options = {})` | Fills `oidnw_gpu_vulkan_device_desc` and retains `lock` until the context is destroyed. `query.flags` must equal `flags` |
@@ -379,14 +397,16 @@ The C descriptor below is what these helpers fill; use it directly for `max_pend
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `next` | pointer | NULL | Reserved for extensions; must be NULL |
 | `get_instance_proc_addr` | `PFN_vkGetInstanceProcAddr` | NULL | Required loader entry point, including your layers |
 | `instance`, `physical_device`, `device`, `queue` | Vulkan handles | NULL | Required, from one context |
 | `queue_family_index`, `queue_index` | u32 | `0` | An unprotected graphics/compute queue |
 | `instance_create_info`, `device_create_info` | pointers | NULL | Original creation declarations, valid during import |
-| `flags` | bitmask | `0` | `OIDNW_GPU_VULKAN_FP32` disables FP16; `OIDNW_GPU_VULKAN_NO_SUBGROUPS` disables subgroups |
+| `flags` | bitmask | `0` | `OIDNW_GPU_VULKAN_FP32` disables FP16; `OIDNW_GPU_VULKAN_NO_SUBGROUPS` disables subgroups; `OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX` disables cooperative matrices |
 | `lock`, `unlock`, `user_data` | callbacks, pointer | NULL | Required; all your access to this queue must take the same lock (`queue_lock` provides both). Release it before calling the library |
 | `max_pending_submissions` | u32 | `64` | 1..=4096 |
 
+- Requirements queries include supported cooperative matrices by default; use the same flags for query and import. Import enables matrices only if the host enabled both the extension and `cooperativeMatrix`; otherwise AUTO uses implicit GEMM. For hardware coverage and fallback options, see [Metal](#metal).
 - Import fully bound, non-sparse storage buffers and timeline semaphores with their original creation info. Buffers must belong to the queue family or use concurrent sharing that includes it; you perform any queue-family ownership transfers. Overlapping memory aliases, binary semaphores and aggregated Vulkan 1.1/1.2/1.3 feature structs are unsupported.
 - The library borrows your objects: keep them and their memory alive until the context is destroyed.
 - While an earlier submission's external waits are unresolved, the next submit returns `QUEUE_FULL`. Signal those producers independently and poll before retrying.
@@ -408,6 +428,7 @@ DX12 cannot import another `ID3D12Device`, so the library creates its own device
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `next` | pointer | NULL | Reserved for extensions; must be NULL |
 | `host_device` | `ID3D12Device *` | NULL | Your device; selects the adapter LUID and exports resources |
 | `agility_sdk_version` | u32 | `0` | Required; exactly the Agility SDK version your device uses |
 | `agility_sdk_path` | UTF-8 string | NULL | Required absolute directory containing `D3D12Core.dll`, ending with `/` or `\` |
@@ -479,30 +500,32 @@ oidnw_device_destroy(device);
 Check every `int32_t` status (`OIDNW_OK` = 0); [`examples/denoise.c`](examples/denoise.c) shows full error handling. Link `oidn_webgpu::oidn_webgpu`.
 
 - Images are tightly packed RGBA32F arrays of one size. Pass `NULL` for albedo or normal when the model does not read them (`oidnw_filter_input_count`). Output may alias an input.
+- `oidnw_filter_set_input_scale(filter, scale, ...)` changes exposure for later executions without rebuilding the workspace. The scale must be positive and finite, including for LDR where it is ignored.
 - The filter caches a workspace for its last image size. `oidnw_filter_prepare(filter, w, h, ...)` optionally prepares a size ahead of time.
 - Handles are not thread-safe: concurrent calls on one filter return `OIDNW_ERROR_BUSY`. One device may serve filters on different threads. Destroy filters before their device.
 - `OIDNW_ERROR_GPU` means execution or readback failed: destroy and recreate the filter.
 
 `oidnw_filter_desc`, from `oidnw_filter_desc_default`:
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `hdr` | nonzero | `0` for LDR weights |
-| `transfer` | `OIDNW_TRANSFER_PU` | `OIDNW_TRANSFER_LOG` for RTLightmap HDR weights |
-| `quality` | `OIDNW_QUALITY_HIGH` | `FAST` uses f16 accumulation in subgroup-matrix kernels |
-| `kernel` | `OIDNW_KERNEL_AUTO` | Subgroup-matrix kernels with cooperative matrices, otherwise implicit GEMM |
-| `max_tile_size` | `0` | `0` = whole image; otherwise rounded down to a multiple of 16 |
-| `input_scale` | `1.0` | Scale applied to HDR color before the transfer |
-| `flags` | `0` | `OIDNW_FILTER_RUNTIME_CHECKS` enables shader bounds checks (off by default) |
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `next` | pointer | NULL | Reserved for extensions; must be NULL |
+| `hdr` | u32 | nonzero | `0` for LDR weights |
+| `transfer` | enum | `OIDNW_TRANSFER_PU` | `OIDNW_TRANSFER_LOG` for RTLightmap HDR weights |
+| `quality` | enum | `OIDNW_QUALITY_HIGH` | `FAST` uses f16 accumulation in subgroup-matrix kernels |
+| `kernel` | enum | `OIDNW_KERNEL_AUTO` | Subgroup-matrix kernels with cooperative matrices, otherwise implicit GEMM |
+| `max_tile_size` | u32 | `0` | `0` = whole image; otherwise rounded down to a multiple of 16 |
+| `input_scale` | float | `1.0` | Positive finite scale applied to HDR color before the transfer; zero is rejected |
+| `flags` | bitmask | `0` | `OIDNW_FILTER_RUNTIME_CHECKS` enables shader bounds checks (off by default) |
 
 Use `OIDNW_BACKEND_VULKAN` for cooperative-matrix kernels on Windows and Linux. `oidnw_device_info` reports the adapter name, backend and enabled `OIDNW_FEATURE_*` bits. The [header](include/oidn_webgpu.h) documents every option and lifetime rule.
 
 ### Versioning
 
-`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 2.1.0 (`0x00020100`). It covers the CPU filter and GPU C API.
+`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 3.0.0 (`0x00030000`). It covers the CPU filter and GPU C API.
 
 - Use headers and a library from the same release. Dynamic loaders must require `oidnw_api_version() == OIDNW_API_VERSION` before calling the API; the C++ wrappers check this at startup.
-- ABI 2.0.0 removed the `oidnw_filter_desc.size` field and its layout-size check. Consumers built against 1.x headers must be rebuilt; older layouts are rejected.
+- ABI 3.0.0 replaces 1.0.0: `oidnw_filter_desc.size` is removed and every descriptor starts with `next`, which must be NULL. Rebuild 1.x consumers and reject mismatched library versions. CPU filter input scales must now be positive and finite; replace zero with `1.0`.
 
 ### Core planner
 

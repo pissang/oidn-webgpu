@@ -3,6 +3,7 @@ use super::*;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VulkanRequirementsDesc {
+    pub next: *const std::ffi::c_void,
     pub flags: u32,
     pub get_instance_proc_addr: Option<vk::PFN_vkGetInstanceProcAddr>,
     pub instance: vk::Instance,
@@ -102,7 +103,7 @@ pub unsafe extern "C" fn oidnw_gpu_vulkan_requirements_create(
         guard(error, capacity, || {
             output(result)?;
             let desc = descriptor(desc)?;
-            if desc.flags & !3 != 0
+            if desc.flags & !7 != 0
                 || desc.get_instance_proc_addr.is_none()
                 || desc.instance == vk::Instance::null()
                 || desc.physical_device == vk::PhysicalDevice::null()
@@ -125,7 +126,7 @@ unsafe fn query(desc: &VulkanRequirementsDesc) -> Outcome<VulkanRequirements> {
             desc.physical_device,
             desc.instance_create_info,
         )?;
-        let requested = requested_features(&adapter, desc.flags);
+        let requested = requested_features(adapter.features(), desc.flags);
         let hal = adapter
             .as_hal::<wgpu::hal::api::Vulkan>()
             .ok_or_else(|| gpu("not Vulkan"))?;
@@ -150,8 +151,7 @@ unsafe fn query(desc: &VulkanRequirementsDesc) -> Outcome<VulkanRequirements> {
             core,
             chain,
             names: extensions.iter().map(|n| n.as_ptr()).collect(),
-            enabled_features: u32::from(requested.contains(wgpu::Features::SHADER_F16))
-                | (u32::from(requested.contains(wgpu::Features::SUBGROUP)) << 1),
+            enabled_features: feature_bits(requested),
             _features: features,
         })
     }

@@ -8,8 +8,12 @@ extern "C" {
 
 #define OIDNW_GPU_VULKAN_FP32 1u
 #define OIDNW_GPU_VULKAN_NO_SUBGROUPS 2u
+/* Cooperative matrices are enabled by default when supported. This flag disables
+ * wgpu's experimental matrix feature; matrix behavior is outside semver guarantees. */
+#define OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX 4u
 typedef struct oidnw_gpu_vulkan_requirements oidnw_gpu_vulkan_requirements;
 typedef struct oidnw_gpu_vulkan_requirements_desc {
+  const void *next; /* NULL; non-NULL extensions are rejected. */
   uint32_t flags;
   PFN_vkGetInstanceProcAddr get_instance_proc_addr;
   VkInstance instance;
@@ -26,7 +30,10 @@ int32_t oidnw_gpu_vulkan_instance_extensions(PFN_vkGetInstanceProcAddr get_insta
   uint32_t api_version, const char **names, size_t *count, char *error, size_t capacity);
 void oidnw_gpu_vulkan_requirements_desc_default(oidnw_gpu_vulkan_requirements_desc *desc);
 /* Query after instance/physical-device selection, before vkCreateDevice.
- * No logical device or GPU work is created. flags must match later import.
+ * Supported cooperative-matrix extensions/features are included by default;
+ * NO_COOPERATIVE_MATRIX omits them. Import uses matrices only when the host enabled
+ * both VK_KHR_cooperative_matrix and cooperativeMatrix. flags must match import.
+ * No logical device or GPU work is created.
  * Host loader, instance and creation declarations must be live during this call.
  * Queries return UNAVAILABLE outside Windows/Linux. */
 int32_t oidnw_gpu_vulkan_requirements_create(const oidnw_gpu_vulkan_requirements_desc *desc,
@@ -45,6 +52,7 @@ int32_t oidnw_gpu_vulkan_requirements_get(const oidnw_gpu_vulkan_requirements *r
 void oidnw_gpu_vulkan_requirements_destroy(oidnw_gpu_vulkan_requirements *requirements);
 
 typedef struct oidnw_gpu_vulkan_device_desc {
+  const void *next; /* NULL; non-NULL extensions are rejected. */
   uint32_t flags;
   PFN_vkGetInstanceProcAddr get_instance_proc_addr;
   VkInstance instance;

@@ -218,9 +218,13 @@ Release child wrappers before calling `context.close(timeout_ns)`; a busy or tim
 
 After releasing child wrappers, if shutdown needs host recovery, `context.release()` returns an `oidnw::gpu::detached_device` containing the native handle and host-lifetime token. Retain both until safe C API destruction succeeds. `context.close_quiescent()` delegates to the native recovery contract and requires host proof that GPU access has ceased. Default destructor cleanup failure terminates. A custom `device_options::on_cleanup_failure` callback can take the detached context and token instead; the callback must be `noexcept` and keep them alive for host recovery.
 
+GPU filter descriptions also select `kernel` (default AUTO) and `quality` (default HIGH). Metal/Vulkan devices enable supported cooperative matrices by default; use `OIDNW_GPU_METAL_NO_COOPERATIVE_MATRIX` or `OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX` to disable them. Vulkan requirements queries include the matrix extension and feature only when supported and not disabled; use the same flags for import, which uses matrices only if the host enabled them. AUTO falls back to implicit GEMM, while an explicit SUBGROUP_MATRIX request without the enabled feature returns UNAVAILABLE. See [filter options and hardware coverage](../README.md#filter-options).
+
+Initialize every descriptor with its default function and leave `next` NULL. Query immutable workspace memory and kernel information with `oidnw_gpu_prepared_get_info` (C++: `workspace.info()`), initializing the output to `{0}`. Queries may overlap submit on the same workspace while it remains alive.
+
 ## Windows CUDA adapter
 
-[`oidn_webgpu_cuda.hpp`](../include/oidn_webgpu_cuda.hpp) and `oidn_webgpu::cuda` provide an optional C++17 adapter for CUDA renderers. The adapter owns the DX12 devices, shared committed buffers, external-memory mappings, fences, NT handles and Agility SDK factory. Applications supply CUDA streams and image descriptions. Denoising uses the existing DX12 backend and C ABI 2.1.0; there is no CUDA denoising backend. Use matching adapter headers, adapter library and core DLL.
+[`oidn_webgpu_cuda.hpp`](../include/oidn_webgpu_cuda.hpp) and `oidn_webgpu::cuda` provide an optional C++17 adapter for CUDA renderers. The adapter owns the DX12 devices, shared committed buffers, external-memory mappings, fences, NT handles and Agility SDK factory. Applications supply CUDA streams and image descriptions. Denoising uses the existing DX12 backend and C ABI 3.0.0; there is no CUDA denoising backend. Use matching adapter headers, adapter library and core DLL.
 
 | Entry point | Input/output storage | Bridge image copies |
 | --- | --- | --- |

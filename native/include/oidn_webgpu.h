@@ -92,6 +92,7 @@ typedef enum oidnw_transfer {
 #define OIDNW_FEATURE_COOPERATIVE_MATRIX 4u
 
 typedef struct oidnw_filter_desc {
+  const void *next; /* NULL; non-NULL extensions are rejected. */
   /* Nonzero for HDR color (default). */
   uint32_t hdr;
   /* oidnw_transfer, used when hdr is nonzero (default PU). */
@@ -105,7 +106,7 @@ typedef struct oidnw_filter_desc {
    * half the model's receptive field and each writes only its own output
    * rectangle, like the browser runtime. */
   uint32_t max_tile_size;
-  /* Scale applied to HDR color before the transfer (default 1). */
+  /* Positive finite scale applied to HDR color before the transfer (default 1). */
   float input_scale;
   /* OIDNW_FILTER_* flags (default 0). */
   uint32_t flags;
@@ -116,7 +117,7 @@ typedef struct oidnw_filter oidnw_filter;
 
 /* API version = major << 16 | minor << 8 | patch. Use matching headers
  * and library; dynamic loaders must require the exact version. */
-#define OIDNW_API_VERSION 0x00020100u
+#define OIDNW_API_VERSION 0x00030000u
 uint32_t oidnw_api_version(void);
 
 void oidnw_filter_desc_default(oidnw_filter_desc *desc);
@@ -155,6 +156,11 @@ int32_t oidnw_filter_prepare(const oidnw_filter *filter, uint32_t width, uint32_
  * next size change). */
 int32_t oidnw_filter_execute(oidnw_filter *filter, uint32_t width, uint32_t height,
   const float *color, const float *albedo, const float *normal, float *output,
+  char *error, size_t capacity);
+/* Updates the scale for subsequent executions without preparing resources again.
+ * scale must be positive and finite, including for LDR where it is ignored.
+ * Concurrent prepare/execute/set_input_scale on this filter returns BUSY. */
+int32_t oidnw_filter_set_input_scale(oidnw_filter *filter, float scale,
   char *error, size_t capacity);
 void oidnw_filter_destroy(oidnw_filter *filter);
 

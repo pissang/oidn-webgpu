@@ -19,6 +19,8 @@ pub use vulkan::{
 mod dx12_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, target_os = "macos"))]
+mod metal_hardening_tests;
 #[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
 mod vulkan_tests;
 
@@ -44,6 +46,7 @@ pub type QueueLock = Option<unsafe extern "C" fn(*mut c_void)>;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MetalDeviceDesc {
+    pub next: *const std::ffi::c_void,
     pub flags: u32,
     pub device: *mut c_void,
     pub queue: *mut c_void,
@@ -55,8 +58,11 @@ pub struct MetalDeviceDesc {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FilterDesc {
+    pub next: *const std::ffi::c_void,
     pub hdr: u32,
     pub transfer: u32,
+    pub quality: u32,
+    pub kernel: u32,
     pub max_tile_size: u32,
     pub flags: u32,
     pub binding_cache_capacity: u32,
@@ -84,6 +90,7 @@ pub struct TimelinePoint {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SubmitDesc {
+    pub next: *const std::ffi::c_void,
     pub input_scale: f32,
     pub images: Images,
     pub waits: *const TimelinePoint,
@@ -98,6 +105,18 @@ pub struct DeviceLimits {
     pub max_buffer_size: u64,
     pub max_image_bytes: u64,
     pub max_pending_submissions: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PreparedInfo {
+    pub next: *const c_void,
+    pub precision: u32,
+    pub kernels: u32,
+    pub tile_count: u32,
+    pub workspace_bytes: u64,
+    pub shared_weight_bytes: u64,
+    pub runtime_checks: u32,
 }
 
 pub struct GpuDevice {
@@ -297,6 +316,7 @@ struct PreparedInner {
     state: Arc<DeviceState>,
     inputs: usize,
     bytes: u64,
+    info: crate::DenoiseInfo,
     gate: Mutex<PreparedData>,
 }
 struct Pending {
@@ -512,7 +532,12 @@ fn check_pointer<T>(pointer: *const T, name: &str) -> Outcome<()> {
     }
 }
 unsafe fn descriptor<T: Copy>(pointer: *const T) -> Outcome<T> {
-    Ok(*unsafe { required(pointer, "description")? })
+    let desc = *unsafe { required(pointer, "description")? };
+    // Every description starts with its extension-chain pointer.
+    if !unsafe { pointer.cast::<*const c_void>().read() }.is_null() {
+        return Err(invalid("unknown description extension"));
+    }
+    Ok(desc)
 }
 unsafe fn output<T>(pointer: *mut *mut T) -> Outcome<()> {
     if pointer.is_null() || !pointer.is_aligned() {
@@ -705,6 +730,7 @@ pub unsafe extern "C" fn oidnw_gpu_metal_device_desc_default(desc: *mut MetalDev
     if !desc.is_null() && desc.is_aligned() {
         unsafe {
             desc.write(MetalDeviceDesc {
+                next: std::ptr::null(),
                 flags: 0,
                 device: std::ptr::null_mut(),
                 queue: std::ptr::null_mut(),
@@ -721,8 +747,11 @@ pub unsafe extern "C" fn oidnw_gpu_filter_desc_default(desc: *mut FilterDesc) {
     if !desc.is_null() && desc.is_aligned() {
         unsafe {
             desc.write(FilterDesc {
+                next: std::ptr::null(),
                 hdr: 1,
                 transfer: 0,
+                quality: OIDNW_QUALITY_HIGH,
+                kernel: OIDNW_KERNEL_AUTO,
                 max_tile_size: 0,
                 flags: OIDNW_FILTER_RUNTIME_CHECKS,
                 binding_cache_capacity: 8,
@@ -752,7 +781,7 @@ pub unsafe extern "C" fn oidnw_gpu_device_import_metal(
             output(result)?;
             let desc = descriptor(desc)?;
             if desc.device.is_null()
-                || desc.flags & !3 != 0
+                || desc.flags & !7 != 0
                 || !(1..=4096).contains(&desc.max_pending_submissions)
                 || desc.lock.is_some() != desc.unlock.is_some()
                 || (!desc.queue.is_null() && desc.lock.is_none())
@@ -979,12 +1008,14 @@ pub unsafe extern "C" fn oidnw_gpu_filter_create(
     unsafe {
         guard(error, capacity, || {
             output(result)?;
+            let desc = descriptor(desc)?;
             let device = required(device, "device")?;
             let _call = exclusive(&device.gate, "device handle is busy")?;
             let model = required(model, "model")?;
-            let desc = descriptor(desc)?;
             if desc.hdr > 1
                 || desc.transfer > 1
+                || desc.quality > OIDNW_QUALITY_FAST
+                || desc.kernel > OIDNW_KERNEL_SUBGROUP_MATRIX
                 || desc.flags & !OIDNW_FILTER_RUNTIME_CHECKS != 0
                 || !(1..=64).contains(&desc.binding_cache_capacity)
             {
@@ -1001,7 +1032,8 @@ pub unsafe extern "C" fn oidnw_gpu_filter_create(
                     Transfer::Log
                 };
                 options.max_tile_size = desc.max_tile_size;
-                let denoiser = if desc.flags & OIDNW_FILTER_RUNTIME_CHECKS != 0 {
+                let kernel = filter_kernel(runtime.context.device.features(), desc.kernel)?;
+                let mut denoiser = if desc.flags & OIDNW_FILTER_RUNTIME_CHECKS != 0 {
                     Denoiser::new(
                         &runtime.context.device,
                         &runtime.context.adapter,
@@ -1018,6 +1050,7 @@ pub unsafe extern "C" fn oidnw_gpu_filter_create(
                     )
                 }
                 .map_err(denoise_error)?;
+                denoiser.configure_kernel(kernel, desc.quality == OIDNW_QUALITY_FAST);
                 result.write(Box::into_raw(Box::new(GpuFilter {
                     _lease: Lease::new(&device.state),
                     state: device.state.clone(),
@@ -1078,6 +1111,7 @@ pub unsafe extern "C" fn oidnw_gpu_prepare(
                     state: filter.state.clone(),
                     inputs: filter.model.input_count(),
                     bytes,
+                    info: data.prepared.info().clone(),
                     gate: Mutex::new(data),
                 });
                 runtime.prepared.push(Arc::downgrade(&inner));
@@ -1087,6 +1121,41 @@ pub unsafe extern "C" fn oidnw_gpu_prepare(
                 })));
                 Ok(())
             })
+        })
+    }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn oidnw_gpu_prepared_get_info(
+    prepared: *const GpuPrepared,
+    info: *mut PreparedInfo,
+    error: *mut c_char,
+    capacity: usize,
+) -> i32 {
+    unsafe {
+        guard(error, capacity, || {
+            check_pointer(info, "prepared info")?;
+            if !(*info).next.is_null() {
+                return Err(invalid("unknown prepared info extension"));
+            }
+            info.write(std::mem::zeroed());
+            let prepared = required(prepared, "prepared")?;
+            let source = &prepared.inner.info;
+            info.write(PreparedInfo {
+                next: std::ptr::null(),
+                precision: source.precision as u32,
+                kernels: source.kernels.iter().fold(0, |bits, path| bits | match path {
+                    crate::KernelPath::Direct => 1,
+                    crate::KernelPath::ImplicitGemm => 2,
+                    crate::KernelPath::SubgroupMatrix => 4,
+                    crate::KernelPath::Spatial => 8,
+                    crate::KernelPath::Subgroup => 16,
+                }),
+                tile_count: source.tile_count,
+                workspace_bytes: source.workspace_bytes,
+                shared_weight_bytes: source.shared_weight_bytes,
+                runtime_checks: u32::from(source.runtime_checks),
+            });
+            Ok(())
         })
     }
 }
@@ -1102,8 +1171,8 @@ pub unsafe extern "C" fn oidnw_gpu_submit(
         guard(error, capacity, || {
             check_pointer(sequence, "sequence output")?;
             sequence.write(0);
-            let prepared = required(prepared, "prepared")?;
             let desc = descriptor(desc)?;
+            let prepared = required(prepared, "prepared")?;
             if !desc.input_scale.is_finite() || desc.input_scale <= 0.0 {
                 return Err(invalid("input_scale must be positive and finite"));
             }
@@ -1354,10 +1423,7 @@ pub unsafe extern "C" fn oidnw_gpu_device_info(
                 if !features.is_null() {
                     check_pointer(features, "features output")?;
                     let enabled = runtime.context.device.features();
-                    features.write(
-                        u32::from(enabled.contains(wgpu::Features::SHADER_F16))
-                            | (u32::from(enabled.contains(wgpu::Features::SUBGROUP)) << 1),
-                    );
+                    features.write(feature_bits(enabled));
                 }
                 Ok(())
             })
@@ -1485,3 +1551,28 @@ destroy_handle!(oidnw_gpu_filter_destroy, GpuFilter);
 destroy_handle!(oidnw_gpu_prepared_destroy, GpuPrepared);
 destroy_handle!(oidnw_gpu_buffer_destroy, GpuBuffer);
 destroy_handle!(oidnw_gpu_sync_destroy, GpuSync);
+
+fn requested_features(available: wgpu::Features, flags: u32) -> wgpu::Features {
+    let mut requested = available & (wgpu::Features::SHADER_F16
+        | wgpu::Features::SUBGROUP | wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX);
+    if flags & 1 != 0 { requested.remove(wgpu::Features::SHADER_F16); }
+    if flags & 2 != 0 { requested.remove(wgpu::Features::SUBGROUP); }
+    if flags & 4 != 0 { requested.remove(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX); }
+    requested
+}
+fn feature_bits(enabled: wgpu::Features) -> u32 {
+    u32::from(enabled.contains(wgpu::Features::SHADER_F16))
+        | (u32::from(enabled.contains(wgpu::Features::SUBGROUP)) << 1)
+        | (u32::from(enabled.contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX)) << 2)
+}
+fn filter_kernel(enabled: wgpu::Features, kernel: u32) -> Outcome<crate::Kernel> {
+    let matrices = enabled.contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX);
+    match kernel {
+        OIDNW_KERNEL_AUTO => Ok(if matrices { crate::Kernel::SubgroupMatrix } else { crate::Kernel::ImplicitGemm }),
+        OIDNW_KERNEL_IMPLICIT_GEMM => Ok(crate::Kernel::ImplicitGemm),
+        OIDNW_KERNEL_DIRECT => Ok(crate::Kernel::Direct),
+        OIDNW_KERNEL_SUBGROUP_MATRIX if matrices => Ok(crate::Kernel::SubgroupMatrix),
+        OIDNW_KERNEL_SUBGROUP_MATRIX => Err(Failure(OIDNW_ERROR_UNAVAILABLE, "cooperative matrices are not enabled on this device".into())),
+        _ => Err(invalid("unknown kernel")),
+    }
+}

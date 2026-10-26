@@ -10,7 +10,8 @@ extern "C" {
  * call using it. Models may be shared; other same-handle CPU calls are exclusive.
  * Different handles on a device serialize queue operations internally.
  * Descriptions are required and initialized with their *_default function.
- * Struct layouts are fixed; use headers and a library from the same version.
+ * next must be NULL; use headers and a library from the same version.
+ * prepared_get_info may overlap submit on the same workspace.
  * No background threads are created. Queue lock callbacks run on the caller. */
 typedef struct oidnw_gpu_device oidnw_gpu_device;
 typedef struct oidnw_gpu_model oidnw_gpu_model;
@@ -21,8 +22,11 @@ typedef struct oidnw_gpu_sync oidnw_gpu_sync;
 typedef void (*oidnw_gpu_queue_lock_fn)(void *user_data);
 
 typedef struct oidnw_gpu_filter_desc {
+  const void *next; /* NULL; non-NULL extensions are rejected. */
   uint32_t hdr;
   uint32_t transfer;
+  uint32_t quality; /* oidnw_quality, default HIGH; FAST is explicit opt-in. */
+  uint32_t kernel; /* oidnw_kernel, default AUTO. */
   uint32_t max_tile_size;
   uint32_t flags; /* OIDNW_FILTER_RUNTIME_CHECKS, enabled by default. */
   uint32_t binding_cache_capacity; /* 1..64, default 8 sets per workspace. */
@@ -46,6 +50,7 @@ typedef struct oidnw_gpu_timeline_point {
 } oidnw_gpu_timeline_point;
 
 typedef struct oidnw_gpu_submit_desc {
+  const void *next; /* NULL; non-NULL extensions are rejected. */
   float input_scale; /* Positive finite, default 1. */
   oidnw_gpu_images images;
   const oidnw_gpu_timeline_point *waits;
@@ -60,6 +65,26 @@ typedef struct oidnw_gpu_limits {
   uint64_t max_image_bytes; /* Min of binding, buffer and planner limits. */
   uint32_t max_pending_submissions;
 } oidnw_gpu_limits;
+
+typedef enum oidnw_precision {
+  OIDNW_PRECISION_FP32 = 1,
+  OIDNW_PRECISION_FP16 = 2
+} oidnw_precision;
+#define OIDNW_GPU_KERNEL_PATH_DIRECT 1u
+#define OIDNW_GPU_KERNEL_PATH_IMPLICIT_GEMM 2u
+#define OIDNW_GPU_KERNEL_PATH_SUBGROUP_MATRIX 4u
+#define OIDNW_GPU_KERNEL_PATH_SPATIAL 8u
+#define OIDNW_GPU_KERNEL_PATH_SUBGROUP 16u
+
+typedef struct oidnw_gpu_prepared_info {
+  const void *next; /* Initialize to NULL; non-NULL extensions are rejected. */
+  uint32_t precision; /* oidnw_precision; host images remain RGBA32F. */
+  uint32_t kernels; /* OIDNW_GPU_KERNEL_PATH_* bits actually used. */
+  uint32_t tile_count;
+  uint64_t workspace_bytes; /* Excludes host images, weights, transient uploads and driver overhead. */
+  uint64_t shared_weight_bytes; /* Count once per Model/device. */
+  uint32_t runtime_checks; /* Nonzero when shader runtime checks are enabled. */
+} oidnw_gpu_prepared_info;
 
 void oidnw_gpu_filter_desc_default(oidnw_gpu_filter_desc *desc);
 void oidnw_gpu_submit_desc_default(oidnw_gpu_submit_desc *desc);
@@ -76,6 +101,12 @@ void oidnw_gpu_filter_destroy(oidnw_gpu_filter *filter);
  * Use {NULL,0} for auxiliary images the model does not read. */
 int32_t oidnw_gpu_prepare(oidnw_gpu_filter *filter, uint32_t width, uint32_t height,
   const oidnw_gpu_images *images, oidnw_gpu_prepared **prepared, char *error, size_t capacity);
+/* Information is immutable after prepare. This query may run concurrently with
+ * submit or other queries on the same workspace; each query needs its own output.
+ * The workspace must remain alive throughout every call. Initialize info to {0}.
+ * No GPU work is submitted or waited for. */
+int32_t oidnw_gpu_prepared_get_info(const oidnw_gpu_prepared *prepared,
+  oidnw_gpu_prepared_info *info, char *error, size_t capacity);
 void oidnw_gpu_prepared_destroy(oidnw_gpu_prepared *prepared);
 /* sequence=0: rejected; no waits/signals accepted. Nonzero: accepted, even on
  * error. An encoding failure submits a wait/signal batch without denoising and quarantines

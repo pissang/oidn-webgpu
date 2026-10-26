@@ -16,6 +16,7 @@ extern "C" {
 #define OIDNW_GPU_DX12_DEBUG 4u
 #define OIDNW_GPU_DX12_GPU_VALIDATION 8u
 typedef struct oidnw_gpu_dx12_device_desc {
+  const void *next; /* NULL; non-NULL extensions are rejected. */
   uint32_t flags;
   ID3D12Device *host_device;
   uint32_t agility_sdk_version;
