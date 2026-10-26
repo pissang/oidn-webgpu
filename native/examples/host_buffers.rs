@@ -34,6 +34,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         required_limits: adapter.limits(),
         ..Default::default()
     }))?;
+    let mut options = DenoiserOptions::default();
+    options.max_tile_size = number(5, 0)?;
+    let mut denoiser = Denoiser::new(&device, &adapter, &model, options)?;
+    denoiser.warm_up([width, height])?;
     let bytes = width as u64 * height as u64 * 16;
     if bytes > device.limits().max_storage_buffer_binding_size {
         return Err("image exceeds the device's storage binding limit".into());
@@ -99,9 +103,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
         ],
     });
-    let mut options = DenoiserOptions::default();
-    options.max_tile_size = number(5, 0)?;
-    let mut denoiser = Denoiser::new(&device, &adapter, &model, options)?;
     let mut prepared = denoiser.prepare(
         [width, height],
         DenoiseBuffers {

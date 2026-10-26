@@ -296,6 +296,10 @@ inline filter make_filter(const device &context, const model &weights,
       message.data(), message.size()), message.data());
   return filter(value, context.owner());
 }
+inline void warm_up(const filter &source, uint32_t width, uint32_t height) {
+  std::array<char, 1024> message{};
+  require(oidnw_gpu_filter_warm_up(source.get(), width, height, message.data(), message.size()), message.data());
+}
 inline workspace prepare(const filter &source, uint32_t width, uint32_t height,
     const oidnw_gpu_images &images) {
   oidnw_gpu_prepared *value = nullptr;

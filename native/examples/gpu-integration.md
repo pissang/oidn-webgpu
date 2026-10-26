@@ -220,6 +220,8 @@ After releasing child wrappers, if shutdown needs host recovery, `context.releas
 
 GPU filter descriptions also select `kernel` (default AUTO) and `quality` (default HIGH). Metal/Vulkan devices enable supported cooperative matrices by default; use `OIDNW_GPU_METAL_NO_COOPERATIVE_MATRIX` or `OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX` to disable them. Vulkan requirements queries include the matrix extension and feature only when supported and not disabled; use the same flags for import, which uses matrices only if the host enabled them. AUTO falls back to implicit GEMM, while an explicit SUBGROUP_MATRIX request without the enabled feature returns UNAVAILABLE. See [filter options and hardware coverage](../README.md#filter-options).
 
+Before image buffers exist, optionally call `oidnw_gpu_filter_warm_up(filter, width, height, ...)` (C++: `oidnw::gpu::warm_up(filter, width, height)`). See [preparation costs](../README.md#filter-options).
+
 Initialize every descriptor with its default function and leave `next` NULL. Query immutable workspace memory and kernel information with `oidnw_gpu_prepared_get_info` (C++: `workspace.info()`), initializing the output to `{0}`. Queries may overlap submit on the same workspace while it remains alive.
 
 ## Windows CUDA adapter

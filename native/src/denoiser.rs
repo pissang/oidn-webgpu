@@ -369,23 +369,16 @@ impl Denoiser {
         denoiser.unchecked = true;
         Ok(denoiser)
     }
-    /// Plans and allocates a fixed size before interactive rendering. May block
-    /// for shader compilation. Instances may outlive this Denoiser; they retain
-    /// their image handles, workspace and shared weights.
-    pub fn prepare(&mut self, size: [u32; 2], buffers: DenoiseBuffers<'_>) -> Result<PreparedDenoise> {
-        let device = &self.device;
-        let [width, height] = size;
+    fn image_bytes(&self, [width, height]: [u32; 2]) -> Result<u64> {
         if !(1..=16384).contains(&width) || !(1..=16384).contains(&height) {
             return Err(Error::InvalidArgument("width and height must be in 1..=16384".into()));
         }
-        let bytes = width as u64 * height as u64 * 16;
-        check_buffer_limits(device, "external image", bytes, true)?;
-        let views = buffers.validate(
-            self.model.inputs,
-            bytes,
-            device.limits().min_storage_buffer_offset_alignment as u64,
-        )?;
-        let input_buffers: Vec<_> = views[..self.model.inputs].iter().map(|v| v.buffer.clone()).collect();
+        let bytes = u64::from(width) * u64::from(height) * 16;
+        check_buffer_limits(&self.device, "external image", bytes, true)?;
+        Ok(bytes)
+    }
+    fn plan_for_size(&self, [width, height]: [u32; 2]) -> Result<crate::Program> {
+        let device = &self.device;
         let config = NetworkConfig {
             kernel: if self.kernel != Kernel::Auto {
                 self.kernel
@@ -406,7 +399,6 @@ impl Denoiser {
             }),
             ..NetworkConfig::new(width, height)
         };
-        let started = Instant::now();
         let program = crate::plan(device, &self.adapter, &self.model.weights, &config).map_err(Error::Model)?;
         for buffer in &program.buffers {
             check_buffer_limits(
@@ -416,6 +408,39 @@ impl Denoiser {
                 buffer.usage & wgpu::BufferUsages::STORAGE.bits() != 0,
             )?;
         }
+        Ok(program)
+    }
+    /// Compiles pipelines for a size without image buffers or workspace allocations.
+    /// May block for planning and shader compilation. A later prepare on this
+    /// denoiser with the same size reuses these pipelines but still plans and allocates.
+    pub fn warm_up(&mut self, size: [u32; 2]) -> Result<()> {
+        self.image_bytes(size)?;
+        let program = self.plan_for_size(size)?;
+        let result = gpu_checked(&self.device, || {
+            crate::compile_pipelines(&self.device, &program, self.unchecked, &mut self.pipelines);
+            Ok(())
+        });
+        if result.is_err() { self.pipelines.clear(); }
+        result
+    }
+    #[cfg(test)]
+    pub(crate) fn cached_pipeline_count(&self) -> usize { self.pipelines.len() }
+    #[cfg(test)]
+    pub(crate) fn weights_are_unallocated(&self) -> bool { self.weights.buffers.lock().unwrap().is_empty() }
+    /// Plans and allocates a fixed size before interactive rendering. May block
+    /// for shader compilation. Instances may outlive this Denoiser; they retain
+    /// their image handles, workspace and shared weights.
+    pub fn prepare(&mut self, size: [u32; 2], buffers: DenoiseBuffers<'_>) -> Result<PreparedDenoise> {
+        let device = &self.device;
+        let bytes = self.image_bytes(size)?;
+        let views = buffers.validate(
+            self.model.inputs,
+            bytes,
+            device.limits().min_storage_buffer_offset_alignment as u64,
+        )?;
+        let input_buffers: Vec<_> = views[..self.model.inputs].iter().map(|v| v.buffer.clone()).collect();
+        let started = Instant::now();
+        let program = self.plan_for_size(size)?;
         let meta = program.metadata.as_ref().ok_or_else(|| {
             Error::Model("core archive lacks execution metadata; rebuild it for this source revision".into())
         })?;

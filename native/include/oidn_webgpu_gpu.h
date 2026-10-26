@@ -95,6 +95,12 @@ void oidnw_gpu_model_destroy(oidnw_gpu_model *model);
 int32_t oidnw_gpu_filter_create(oidnw_gpu_device *device, const oidnw_gpu_model *model,
   const oidnw_gpu_filter_desc *desc, oidnw_gpu_filter **filter, char *error, size_t capacity);
 void oidnw_gpu_filter_destroy(oidnw_gpu_filter *filter);
+/* Compiles pipelines without image buffers, bindings or workspace allocation.
+ * May block for planning and compilation. prepare on this filter with the same
+ * size reuses pipelines but still plans and allocates the workspace.
+ * Concurrent warm_up/prepare on this filter returns BUSY. */
+int32_t oidnw_gpu_filter_warm_up(oidnw_gpu_filter *filter, uint32_t width, uint32_t height,
+  char *error, size_t capacity);
 /* First bindings are required. Full-sized RGBA32F images remain GPU resident;
  * only the intermediate workspace is tiled. Output uses another buffer.
  * A buffer's input/output role is fixed on first successful preparation/submit.

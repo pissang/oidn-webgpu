@@ -14,6 +14,8 @@ The runtime changes below affect the native library only; the npm package is unc
 
 ### Added
 
+- `Denoiser::warm_up`, `oidnw_gpu_filter_warm_up` and C++ `oidnw::gpu::warm_up` compile pipelines before image buffers exist. Preparation on the same denoiser/filter and size reuses them, while still planning and allocating the workspace.
+
 - C++ GPU helpers expose device information, model input count and status names.
 - CUDA adapter options select HDR/LDR and PU/log transfer. `resize(width, height)` reuses devices and weights after task/lease release and consumer retirement; `info().workspace` reports memory and selected kernels.
 

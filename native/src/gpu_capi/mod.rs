@@ -1064,6 +1064,26 @@ pub unsafe extern "C" fn oidnw_gpu_filter_create(
     }
 }
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn oidnw_gpu_filter_warm_up(
+    filter: *mut GpuFilter,
+    width: u32,
+    height: u32,
+    error: *mut c_char,
+    capacity: usize,
+) -> i32 {
+    unsafe {
+        guard(error, capacity, || {
+            let filter = required(filter, "filter")?;
+            let mut denoiser = exclusive(&filter.gate, "filter handle is busy")?;
+            with_runtime(&filter.state, |runtime| {
+                runtime.maintain()?;
+                runtime.healthy()?;
+                denoiser.warm_up([width, height]).map_err(denoise_error)
+            })
+        })
+    }
+}
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn oidnw_gpu_prepare(
     filter: *mut GpuFilter,
     width: u32,

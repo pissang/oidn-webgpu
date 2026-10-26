@@ -163,6 +163,27 @@ fn metal_matrix_defaults_info_scale_and_cpu_equivalence() {
                 );
                 assert!(unavailable.is_null());
             }
+            assert_eq!(
+                oidnw_gpu_filter_warm_up(filter, 0, height, std::ptr::null_mut(), 0),
+                OIDNW_ERROR_INVALID_ARGUMENT
+            );
+            {
+                let _held = (&(*filter).gate).lock().unwrap();
+                assert_eq!(
+                    oidnw_gpu_filter_warm_up(filter, width, height, std::ptr::null_mut(), 0),
+                    OIDNW_ERROR_BUSY
+                );
+            }
+            ok(oidnw_gpu_filter_warm_up(
+                filter,
+                width,
+                height,
+                std::ptr::null_mut(),
+                0,
+            ));
+            let warmed_count = (&(*filter).gate).lock().unwrap().cached_pipeline_count();
+            assert!(warmed_count > 0);
+            assert!((&(*filter).gate).lock().unwrap().weights_are_unallocated());
             let mut prepared = std::ptr::null_mut();
             ok(oidnw_gpu_prepare(
                 filter,
@@ -173,6 +194,21 @@ fn metal_matrix_defaults_info_scale_and_cpu_equivalence() {
                 message.as_mut_ptr(),
                 message.len(),
             ));
+            assert_eq!(
+                (&(*filter).gate).lock().unwrap().cached_pipeline_count(),
+                warmed_count
+            );
+            ok(oidnw_gpu_filter_warm_up(
+                filter,
+                width,
+                height,
+                std::ptr::null_mut(),
+                0,
+            ));
+            assert_eq!(
+                (&(*filter).gate).lock().unwrap().cached_pipeline_count(),
+                warmed_count
+            );
             let mut info: PreparedInfo = std::mem::zeroed();
             // Holding the submit gate must not affect immutable queries.
             {

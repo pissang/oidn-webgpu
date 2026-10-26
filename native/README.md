@@ -116,7 +116,10 @@ use oidn_webgpu::{DenoiseBuffers, DenoiseParams, Denoiser, DenoiserOptions, Mode
 let model = Model::from_tza(&weights)?;
 let mut denoiser = Denoiser::new(&device, &adapter, &model, DenoiserOptions::default())?;
 
-// Per image size (may block for shader compilation).
+// Optional, before the renderer creates image buffers.
+denoiser.warm_up([width, height])?;
+
+// Per image size (allocates the workspace).
 let mut prepared = denoiser.prepare([width, height], DenoiseBuffers {
     color: (&color).into(),
     albedo: Some((&albedo).into()),
@@ -136,6 +139,7 @@ queue.submit([encoder.finish()]);
 | --- | --- | --- |
 | Load | `Model::from_tza(&[u8])` | Validates the TZA file on the CPU. Clones share CPU weights and per-device GPU weights |
 | Bind | `Denoiser::new(&device, &adapter, &model, options)` | Cheap. `adapter` must be the device's adapter |
+| Warm up | `denoiser.warm_up([w, h])` | Optional shader compilation without image buffers or workspace allocation; prepare for the same size reuses pipelines |
 | Prepare | `denoiser.prepare([w, h], buffers)` | May block for shader compilation. Allocates a workspace for that size; call again when the size changes |
 | Encode | `prepared.encode(&mut encoder, params)` | Appends commands only: no submit, wait or readback |
 | Rebind | `prepared.rebind(buffers)` | Swaps image buffers at the same size. Already encoded commands keep their old bindings |
@@ -342,6 +346,8 @@ A quarantined context can hold submissions whose outcome is unknown, so normal d
 | `max_tile_size` | u32 | `0` | `0` = whole image; otherwise 16..=16384, rounded down to a multiple of 16. Reduces workspace memory only |
 | `flags` | bitmask | `OIDNW_FILTER_RUNTIME_CHECKS` | `0` disables shader runtime checks, which can be faster |
 | `binding_cache_capacity` | u32 | `8` | 1..=64 cached image binding sets per workspace |
+
+`oidnw_gpu_filter_warm_up(filter, w, h, ...)` (C++: `oidnw::gpu::warm_up(filter, w, h)`) optionally compiles pipelines before image buffers exist. It can block, but does not allocate image bindings or a workspace. A later prepare on the same filter and size reuses those pipelines; planning, weight upload and workspace allocation still occur during prepare. A different size may require more pipelines. Serialize warm-up and prepare on each filter.
 
 Per-submit `input_scale` (default `1`, finite and positive) multiplies HDR color before the transfer and is undone on output. `get_limits` (C++: `context.limits()`) reports the image offset alignment, maximum buffer and image bytes and the pending-submission limit.
 

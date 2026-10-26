@@ -64,6 +64,7 @@ int main(void) {
   if (oidnw_gpu_device_destroy(NULL, NULL, 0) != OIDNW_OK) return 1;
   oidnw_gpu_limits limits;
   if (oidnw_gpu_get_limits(NULL, &limits, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT) return 1;
+  if (oidnw_gpu_filter_warm_up(NULL, 16, 16, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT) return 1;
   if (oidnw_filter_prepare(NULL, 16, 16, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT) return 1;
   oidnw_filter_desc desc;
   memset(&desc, 0xff, sizeof desc);

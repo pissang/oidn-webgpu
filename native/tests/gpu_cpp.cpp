@@ -35,6 +35,9 @@ int32_t oidnw_gpu_filter_create(oidnw_gpu_device *d, const oidnw_gpu_model *, co
   *out = new oidnw_gpu_filter{d}; ++d->children; return OIDNW_OK;
 }
 void oidnw_gpu_filter_destroy(oidnw_gpu_filter *p) { if (p) { --p->device->children; delete p; } }
+int32_t oidnw_gpu_filter_warm_up(oidnw_gpu_filter *f, uint32_t width, uint32_t height, char *, size_t) {
+  return f && width && height ? OIDNW_OK : OIDNW_ERROR_INVALID_ARGUMENT;
+}
 int32_t oidnw_gpu_prepare(oidnw_gpu_filter *f, uint32_t, uint32_t, const oidnw_gpu_images *, oidnw_gpu_prepared **out, char *, size_t) {
   *out = new oidnw_gpu_prepared{f->device}; ++f->device->children; return OIDNW_OK;
 }
@@ -115,6 +118,7 @@ int main() {
     auto weights = load_model("x", 1);
     ensure(weights.input_count() == 3);
     auto source = make_filter(context, weights);
+    warm_up(source, 16, 16);
     auto prepared = prepare(source, 16, 16, images);
     const auto info = prepared.info();
     ensure(info.precision == OIDNW_PRECISION_FP16 && info.kernels == OIDNW_GPU_KERNEL_PATH_SUBGROUP_MATRIX);

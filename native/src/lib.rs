@@ -498,6 +498,51 @@ struct ResourceCaches<'a> {
 
 type PipelineMap = HashMap<(String, String, bool), wgpu::ComputePipeline>;
 
+fn compile_pipelines(
+    device: &wgpu::Device,
+    program: &Program,
+    unchecked: bool,
+    cache: &mut PipelineMap,
+) -> Vec<wgpu::ComputePipeline> {
+    program
+        .pipelines
+        .iter()
+        .map(|(shader, entry_point)| {
+            let code = &program.shaders[*shader];
+            let key = (code.clone(), entry_point.clone(), unchecked);
+            cache
+                .entry(key)
+                .or_insert_with(|| {
+                    let descriptor = wgpu::ShaderModuleDescriptor {
+                        label: Some("oidn-webgpu"),
+                        source: wgpu::ShaderSource::Wgsl(code.as_str().into()),
+                    };
+                    let module = if unchecked {
+                        // SAFETY: the caller of `new_unchecked` vouches for the kernels.
+                        unsafe {
+                            device.create_shader_module_trusted(descriptor, wgpu::ShaderRuntimeChecks::unchecked())
+                        }
+                    } else {
+                        device.create_shader_module(descriptor)
+                    };
+                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("oidn-webgpu"),
+                        layout: None,
+                        module: &module,
+                        entry_point: Some(entry_point),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            // Every kernel writes workgroup memory before reading it.
+                            zero_initialize_workgroup_memory: !unchecked,
+                            ..Default::default()
+                        },
+                        cache: None,
+                    })
+                })
+                .clone()
+        })
+        .collect::<Vec<_>>()
+}
+
 impl Network {
     /// Plans the network for `config` and creates its resources on `device`.
     ///
@@ -655,43 +700,7 @@ impl Network {
                 buffer
             })
             .collect::<Vec<_>>();
-        let pipelines = program
-            .pipelines
-            .iter()
-            .map(|(shader, entry_point)| {
-                let code = &program.shaders[*shader];
-                let key = (code.clone(), entry_point.clone(), unchecked);
-                cache
-                    .entry(key)
-                    .or_insert_with(|| {
-                        let descriptor = wgpu::ShaderModuleDescriptor {
-                            label: Some("oidn-webgpu"),
-                            source: wgpu::ShaderSource::Wgsl(code.as_str().into()),
-                        };
-                        let module = if unchecked {
-                            // SAFETY: the caller of `new_unchecked` vouches for the kernels.
-                            unsafe {
-                                device.create_shader_module_trusted(descriptor, wgpu::ShaderRuntimeChecks::unchecked())
-                            }
-                        } else {
-                            device.create_shader_module(descriptor)
-                        };
-                        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                            label: Some("oidn-webgpu"),
-                            layout: None,
-                            module: &module,
-                            entry_point: Some(entry_point),
-                            compilation_options: wgpu::PipelineCompilationOptions {
-                                // Every kernel writes workgroup memory before reading it.
-                                zero_initialize_workgroup_memory: !unchecked,
-                                ..Default::default()
-                            },
-                            cache: None,
-                        })
-                    })
-                    .clone()
-            })
-            .collect::<Vec<_>>();
+        let pipelines = compile_pipelines(device, &program, unchecked, cache);
         let buffer_offsets = vec![0; buffers.len()];
         let mut descriptions = program.bind_groups;
         for group in &mut descriptions {
