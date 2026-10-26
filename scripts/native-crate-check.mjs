@@ -27,6 +27,9 @@ try {
   for(const file of ['NOTICE','LICENSE','licenses/scriptc/runtime-LICENSE.txt','licenses/scriptc/v8-number-radix-LICENSE.txt']) {
     assert(existsSync(path.join(directory,file)),`crate must retain ${file}`);
   }
+  for(const file of ['metal_gpu.m','metal_gpu_cpp.mm','vulkan_gpu.cpp','dx12_gpu.cpp','cuda_dx12_gpu.cu','gpu_cpp_lifecycle.hpp','gpu-integration.md','interop/common.rs','interop/metal_capi.rs','interop/host.hlsl']) {
+    assert(existsSync(path.join(directory,'examples',file)),`crate must retain examples/${file}`);
+  }
   const metadata=JSON.parse(run('cargo',['metadata','--no-deps','--format-version','1','--manifest-path',cargo],{encoding:'utf8',stdio:'pipe'}));
   assert.equal(metadata.packages.find(p=>p.name==='oidn-webgpu-native').license,'MIT AND Apache-2.0 AND BSD-3-Clause AND BSL-1.0','crate must declare bundled component licenses');
   const target=path.join(root,'.native-build/crate-check-target');

@@ -57,8 +57,7 @@ function stageCrate() {
   const m=checkAssets();reset(stage);
   for(const file of ['Cargo.toml','Cargo.lock','build.rs','LICENSE','NOTICE','README.md'])copyFileSync(path.join(root,'native',file),path.join(stage,file));
   for(const dir of ['src','include','build_support','licenses'])cpSync(path.join(root,'native',dir),path.join(stage,dir),{recursive:true});
-  mkdirSync(path.join(stage,'examples'));
-  for(const file of readdirSync(path.join(root,'native/examples')).filter(f=>/\.(rs|c)$/.test(f)))copyFileSync(path.join(root,'native/examples',file),path.join(stage,'examples',file));
+  cpSync(path.join(root,'native/examples'),path.join(stage,'examples'),{recursive:true});
   mkdirSync(path.join(stage,'prebuilt'));copyFileSync(path.join(assets,'core-manifest.json'),path.join(stage,'prebuilt/manifest.json'));
   for(const e of Object.values(m.targets))copyFileSync(path.join(assets,e.file),path.join(stage,'prebuilt',e.file));
   // Crates.io renders README links against the repository, not native/.

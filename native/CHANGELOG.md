@@ -26,6 +26,7 @@ Native 0.2.0 adds a GPU C API for host-owned Metal, Vulkan and DX12 buffers, C++
 - Vulkan C++ helpers in `oidn_webgpu_vulkan.hpp`: `merge_requirements` merges the library's device requirements into your `VkDeviceCreateInfo` (deduplicated extensions, OR-ed features, `VkPhysicalDeviceFeatures2` converted, unsupported structures rejected before `vkCreateDevice`); `queue_lock` is the shared queue mutex; and an `import_device(handles, instance_info, device_info, lock)` overload fills the import descriptor and retains the lock.
 - Optional Windows CUDA/DX12 C++17 adapter (`oidn_webgpu_cuda.hpp`, CMake target `oidn_webgpu::cuda`) for CUDA renderers: copies from ordinary CUDA device pointers or denoises adapter-allocated shared images without copies, and orders work on CUDA streams. Options select HDR/LDR and PU/log transfer; debug layers default to off, and GPU validation requires explicitly enabling debug. `resize(width, height)` reuses devices and weights after task/lease release and consumer retirement; `info().workspace` reports memory and selected kernels. It uses the DX12 backend and is built only when enabled, so CUDA is not otherwise required.
 - The [GPU C integration walkthrough](examples/gpu-integration.md) and complete hosts for each route: `metal_gpu.m`, `metal_gpu_cpp.mm`, `vulkan_gpu.cpp`, `dx12_gpu.cpp` and `cuda_dx12_gpu.cu`. All ship in native packages with their SPIR-V shaders.
+- The Rust crate includes the GPU host example sources, their supporting Rust modules and HLSL source, and the GPU C integration walkthrough.
 
 ### Changed
 
