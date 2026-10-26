@@ -14,6 +14,8 @@ The runtime changes below affect the native library only; the npm package is unc
 
 ### Added
 
+- Rust `DenoiserOptions` exposes experimental `kernel` (default `Kernel::Auto`) and `quality` (default `Quality::High`). `Quality::Balanced` currently matches HIGH; `Quality::Fast` explicitly selects lower-precision f16 matrix accumulation. Explicit `Kernel::SubgroupMatrix` requires the enabled cooperative-matrix device feature or creation returns `Error::UnsupportedDevice`. Kernel/quality selection is outside semver guarantees.
+
 - `Denoiser::warm_up`, `oidnw_gpu_filter_warm_up` and C++ `oidnw::gpu::warm_up` compile pipelines before image buffers exist. Preparation on the same denoiser/filter and size reuses them, while still planning and allocating the workspace.
 
 - C++ GPU helpers expose device information, model input count and status names.

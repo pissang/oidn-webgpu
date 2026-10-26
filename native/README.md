@@ -92,7 +92,7 @@ For Rust renderers on wgpu: the denoiser records into your command encoder and r
 
 ### Install
 
-The updated examples below use unreleased `warm_up` and `with_input_scale` methods. Use a local checkout or a Git commit containing them; the published Native 0.1.1 crate does not provide these methods.
+The updated examples below use unreleased `warm_up` and `with_input_scale` methods; the `kernel` and `quality` options are also unreleased. Use a local checkout or a Git commit containing them; the published Native 0.1.1 crate does not provide these additions.
 
 ```toml
 [dependencies]
@@ -155,17 +155,21 @@ cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- 
 
 - Before requesting the device, add `Denoiser::required_features()`, `Denoiser::recommended_features(&adapter)` and `Denoiser::required_limits()`. Large images may need higher buffer limits. The library cannot enable features later.
 - Precision is FP16 when the device enables `SHADER_F16`, otherwise FP32. On DX12, `SHADER_F16` also needs DXC (Shader Model 6.2+): ship `dxcompiler.dll` and its matching `dxil.dll`.
-- Cooperative-matrix kernels are used when the device enables `EXPERIMENTAL_COOPERATIVE_MATRIX` (wgpu's experimental feature contract applies); on Windows and Linux they need Vulkan. Otherwise implicit GEMM.
+- With `kernel = Kernel::Auto`, cooperative-matrix kernels are selected when the device enables `EXPERIMENTAL_COOPERATIVE_MATRIX` (wgpu's experimental feature contract applies); on Windows and Linux they need Vulkan. Otherwise AUTO uses implicit GEMM. Selecting `Kernel::SubgroupMatrix` does not enable the feature; `Denoiser::new` returns `Error::UnsupportedDevice` if it is not enabled.
 
 ### Options
 
 `DenoiserOptions` is fixed per `Denoiser` and `#[non_exhaustive]`: start from `default()` and assign fields.
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `hdr` | `true` | `false` for LDR weights |
-| `transfer` | `Transfer::Pu` | `Transfer::Log` for RTLightmap HDR weights |
-| `max_tile_size` | `0` | `0` = whole image; otherwise 16..=16384, rounded down to a multiple of 16. Reduces workspace memory only |
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `hdr` | `bool` | `true` | `false` for LDR weights |
+| `transfer` | `Transfer` | `Transfer::Pu` | `Transfer::Log` for RTLightmap HDR weights |
+| `max_tile_size` | `u32` | `0` | `0` = whole image; otherwise 16..=16384, rounded down to a multiple of 16. Reduces workspace memory only |
+| `kernel` | `Kernel` | `Kernel::Auto` | AUTO selects matrix or implicit GEMM as above; `ImplicitGemm` and `Direct` select those paths explicitly |
+| `quality` | `Quality` | `Quality::High` | `High`/`Balanced` use f32 matrix accumulation; `Quality::Fast` explicitly selects f16 accumulation when supported, with lower precision |
+
+Kernel and quality selection are experimental and outside semver guarantees. Quality does not select the model weights; use the Small TZA for OIDN's fast model.
 
 `DenoiseParams` is non-exhaustive and passed to every `encode`. Use `DenoiseParams::default().with_input_scale(exposure)` to change it every frame:
 

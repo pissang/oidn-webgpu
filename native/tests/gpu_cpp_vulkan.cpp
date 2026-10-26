@@ -8,7 +8,9 @@ template<class T> static void ensure(const T &condition) {
 }
 struct oidnw_gpu_device { int unused = 0; };
 struct oidnw_gpu_vulkan_requirements {
-  const char *extensions[2] = {"VK_KHR_library", "VK_KHR_shared"};
+  const char *extensions[3] = {"VK_KHR_library", "VK_KHR_shared", "VK_KHR_cooperative_matrix"};
+  uint32_t extension_count = 2;
+  VkPhysicalDeviceCooperativeMatrixFeaturesKHR matrix{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
   VkPhysicalDeviceFeatures core{};
   VkPhysicalDevice16BitStorageFeatures storage{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
   VkPhysicalDeviceTimelineSemaphoreFeatures timeline{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
@@ -37,13 +39,18 @@ int32_t oidnw_gpu_device_destroy(oidnw_gpu_device *d, char *, size_t) {
   if (d) { ++destroyed; delete d; }
   return OIDNW_OK;
 }
-int32_t oidnw_gpu_vulkan_requirements_create(const oidnw_gpu_vulkan_requirements_desc *,
+int32_t oidnw_gpu_vulkan_requirements_create(const oidnw_gpu_vulkan_requirements_desc *desc,
     oidnw_gpu_vulkan_requirements **out, char *, size_t) {
   auto value = new oidnw_gpu_vulkan_requirements;
   value->core.robustBufferAccess = VK_TRUE;
   value->storage.storageBuffer16BitAccess = VK_TRUE;
   value->timeline.timelineSemaphore = VK_TRUE;
   value->storage.pNext = &value->timeline;
+  if (!(desc->flags & OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX)) {
+    value->extension_count = 3;
+    value->matrix.cooperativeMatrix = VK_TRUE;
+    value->timeline.pNext = &value->matrix;
+  }
   *out = value;
   return OIDNW_OK;
 }
@@ -51,7 +58,7 @@ int32_t oidnw_gpu_vulkan_requirements_get(const oidnw_gpu_vulkan_requirements *r
     VkDeviceCreateInfo *info, uint32_t *, char *, size_t) {
   *info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
   info->pNext = &r->storage;
-  info->enabledExtensionCount = 2;
+  info->enabledExtensionCount = r->extension_count;
   info->ppEnabledExtensionNames = r->extensions;
   info->pEnabledFeatures = &r->core;
   return OIDNW_OK;
@@ -62,8 +69,9 @@ void oidnw_gpu_vulkan_requirements_destroy(oidnw_gpu_vulkan_requirements *r) {
 }
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fake_loader(VkInstance, const char *) { return nullptr; }
-static oidnw::vulkan::requirements library() {
+static oidnw::vulkan::requirements library(bool matrices = false) {
   oidnw_gpu_vulkan_requirements_desc query{};
+  query.flags = matrices ? 0 : OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX;
   return oidnw::vulkan::query_requirements(query);
 }
 template<class F> static void rejects(F &&body) {
@@ -107,6 +115,7 @@ int main() {
     ensure(imported.device == handles.device && imported.queue == handles.queue);
     ensure(imported.queue_family_index == 5 && imported.queue_index == 6);
     ensure(imported.instance_create_info == &instance_info && imported.device_create_info == &device_info);
+    ensure(imported.next == nullptr);
     ensure(imported.flags == OIDNW_GPU_VULKAN_FP32 && imported.max_pending_submissions == 64);
     ensure(locked_during_import);
     ensure(!lock_alive.expired() && !token_alive.expired());
@@ -186,4 +195,17 @@ int main() {
     ensure(only.get().pNext && static_cast<const VkBaseInStructure *>(only.get().pNext)->sType ==
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES);
   }
+  {
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR host_matrix{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+    host_matrix.cooperativeMatrixRobustBufferAccess = VK_TRUE;
+    VkDeviceCreateInfo host_with_matrix{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &host_matrix};
+    auto matrices = [&] { auto requirements = library(true); return vulkan::merge_requirements(requirements, host_with_matrix); }();
+    auto matrix = static_cast<const VkPhysicalDeviceCooperativeMatrixFeaturesKHR *>(matrices.get().pNext);
+    ensure(matrix != &host_matrix && matrix->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR);
+    ensure(matrix->cooperativeMatrix && matrix->cooperativeMatrixRobustBufferAccess);
+    ensure(!host_matrix.cooperativeMatrix && !host_matrix.pNext);
+    ensure(matrices.get().enabledExtensionCount == 3);
+    ensure(!std::strcmp(matrices.get().ppEnabledExtensionNames[2], "VK_KHR_cooperative_matrix"));
+  }
+
 }

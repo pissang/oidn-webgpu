@@ -149,6 +149,18 @@ pub enum Transfer {
     Pu,
     Log,
 }
+/// Matrix accumulation quality. FAST is an explicit precision/performance tradeoff.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Quality {
+    /// f32 matrix accumulation.
+    #[default]
+    High,
+    /// Currently the same as High.
+    Balanced,
+    /// f16 matrix accumulation when supported by the selected matrix configuration.
+    Fast,
+}
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct DenoiserOptions {
@@ -158,6 +170,13 @@ pub struct DenoiserOptions {
     pub transfer: Transfer,
     /// Output tile edge rounded down to a multiple of 16; 0 = whole image.
     pub max_tile_size: u32,
+    /// AUTO selects subgroup matrix when enabled, otherwise implicit GEMM.
+    /// Explicit SubgroupMatrix requires the cooperative-matrix device feature.
+    /// Experimental kernel selection is outside semver guarantees.
+    pub kernel: Kernel,
+    /// Matrix accumulation quality; FAST must be selected explicitly.
+    /// Experimental quality selection is outside semver guarantees.
+    pub quality: Quality,
 }
 impl Default for DenoiserOptions {
     fn default() -> Self {
@@ -165,6 +184,8 @@ impl Default for DenoiserOptions {
             hdr: true,
             transfer: Transfer::Pu,
             max_tile_size: 0,
+            kernel: Kernel::Auto,
+            quality: Quality::High,
         }
     }
 }
@@ -308,14 +329,8 @@ pub struct Denoiser {
     pipelines: PipelineMap,
     weights: Arc<SharedWeights>,
     unchecked: bool,
-    kernel: Kernel,
-    f16_accumulation: bool,
 }
 impl Denoiser {
-    pub(crate) fn configure_kernel(&mut self, kernel: Kernel, f16_accumulation: bool) {
-        self.kernel = kernel;
-        self.f16_accumulation = f16_accumulation;
-    }
     pub fn required_features() -> wgpu::Features {
         wgpu::Features::empty()
     }
@@ -342,6 +357,7 @@ impl Denoiser {
                 "max_tile_size must be 0 or in 16..=16384".into(),
             ));
         }
+        select_kernel(device.features(), options.kernel)?;
         Ok(Self {
             device: device.clone(),
             adapter: adapter.clone(),
@@ -350,8 +366,6 @@ impl Denoiser {
             pipelines: PipelineMap::new(),
             weights: model.shared_weights(device)?,
             unchecked: false,
-            kernel: Kernel::Auto,
-            f16_accumulation: false,
         })
     }
     /// Disables shader bounds checks and workgroup initialization.
@@ -380,17 +394,8 @@ impl Denoiser {
     fn plan_for_size(&self, [width, height]: [u32; 2]) -> Result<crate::Program> {
         let device = &self.device;
         let config = NetworkConfig {
-            kernel: if self.kernel != Kernel::Auto {
-                self.kernel
-            } else if device
-                .features()
-                .contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX)
-            {
-                Kernel::SubgroupMatrix
-            } else {
-                Kernel::ImplicitGemm
-            },
-            f16_accumulation: self.f16_accumulation,
+            kernel: select_kernel(device.features(), self.options.kernel)?,
+            f16_accumulation: self.options.quality == Quality::Fast,
             denoise: Some(DenoiseConfig {
                 hdr: self.options.hdr,
                 log_transfer: self.options.transfer == Transfer::Log,
@@ -532,6 +537,16 @@ impl Denoiser {
             .sum();
         prepared.info.prepare_ms = started.elapsed().as_secs_f64() * 1e3;
         Ok(prepared)
+    }
+}
+fn select_kernel(features: wgpu::Features, kernel: Kernel) -> Result<Kernel> {
+    let matrix = features.contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX);
+    match kernel {
+        Kernel::Auto => Ok(if matrix { Kernel::SubgroupMatrix } else { Kernel::ImplicitGemm }),
+        Kernel::SubgroupMatrix if !matrix => Err(Error::UnsupportedDevice(
+            "cooperative matrices are not enabled on this device".into(),
+        )),
+        selected => Ok(selected),
     }
 }
 fn check_buffer_limits(device: &wgpu::Device, resource: &str, required: u64, storage: bool) -> Result<()> {
@@ -688,6 +703,23 @@ mod tests {
             "/../weights/rt_hdr_alb_nrm_small.tza"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn public_kernel_and_quality_defaults_and_device_requirements() {
+        let options = DenoiserOptions::default();
+        assert_eq!(options.kernel, Kernel::Auto);
+        assert_eq!(options.quality, Quality::High);
+        assert_eq!(Quality::default(), Quality::High);
+        let stable = wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP;
+        let matrix = wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX;
+        assert_eq!(select_kernel(stable, options.kernel).unwrap(), Kernel::ImplicitGemm);
+        assert_eq!(select_kernel(stable | matrix, options.kernel).unwrap(), Kernel::SubgroupMatrix);
+        for kernel in [Kernel::Direct, Kernel::ImplicitGemm] {
+            assert_eq!(select_kernel(stable | matrix, kernel).unwrap(), kernel);
+        }
+        assert_eq!(select_kernel(stable | matrix, Kernel::SubgroupMatrix).unwrap(), Kernel::SubgroupMatrix);
+        assert!(matches!(select_kernel(stable, Kernel::SubgroupMatrix), Err(Error::UnsupportedDevice(_))));
     }
 
     #[test]

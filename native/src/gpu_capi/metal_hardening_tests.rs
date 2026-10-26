@@ -46,11 +46,15 @@ fn metal_matrix_defaults_info_scale_and_cpu_equivalence() {
             std::ptr::null_mut(),
             0,
         ));
-        for (device_flags, kernel, checks) in [
-            (0, OIDNW_KERNEL_AUTO, true),
-            (0, OIDNW_KERNEL_AUTO, false),
-            (4, OIDNW_KERNEL_AUTO, true),
-            (0, OIDNW_KERNEL_IMPLICIT_GEMM, true),
+        for (device_flags, kernel, checks, quality) in [
+            (0, OIDNW_KERNEL_AUTO, true, OIDNW_QUALITY_HIGH),
+            (0, OIDNW_KERNEL_AUTO, false, OIDNW_QUALITY_HIGH),
+            (4, OIDNW_KERNEL_AUTO, true, OIDNW_QUALITY_HIGH),
+            (0, OIDNW_KERNEL_IMPLICIT_GEMM, true, OIDNW_QUALITY_HIGH),
+            (0, OIDNW_KERNEL_AUTO, true, OIDNW_QUALITY_BALANCED),
+            (0, OIDNW_KERNEL_AUTO, true, OIDNW_QUALITY_FAST),
+            (0, OIDNW_KERNEL_SUBGROUP_MATRIX, true, OIDNW_QUALITY_HIGH),
+            (4, OIDNW_KERNEL_DIRECT, true, OIDNW_QUALITY_HIGH),
         ] {
             let mut desc: MetalDeviceDesc = std::mem::zeroed();
             oidnw_gpu_metal_device_desc_default(&mut desc);
@@ -138,6 +142,7 @@ fn metal_matrix_defaults_info_scale_and_cpu_equivalence() {
                 0
             };
             options.kernel = kernel;
+            options.quality = quality;
             let mut filter = std::ptr::null_mut();
             ok(oidnw_gpu_filter_create(
                 device,
@@ -220,17 +225,21 @@ fn metal_matrix_defaults_info_scale_and_cpu_equivalence() {
                     0,
                 ));
             }
-            let matrix = device_flags == 0 && kernel == OIDNW_KERNEL_AUTO;
+            let matrix = device_flags == 0
+                && (kernel == OIDNW_KERNEL_AUTO || kernel == OIDNW_KERNEL_SUBGROUP_MATRIX);
             assert_eq!(info.kernels & 4 != 0, matrix);
             assert_eq!(info.runtime_checks != 0, checks);
             assert!(info.workspace_bytes > 0 && info.shared_weight_bytes > 0);
             let mut cpu_desc: OidnwFilterDesc = std::mem::zeroed();
             oidnw_filter_desc_default(&mut cpu_desc);
-            cpu_desc.kernel = if matrix {
+            cpu_desc.kernel = if kernel != OIDNW_KERNEL_AUTO {
+                kernel
+            } else if matrix {
                 OIDNW_KERNEL_SUBGROUP_MATRIX
             } else {
                 OIDNW_KERNEL_IMPLICIT_GEMM
             };
+            cpu_desc.quality = quality;
             cpu_desc.flags = options.flags;
             let mut cpu = std::ptr::null_mut();
             ok(oidnw_filter_create(
@@ -312,6 +321,88 @@ fn metal_matrix_defaults_info_scale_and_cpu_equivalence() {
                     );
                 }
             }
+            let (rust_device, adapter, queue) = with_runtime(&(*device).state, |runtime| {
+                Ok((
+                    runtime.context.device.clone(),
+                    runtime.context.adapter.clone(),
+                    runtime.context.queue.clone(),
+                ))
+            })
+            .unwrap();
+            let rust_model = Model::from_tza(&weights).unwrap();
+            let mut rust_options = DenoiserOptions::default();
+            rust_options.kernel = match kernel {
+                OIDNW_KERNEL_IMPLICIT_GEMM => crate::Kernel::ImplicitGemm,
+                OIDNW_KERNEL_DIRECT => crate::Kernel::Direct,
+                OIDNW_KERNEL_SUBGROUP_MATRIX => crate::Kernel::SubgroupMatrix,
+                _ => crate::Kernel::Auto,
+            };
+            rust_options.quality = match quality {
+                OIDNW_QUALITY_FAST => crate::Quality::Fast,
+                OIDNW_QUALITY_BALANCED => crate::Quality::Balanced,
+                _ => crate::Quality::High,
+            };
+            if device_flags == 4 {
+                let mut unsupported = rust_options.clone();
+                unsupported.kernel = crate::Kernel::SubgroupMatrix;
+                assert!(matches!(
+                    Denoiser::new(&rust_device, &adapter, &rust_model, unsupported),
+                    Err(crate::Error::UnsupportedDevice(_))
+                ));
+            }
+            let mut denoiser = if checks {
+                Denoiser::new(&rust_device, &adapter, &rust_model, rust_options)
+            } else {
+                Denoiser::new_unchecked(&rust_device, &adapter, &rust_model, rust_options)
+            }
+            .unwrap();
+            denoiser.warm_up([width, height]).unwrap();
+            let pipeline_count = denoiser.cached_pipeline_count();
+            let buffers: Vec<_> = handles
+                .iter()
+                .map(|handle| (&(**handle).inner).buffer.clone())
+                .collect();
+            let mut rust_prepared = denoiser
+                .prepare(
+                    [width, height],
+                    DenoiseBuffers {
+                        color: (&buffers[0]).into(),
+                        albedo: Some((&buffers[1]).into()),
+                        normal: Some((&buffers[2]).into()),
+                        output: (&buffers[3]).into(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(pipeline_count, denoiser.cached_pipeline_count());
+            assert_eq!(
+                rust_prepared
+                    .info()
+                    .kernels
+                    .contains(&crate::KernelPath::SubgroupMatrix),
+                matrix
+            );
+            let mut encoder = rust_device.create_command_encoder(&Default::default());
+            rust_prepared
+                .encode(&mut encoder, DenoiseParams::default().with_input_scale(2.0))
+                .unwrap();
+            let submission = queue.submit([encoder.finish()]);
+            rust_device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(Duration::from_secs(60)),
+                })
+                .unwrap();
+            let actual =
+                std::slice::from_raw_parts(raw_buffers[3].contents().as_ptr().cast::<f32>(), count);
+            for (&a, &b) in actual.iter().zip(&expected) {
+                assert!(
+                    a.is_finite() && (a - b).abs() <= 1e-5 + b.abs() * 1e-4,
+                    "Rust {a}, CPU {b}; kernel={kernel}, quality={quality}"
+                );
+            }
+            drop(rust_prepared);
+            drop(denoiser);
+            drop(buffers);
             for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
                 assert_eq!(
                     oidnw_filter_set_input_scale(cpu, scale, std::ptr::null_mut(), 0),
@@ -371,7 +462,7 @@ fn metal_matrix_defaults_info_scale_and_cpu_equivalence() {
             cpu_ms.sort_by(f64::total_cmp);
             gpu_ms.sort_by(f64::total_cmp);
             eprintln!(
-                "flags={device_flags} kernel={kernel} checks={checks} precision={} kernels={} CPU_median_ms={:.3} GPU_median_ms={:.3}",
+                "flags={device_flags} kernel={kernel} quality={quality} checks={checks} precision={} kernels={} CPU_median_ms={:.3} GPU_median_ms={:.3}",
                 info.precision,
                 info.kernels,
                 cpu_ms[cpu_ms.len() / 2],

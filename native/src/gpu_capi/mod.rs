@@ -1032,8 +1032,13 @@ pub unsafe extern "C" fn oidnw_gpu_filter_create(
                     Transfer::Log
                 };
                 options.max_tile_size = desc.max_tile_size;
-                let kernel = filter_kernel(runtime.context.device.features(), desc.kernel)?;
-                let mut denoiser = if desc.flags & OIDNW_FILTER_RUNTIME_CHECKS != 0 {
+                options.kernel = filter_kernel(runtime.context.device.features(), desc.kernel)?;
+                options.quality = match desc.quality {
+                    OIDNW_QUALITY_FAST => crate::Quality::Fast,
+                    OIDNW_QUALITY_BALANCED => crate::Quality::Balanced,
+                    _ => crate::Quality::High,
+                };
+                let denoiser = if desc.flags & OIDNW_FILTER_RUNTIME_CHECKS != 0 {
                     Denoiser::new(
                         &runtime.context.device,
                         &runtime.context.adapter,
@@ -1050,7 +1055,6 @@ pub unsafe extern "C" fn oidnw_gpu_filter_create(
                     )
                 }
                 .map_err(denoise_error)?;
-                denoiser.configure_kernel(kernel, desc.quality == OIDNW_QUALITY_FAST);
                 result.write(Box::into_raw(Box::new(GpuFilter {
                     _lease: Lease::new(&device.state),
                     state: device.state.clone(),
