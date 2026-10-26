@@ -4,14 +4,6 @@ All notable changes to the browser package `oidn-webgpu` and the repository tool
 
 ## [Unreleased]
 
-### Added
-
-- A local `npm run test:fast` loop with content-checked build reuse, per-stage timings and optional test filenames. `npm test` retains unconditional builds.
-
-### Changed
-
-- Local test selection builds only the artifacts its imports require; contributor checks are scoped to the changed runtime.
-
 ## [0.6.0] - 2026-10-25
 
 oidn-webgpu 0.6.0 is the first release under the new package name. It adds experimental native Rust and C APIs, sanitizes inputs and outputs like OIDN, and lowers default FP16 latency in Chrome by up to 19% on the measured GPUs. The package name is the only breaking change.
