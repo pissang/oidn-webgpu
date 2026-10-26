@@ -13,7 +13,7 @@
 - [Browser guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/web.md): options, input formats, `tileExecute` contract, GPU pipelines, tiling, precision, profiling
 - [Native guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/README.md): choosing an API by renderer, GPU C API with a C++ Metal example and Metal/Vulkan/DX12 requirements, CUDA adapter, Rust `Denoiser`, CPU C filter, image contract, CMake targets, precompiled packages, validation tools, build configuration
 - [GPU C integration walkthrough](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/examples/gpu-integration.md): Metal, Vulkan and DX12 imports, shared workspace preparation, asynchronous submission, C++17 ownership, Vulkan preflight and the optional Windows CUDA/DX12 adapter's ordinary-pointer and shared-image modes
-- [Development guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/development.md): architecture, shared core vs. browser-only code, commands, benchmarks, native Metal profiling, CI
+- [Development guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/development.md): architecture, native build dependencies, local test iteration and validation scope, commands, benchmarks, native Metal profiling, CI
 - [Native release guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/native-release.md): versioned core assets, independently buildable crates, manual publication, Trusted Publishing and retries
 - [AGENTS.md](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/AGENTS.md): repository map and rules for changing the code
 

@@ -4,6 +4,7 @@ How the code is organized, how to build and test it, and how to change it safely
 
 - [Architecture](#architecture)
 - [Commands](#commands)
+- [Validation scope](#validation-scope)
 - [Updating to a new OIDN model](#updating-to-a-new-oidn-model)
 - [Benchmarks and GPU checks](#benchmarks-and-gpu-checks)
 - [CI and native packages](#ci-and-native-packages)
@@ -45,7 +46,7 @@ Consequences:
 
 - A change to a shared file changes native output too. Run the native checks below.
 - Shared code must compile with scriptc: no DOM or browser globals, and GPU access only through the `OIDNGPU*` types in `src/gpuTypes.ts`. Async GPU work belongs in browser-only code.
-- `native/build.rs` watches `src/`, so `cargo build` rebuilds the core automatically after a change.
+- `native/build.rs` watches `src/native/`, the shared source files listed in `src/native/core-inputs.json`, and the native build/toolchain scripts. Browser-only changes do not rebuild the core. When shared imports change, update the list; `tests/buildInputs.test.mjs` checks it against the transitive imports of the profile's entry, including type-only imports.
 - The program format between `src/native/program.ts` and `native/src/lib.rs` is versioned (documented at the top of `program.ts`). Change both sides together.
 
 ### Key files
@@ -75,6 +76,7 @@ Run from the repository root. Requirements: Node 22+; for native work also stabl
 | Build library (`lib/`, type declarations) | `npm run build:lib` | no |
 | Build bundle (`dist/`) | `npm run build` | no |
 | Unit tests (builds both first) | `npm test` | no |
+| Local unit test loop (checks build cache) | `npm run test:fast` | no |
 | Examples dev server (HTTPS) | `npm run dev`, then open `/examples/basic.html` | browser |
 | Inspect a TZA file | `npm run model:inspect -- weights/rt_hdr_alb_nrm.tza` | no |
 | Resource leak check | `npm run test:leak -- [--cycles 6] [--engine wgsl\|webnn]` | Chrome |
@@ -83,7 +85,44 @@ Run from the repository root. Requirements: Node 22+; for native work also stabl
 | Native GPU tests | `cargo test --manifest-path native/Cargo.toml -- --ignored` | yes |
 | C package | `npm run native:build` (output in `.native-build/package`) | no |
 
-Tests import compiled output from `lib/` and `dist/`, so always run them through `npm test`. Generated directories (`lib/`, `dist/`, `.native-build/`, `.zig-cache/`, `native/target/`, `benchmarks/results/`) are git-ignored. The Windows CI Zig setup action puts its compiler cache in `.zig-cache/`; it does not affect the package's clean-source check.
+Tests import compiled output from `lib/` and `dist/`. Use `npm test` for the complete JS check with unconditional builds, or `npm run test:fast` during local iteration. The local runner follows imports through the selected tests and local helpers, including code fixtures referenced by literal `new URL(...)` expressions. It builds only the imported artifacts: library tests need `lib/`, bundle tests need `dist/`, and tests of standalone scripts need neither. Use the complete check for fixtures loaded through computed paths that static dependency discovery cannot follow.
+
+The runner hashes source files, build configuration, dependency lockfile, tool versions and generated output before reusing a needed build. Missing or modified output triggers a rebuild. Build fingerprints are stored in `.native-build/test-fast.json`; deleting that file forces needed builds on the next run. Test results are never cached.
+
+Pass test filenames to narrow the local loop:
+
+```shell
+npm run test:fast -- tests/tileExecute.test.mjs
+npm run test:fast -- tests/modelSpec.test.mjs tests/nativeGemm.test.mjs
+```
+
+For native unit-test iteration, select the library or a specific integration test to avoid building unrelated examples and benchmark targets:
+
+```shell
+cargo test --manifest-path native/Cargo.toml --lib
+cargo test --manifest-path native/Cargo.toml --test core_distribution
+```
+
+Keep the toolchain, target, profile, features and `OIDN_WEBGPU_CORE_ARCHIVE` setting consistent across iterations so Cargo can reuse its outputs. Changing the archive override switches the build-script inputs; use it only with a source-matched archive. Add `--timings` to a Cargo command to inspect compilation costs in `native/target/cargo-timings/`.
+
+Generated directories (`lib/`, `dist/`, `.native-build/`, `.zig-cache/`, `native/target/`, `benchmarks/results/`) are git-ignored. The Windows CI Zig setup action puts its compiler cache in `.zig-cache/`; it does not affect the package's clean-source check.
+
+## Validation scope
+
+During iteration, run the tests for the affected behavior. Once the relevant changes settle, run each complete suite required by this table once; repeat only after another relevant edit or a failure. A completed suite already builds its required outputs, so no separate preceding build is needed. Run `npm ci` when installing or changing locked dependencies, rather than before each test run.
+
+| Changed scope | Final checks |
+| --- | --- |
+| Documentation and prose only | Review content and links; no builds or tests |
+| Browser-only TypeScript implementation | `npm test`; no native build |
+| Shared TypeScript implementation | `npm test` and `cargo test --manifest-path native/Cargo.toml` |
+| Native Rust implementation | `cargo test --manifest-path native/Cargo.toml`; no JS build |
+| Native build scripts, core profile or input list | `node --test tests/buildInputs.test.mjs` and complete native unit tests; include JS tests when JS build/test tooling also changes |
+| JS tests or build/test tooling | `npm test`; native checks only if native dependencies also change |
+| Native examples, C/C++ headers or C ABI | Compile affected consumers and run the corresponding ABI/example checks; include native unit tests for implementation changes |
+| Package/release scripts, shipped files or toolchain | Corresponding package/crate checks; avoid release packaging for unrelated runtime edits |
+
+For kernel, precision or tiling changes, also run the affected real-GPU correctness checks. For GPU interop changes, start with the affected backend and a short frame count, then run the relevant stress matrix before finishing. Do not disable checks or reuse stale binaries to shorten a run. `-SkipBuild` is appropriate only when source and build inputs are unchanged since that binary was built. GPU benchmarks are needed for performance claims, not for documentation or build-dependency changes.
 
 ## Updating to a new OIDN model
 

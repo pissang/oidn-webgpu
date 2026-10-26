@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-These changes affect the native library only; the npm package and the Rust `Denoiser` API are unchanged. The native C library adds a GPU C API that denoises Metal, Vulkan and DX12 buffers owned by the host renderer, with C++17 wrappers and an optional Windows CUDA adapter. The C ABI moves from 1.0.0 to 2.1.0, a breaking change.
+The runtime changes below affect the native library only; the npm package and the Rust `Denoiser` API are unchanged. The native C library adds a GPU C API that denoises Metal, Vulkan and DX12 buffers owned by the host renderer, with C++17 wrappers and an optional Windows CUDA adapter. The C ABI moves from 1.0.0 to 2.1.0, a breaking change.
 
 ### Breaking changes
 
@@ -12,6 +12,7 @@ These changes affect the native library only; the npm package and the Rust `Deno
 
 ### Added
 
+- A local `npm run test:fast` loop with content-checked build reuse, per-stage timings and optional test filenames. `npm test` retains unconditional builds.
 - GPU C API ([`oidn_webgpu_gpu.h`](native/include/oidn_webgpu_gpu.h)): denoises host GPU buffers without uploads or readback. Submissions are asynchronous with up to 64 external waits and 64 signals each, `oidnw_gpu_poll` / `oidnw_gpu_wait` report completion including every external signal, accepted submissions are bounded by `max_pending_submissions` (default 64), and each workspace caches up to `binding_cache_capacity` binding sets (default 8). GPU errors and device loss quarantine the context; `oidnw_gpu_device_destroy_quiescent` releases it once the host knows the GPU is idle. See the [GPU C API guide](native/README.md#gpu-c-api).
   - **Metal (macOS):** imports the host `MTLDevice`, buffers and shared events, with an optional shared queue guarded by host lock callbacks.
   - **Vulkan (Windows; Linux not GPU-tested):** borrows the host instance, physical device, device and queue, and imports storage buffers and timeline semaphores. `oidnw_gpu_vulkan_instance_extensions` and `oidnw_gpu_vulkan_requirements_create/get` report the extensions and features to enable before creating the instance and device.
@@ -22,6 +23,7 @@ These changes affect the native library only; the npm package and the Rust `Deno
 
 ### Changed
 
+- Native source builds watch the shared core input list and native source directory, so browser-only edits no longer trigger scriptc. Local test selection builds only the artifacts its imports require; contributor checks are scoped to the changed runtime.
 - The macOS ARM64 C shared library is 4.67 MB instead of 6.49 MB before compression, including the new GPU C API.
 - Windows native releases support `x86_64-pc-windows-msvc` only. Windows GNU has no bundled core or precompiled package, and its source builds are not validated.
 

@@ -69,7 +69,15 @@ fn main() {
             env::var("TARGET").unwrap(),
             "automatic scriptc builds require HOST == TARGET; for cross compilation set OIDN_WEBGPU_CORE_ARCHIVE to an archive built for TARGET"
         );
-        watch_tree(&root.join("src"));
+        watch_tree(&root.join("src/native"));
+        let inputs: Vec<String> = serde_json::from_str(
+            &fs::read_to_string(root.join("src/native/core-inputs.json"))
+                .expect("cannot read native core input list"),
+        )
+        .expect("invalid native core input list");
+        for input in inputs {
+            watch_tree(&root.join(input));
+        }
         for file in [
             "scripts/native-core-build.mjs",
             "scripts/native-core-msvc.mjs",

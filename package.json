@@ -16,6 +16,7 @@
     "dev": "vite dev",
     "watch": "vite build -w",
     "test": "npm run build:lib && npm run build && node --test tests/*.test.mjs",
+    "test:fast": "node scripts/test-fast.mjs",
     "test:leak": "node benchmarks/leak.mjs",
     "benchmark": "node benchmarks/compare.mjs",
     "model:inspect": "npm run build:lib && node scripts/inspect-model.mjs",

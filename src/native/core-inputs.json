@@ -1,0 +1,12 @@
+[
+  "src/finalRgbShader.ts",
+  "src/gpuTypes.ts",
+  "src/graphOptimizer.ts",
+  "src/hdrTransfer.ts",
+  "src/modelSpec.ts",
+  "src/nativeUNetCore.ts",
+  "src/resourceTracker.ts",
+  "src/sanitize.ts",
+  "src/tileScheduler.ts",
+  "src/tza.ts"
+]

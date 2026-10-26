@@ -28,6 +28,7 @@ Run from the repository root.
 
 ```bash
 npm ci
+npm run test:fast -- tests/tilePlanner.test.mjs              # local iteration; checks build cache, selects test files
 npm test                                                    # builds lib/ + dist/, runs unit tests; no GPU
 cargo test --manifest-path native/Cargo.toml                # native unit tests; no GPU
 cargo test --manifest-path native/Cargo.toml -- --ignored   # native GPU tests
@@ -36,9 +37,11 @@ npm run native:build                                        # C package in .nati
 
 Benchmarks and GPU checks: [docs/development.md#benchmarks-and-gpu-checks](docs/development.md#benchmarks-and-gpu-checks).
 
+Use `npm run test:fast -- <related test files>` during iteration; it builds only the imported artifacts. Omit filenames to run all JS tests. For native iteration, select `--lib` and/or `--test <name>` to avoid rebuilding unrelated examples and benchmarks. Follow the [validation scope](docs/development.md#validation-scope) for final checks; run each required complete suite once after the relevant changes settle.
+
 ## Rules
 
-1. **Shared core affects native.** `src/tza.ts`, `modelSpec.ts`, `graphOptimizer.ts`, `nativeUNetCore.ts`, `finalRgbShader.ts`, `gpuTypes.ts`, `hdrTransfer.ts`, `sanitize.ts`, `tileScheduler.ts`, `resourceTracker.ts` and `src/native/*` are compiled into the native library. After editing them, run both `npm test` and the native unit tests.
+1. **Shared core affects native.** The shared sources in `src/native/core-inputs.json` and `src/native/*` affect the native library. Keep the input list in sync when shared imports change; `tests/buildInputs.test.mjs` checks it against the core entry's transitive imports. Run both JS and native unit tests for shared implementation changes. Native-only profile/input-list changes need the dependency check and native tests.
 2. **Keep shared code scriptc-compatible.** No DOM or browser globals; GPU access only through the `OIDNGPU*` types in `src/gpuTypes.ts`. Async GPU code goes in browser-only files (`src/nativeUNet.ts`, `src/UNet.ts`).
 3. **Wire formats change in pairs.** The config and program formats documented at the top of `src/native/program.ts` are parsed by `native/src/lib.rs`. Change both sides and bump the format version.
 4. **The C header is an ABI.** `native/include/oidn_webgpu.h` must match `native/src/capi.rs`: function signatures, struct layout and enum values. Follow the header's versioning (`OIDNW_API_VERSION` and `oidnw_api_version()`): a minor bump may only add; removals and layout changes need a major bump. `native/tests/abi.c` checks defaults and error reporting.
@@ -57,7 +60,9 @@ Benchmarks and GPU checks: [docs/development.md#benchmarks-and-gpu-checks](docs/
 
 ## Before you finish
 
-- [ ] `npm test` passes.
-- [ ] Native unit tests pass if you touched the shared core or `native/`.
+- [ ] Checks for the changed scope pass; see [validation scope](docs/development.md#validation-scope). Documentation-only changes need no builds or tests.
+- [ ] Run `npm test` once for JS/TypeScript implementation or JS build/test tooling changes. Browser-only changes need no native checks.
+- [ ] Run native unit tests once for shared implementation, native Rust or native build dependency changes. Rust-only changes need no npm checks.
+- [ ] Build affected examples, ABI consumers or packages only when those surfaces change; ordinary runtime edits need no release package or publication dry run.
 - [ ] Docs and `CHANGELOG.md` reflect user-visible changes.
 - [ ] Your summary says what was and was not verified on a GPU.
