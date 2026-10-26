@@ -1,12 +1,8 @@
 # Changelog
 
-All notable changes to the browser package `oidn-webgpu` and the repository tooling are documented in this file. Native library changes (Rust crate and C/C++ packages) are in [native/CHANGELOG.md](native/CHANGELOG.md).
+User-visible changes to the browser library `oidn-webgpu` are documented in this file. Native library changes (Rust crate and C/C++ packages) are in [native/CHANGELOG.md](native/CHANGELOG.md).
 
 ## [Unreleased]
-
-### Changed
-
-- Native publication workflows wait for the public Cargo index and rendered README, and fail if the registry or index crate checksum differs from the release asset.
 
 ## [0.6.0] - 2026-10-25
 
