@@ -74,7 +74,9 @@ with a message directing the maintainer to this workflow.
 3. Configure the `crates-io` GitHub environment and registry authentication below.
 4. Run the workflow for the same source commit and version with `publish` checked.
    It reruns verification, authenticates, publishes the permanent native assets,
-   and invokes `cargo publish` on the assembled crate.
+   and invokes `cargo publish` on the assembled crate. It then waits up to five
+   minutes for the public Cargo index and rendered README, and checks the registry
+   and index checksums against the released `.crate`.
 
 Only `workflow_dispatch` can publish. Pushes, tags and pull requests run checks
 without registry credentials or Release write permissions. The workflow file
@@ -117,3 +119,11 @@ fix authentication and rerun the same source version; the matching assets remain
 Crates.io versions cannot be overwritten. If the upload response is interrupted,
 check crates.io before retrying; an already uploaded version must not be published
 again. A new source change requires a new native version.
+
+If the upload succeeds but the public index or README check fails, rerun only
+the readiness check against the original release assets after registry processing
+recovers:
+
+```shell
+node scripts/native-release-check.mjs .native-build/release-assets
+```

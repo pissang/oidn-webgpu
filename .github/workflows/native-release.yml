@@ -85,3 +85,5 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || env.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked --allow-dirty --manifest-path .native-build/crate-stage/Cargo.toml
+      - name: Verify public Cargo index and README
+        run: node scripts/native-release-check.mjs

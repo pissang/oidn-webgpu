@@ -4,6 +4,10 @@ All notable changes to the browser package `oidn-webgpu` and the repository tool
 
 ## [Unreleased]
 
+### Changed
+
+- Native publication workflows wait for the public Cargo index and rendered README, and fail if the registry or index crate checksum differs from the release asset.
+
 ## [0.6.0] - 2026-10-25
 
 oidn-webgpu 0.6.0 is the first release under the new package name. It adds experimental native Rust and C APIs, sanitizes inputs and outputs like OIDN, and lowers default FP16 latency in Chrome by up to 19% on the measured GPUs. The package name is the only breaking change.
