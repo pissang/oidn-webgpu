@@ -57,8 +57,12 @@ try {
     'oidn_webgpu_gpu.hpp', 'oidn_webgpu_metal.hpp', 'oidn_webgpu_vulkan.hpp', 'oidn_webgpu_dx12.hpp']) {
     assert(existsSync(path.join(include, name)), `missing GPU header ${name}`);
   }
-  for (const name of ['gpu-integration.md', 'gpu_cpp_lifecycle.hpp']) {
+  for (const name of ['gpu-integration.md', 'gpu_cpp_lifecycle.hpp', 'cuda_dx12_gpu.cu']) {
     assert(existsSync(path.join(directory, 'examples', name)), `missing GPU integration file ${name}`);
+  }
+  assert(existsSync(path.join(include, 'oidn_webgpu_cuda.hpp')), 'missing optional CUDA adapter header');
+  for (const name of ['adapter.cpp', 'resources.hpp', 'CMakeLists.txt', 'oidn_webgpu_cudaConfig.cmake']) {
+    assert(existsSync(path.join(directory, 'examples/cuda-adapter', name)), `missing optional CUDA adapter source ${name}`);
   }
   const core = path.join(lib, windows ? 'oidn_webgpu_core.lib' : 'liboidn_webgpu_core.a');
   const shared = path.join(lib, windows ? 'oidn_webgpu.dll' : process.platform === 'darwin' ? 'liboidn_webgpu.dylib' : 'liboidn_webgpu.so');

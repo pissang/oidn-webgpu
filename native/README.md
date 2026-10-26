@@ -442,6 +442,8 @@ cmake --build .native-build/dx12-examples --config Release --target dx12_gpu
 .native-build/dx12-examples/Release/dx12_gpu.exe weights/rt_hdr_alb_nrm_small.tza .native-build/package/examples/shaders 1000 16 0 0 0 0
 ```
 
+CUDA renderers can use the optional [Windows CUDA adapter](examples/gpu-integration.md#windows-cuda-adapter) through `oidn_webgpu_cuda.hpp` and `oidn_webgpu::cuda`. It owns the DX12 bridge and offers separate ordinary-pointer D2D-copy and adapter-allocated shared-image entry points. The guide covers construction, CUDA stream ordering, slot return, deployment and shutdown. CUDA is required only when explicitly building the adapter or its example; the core C ABI is unchanged.
+
 The final arguments are frame count, image edge, tile edge, FP32, reserved zero and shader checks. This command explicitly disables shader checks and enables the host/library debug layers. GPU validation can be enabled with `WGPU_GPU_BASED_VALIDATION=1` before running. These tests include deliberate delays and are not performance measurements.
 
 ### GPU filter options
@@ -482,6 +484,7 @@ The build host does not guarantee compatibility with older systems; `manifest.js
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `examples/denoise.c`, `examples/plan.c`, `examples/host_buffers.rs` | Complete examples |
 | `examples/metal_gpu.m`, `examples/vulkan_gpu.cpp`, `examples/dx12_gpu.cpp`, `examples/shaders/` | Native GPU C ABI consumers and SPIR-V host shaders |
+| `include/oidn_webgpu_cuda.hpp`, `examples/cuda-adapter/`, `examples/cuda_dx12_gpu.cu` | Optional Windows CUDA/DX12 adapter source, public C++ interface and CUDA consumer |
 | `examples/CMakeLists.txt` | C examples using the packaged CMake targets |
 | `examples/validate_windows.c` | Windows DLL output and latency check |
 | `examples/validate.rs`, `examples/rust-app/Cargo.toml` | Standalone Rust application with a source-pinned dependency |

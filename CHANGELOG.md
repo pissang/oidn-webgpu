@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Optional Windows CUDA/DX12 C++17 adapter with ordinary CUDA device-pointer copies, adapter-owned shared images without bridge copies, CUDA stream dependencies, bounded slots and explicit drain/close. The native package ships its source and CUDA example; CUDA is required only when explicitly enabled. Denoising uses the existing DX12 backend and unchanged C ABI 2.1.0.
 - C++17 GPU wrappers with shared context lifetime, asynchronous submission results, explicit shutdown and native-owner retention, plus an Objective-C++ integration example and `oidn_webgpu::cpp` CMake target.
 - Windows Vulkan and DX12 DLL examples include the common C++ GPU lifecycle, platform helpers and a native resource lifetime owner. The CMake C++ target enables MSVC exception handling.
 - Vulkan instance-extension and device-requirement queries for host device creation. C ABI version is 2.1.0; use matching headers and library.

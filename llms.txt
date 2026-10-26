@@ -12,7 +12,7 @@
 - [README](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/README.md): overview, runtimes, browser quick start, weights table
 - [Browser guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/web.md): options, input formats, `tileExecute` contract, GPU pipelines, tiling, precision, profiling
 - [Native guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/README.md): Rust `Denoiser`, CPU C filter and GPU C platform APIs, standalone Cargo application, image contract, precompiled packages, CMake targets, build configuration
-- [GPU C integration walkthrough](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/examples/gpu-integration.md): Metal, Vulkan and DX12 imports, shared workspace preparation, asynchronous submission, C++17 ownership and Vulkan preflight
+- [GPU C integration walkthrough](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/examples/gpu-integration.md): Metal, Vulkan and DX12 imports, shared workspace preparation, asynchronous submission, C++17 ownership, Vulkan preflight and the optional Windows CUDA/DX12 adapter's ordinary-pointer and shared-image modes
 - [Development guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/development.md): architecture, shared core vs. browser-only code, commands, benchmarks, native Metal profiling, CI
 - [Native release guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/native-release.md): versioned core assets, independently buildable crates, manual publication, Trusted Publishing and retries
 - [AGENTS.md](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/AGENTS.md): repository map and rules for changing the code
@@ -30,6 +30,7 @@
 
 - [native/include/oidn_webgpu_dx12.h](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_dx12.h): independent DX12 device, shared committed buffers and fences
 - [native/include/oidn_webgpu_gpu.hpp](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_gpu.hpp): common C++17 GPU ownership, submission results, shutdown and host lifetime
+- [native/include/oidn_webgpu_cuda.hpp](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_cuda.hpp): optional Windows CUDA/DX12 C++ adapter, CUDA pointer images, shared leases, tasks and stream dependencies
 
 ## Optional
 

@@ -7,6 +7,7 @@ Use this sequence when the renderer already owns its GPU resources. The snippets
 | Metal | [metal_gpu.m](metal_gpu.m) | `MTLDevice`, `MTLBuffer`, `MTLSharedEvent` |
 | Vulkan | [vulkan_gpu.cpp](vulkan_gpu.cpp) | Host instance, device, queue, storage buffers and timeline semaphores |
 | DX12 | [dx12_gpu.cpp](dx12_gpu.cpp) | Host device, shared committed UAV buffers and shared fences; the library creates another device on the same LUID |
+| CUDA / Windows DX12 | [cuda_dx12_gpu.cu](cuda_dx12_gpu.cu) | CUDA pointers and streams; the optional [adapter](#windows-cuda-adapter) owns DX12 bridge resources |
 
 Build commands and backend requirements are in the [native guide](../README.md#gpu-c-api). Use matching headers and a library. Include `oidn_webgpu_metal.h`, `oidn_webgpu_vulkan.h` or `oidn_webgpu_dx12.h` for the chosen backend. Keep an error buffer such as `char error[1024]` and handle every returned status.
 
@@ -220,6 +221,135 @@ Here `native_owner` is a `std::shared_ptr` to a separate owner of the native ins
 Release child wrappers before calling `context.close(timeout_ns)`. A busy or timed-out close leaves ownership intact. Last-owner destruction waits for accepted submissions without a deadline, so it can block. Producers must signal independently of this cleanup. For C submissions made through borrowed `.get()` handles, register every accepted sequence with `context.track(sequence)` and release the raw public children before closing.
 
 After releasing child wrappers, if shutdown needs host recovery, `context.release()` returns an `oidnw::gpu::detached_device` containing the native handle and host-lifetime token. Retain both until safe C API destruction succeeds. `context.close_quiescent()` delegates to the native recovery contract and requires host proof that GPU access has ceased. Default destructor cleanup failure terminates. A custom `device_options::on_cleanup_failure` callback can take the detached context and token instead; the callback must be `noexcept` and keep them alive for host recovery.
+
+## Windows CUDA adapter
+
+[`oidn_webgpu_cuda.hpp`](../include/oidn_webgpu_cuda.hpp) and `oidn_webgpu::cuda` provide an optional C++17 adapter for CUDA renderers. The adapter owns the DX12 devices, shared committed buffers, external-memory mappings, fences, NT handles and Agility SDK factory. Applications supply CUDA streams and image descriptions. Denoising uses the existing DX12 backend and C ABI 2.1.0; there is no CUDA denoising backend. Use matching adapter headers, adapter library and core DLL.
+
+| Entry point | Input/output storage | Bridge image copies |
+| --- | --- | --- |
+| `enqueue_copy(images, stream, input_scale)` | Caller-owned CUDA device allocations | Three GPU input copies and one GPU output copy; no CPU image transfer |
+| `acquire()`, `enqueue_shared(lease, stream, input_scale)`, `release(lease, consumer_stream)` | Adapter-owned shared image set | Zero; CUDA and DX12 access the same allocations |
+
+Both paths use RGBA float32, including FP16 denoising. Native normals use signed [-1, 1] components. This adapter supports Windows CUDA/DX12 only; CUDA/Vulkan is outside its scope.
+
+### Build and deploy
+
+The default native package ships the public header, adapter implementation in `examples/cuda-adapter/`, and [`cuda_dx12_gpu.cu`](cuda_dx12_gpu.cu). It does not build or load CUDA. Enabling the adapter requires 64-bit Windows, CUDA Toolkit 12.5 or newer, and a CUDA-supported NVIDIA driver for that Toolkit. See NVIDIA's [CUDA release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html) for driver requirements and [external resource interoperability](https://docs.nvidia.com/cuda/archive/12.5.0/cuda-c-programming-guide/index.html#direct3d-12-interoperability) for the D3D12 resource contract.
+
+Build a native package first, then run from the repository root in an x64 VS developer PowerShell. Use a CUDA-supported host compiler and install Ninja, or select another CUDA-capable CMake generator.
+
+```powershell
+npm run native:build
+$env:WGPU_DX12_AGILITY_SDK_PATH = 'C:/SDKs/Agility/build/native/bin/x64/'
+$env:WGPU_DX12_AGILITY_SDK_VERSION = '619'
+cmake -S .native-build/package/examples -B .native-build/cuda-examples -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/.native-build/package" `
+  -DOIDNW_BUILD_CUDA_DX12_GPU_EXAMPLE=ON
+cmake --build .native-build/cuda-examples --target cuda_dx12_gpu
+.native-build/cuda-examples/cuda_dx12_gpu.exe weights/rt_hdr_alb_nrm_small.tza 1000 16 0 0 0
+.native-build/cuda-examples/cuda_dx12_gpu.exe weights/rt_hdr_alb_nrm_small.tza 1000 16 0 0 1
+```
+
+The last argument selects shared images (`0`) or ordinary pointers (`1`). Further positional arguments select runtime checks (default `1`), DX12 GPU validation (default `0`) and diagnostic mode (default `0`). Diagnostic mode permits already-completed delays under instrumentation and reports whether pending states were observed; it keeps the same GPU image comparison. The full usage is printed when no model is supplied. The example uses seven content/exposure combinations and three resource sets. Both modes compare with serial shared-image references, so the ordinary-pointer path also checks its pitched copies against the path without bridge copies. Reference storage and CUDA consumption stay on the GPU; only four integer counters reach the CPU.
+
+To build only the adapter, without compiling CUDA kernels, configure `native/cuda` in a source checkout or `examples/cuda-adapter` in an extracted package:
+
+```powershell
+cmake -S .native-build/package/examples/cuda-adapter -B .native-build/cuda-adapter `
+  -DCMAKE_PREFIX_PATH="$PWD/.native-build/package" -DOIDNW_BUILD_CUDA_ADAPTER=ON
+cmake --build .native-build/cuda-adapter --config Release
+cmake --install .native-build/cuda-adapter --config Release --prefix .native-build/package
+```
+
+Consumers of this installation call `find_package(oidn_webgpu_cuda CONFIG REQUIRED)` and link `oidn_webgpu::cuda`. Alternatively, set `OIDNW_BUILD_CUDA_ADAPTER=ON` and use `add_subdirectory` on the shipped adapter source. The target compiles as C++17 with the DLL CRT and links the CUDA runtime/driver and core DLL import library. Compile consumers with matching C++ headers, compiler ABI and CRT. Disabling the option requires neither CUDA nor Agility headers, on Windows or other platforms.
+
+Deploy `oidn_webgpu.dll` beside the application and the CUDA runtime DLL selected by the Toolkit through the application's DLL search path. For FP16, also deploy matching DXC `dxcompiler.dll`/`dxil.dll`; construction rejects device/compiler combinations that do not expose shader-f16. Supply `D3D12Core.dll` from the matching Agility SDK in the configured directory; debug mode also requires its `d3d12SDKLayers.dll`. Adapter creation loads the SDK and initializes both DX12 devices internally. It does not download or redistribute these dependencies. No DX12 initialization code is needed in the application.
+
+### Configuration and context
+
+```cpp
+#include <oidn_webgpu_cuda.hpp>
+namespace bridge = oidnw::cuda;
+
+cudaSetDevice(renderer_device); // Establish the renderer's primary context first.
+bridge::options options;
+options.width = width;
+options.height = height;
+bridge::adapter denoiser(options, tza_bytes, tza_size);
+```
+
+Construction and metadata/view getters throw on failure. Enqueue, acquire, release, completion and shutdown operations return `status`, or an object containing `result`. Check every result. `status` converts to true on success. The adapter matches the current CUDA device to DX12 by the complete GPU LUID and rejects linked-node adapters.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `width`, `height` | `uint32_t` | `0` | Required image dimensions, 1..16384; device and workspace limits also apply |
+| `max_tile_size` | `uint32_t` | `0` | Existing GPU filter tiling option |
+| `slots` | `uint32_t` | `3` | Fixed pool capacity, 1..64 image sets |
+| `fp32` | `bool` | `false` | Force FP32; otherwise require FP16 |
+| `runtime_checks` | `bool` | `true` | Existing backend shader checks |
+| `debug` | `bool` | `true` | Enable the DX12 debug layer on both devices |
+| `gpu_validation` | `bool` | `false` | Enable DX12 GPU validation on both devices; requires `debug` |
+| `agility_sdk_path` | `std::string` | empty | Absolute UTF-8 SDK directory with trailing separator; empty uses `WGPU_DX12_AGILITY_SDK_PATH` |
+| `agility_sdk_version` | `uint32_t` | `0` | Matching SDK version; zero uses `WGPU_DX12_AGILITY_SDK_VERSION` |
+
+- Only the current device's primary CUDA context is supported. Establish it before construction and keep it current for calls. Ordinary operations never switch it. Destructors may temporarily push the retained context and restore the previous context.
+- Supply explicit CUDA streams from that context. Legacy/default and per-thread default stream sentinels are rejected. CUDA Graph capture is detected and rejected.
+- Serialize host calls to an adapter, its tasks and its image leases. Overlapping calls return `busy`; destructors serialize cleanup. Multiple GPU streams are supported within this host-call rule.
+- Device reset, context destruction and unsynchronized writes from other streams are outside the contract. Do not call adapter operations or destructors from CUDA host callbacks.
+
+### Ordinary CUDA pointers
+
+Each `image` contains `data`, `bytes`, `offset`, `row_stride`, `width`, `height` and `pixel_format`. `data` is the allocation base or a pointer within that allocation; `bytes` is the available range from `data`. Offsets and row strides are in bytes, divisible by 16. `row_stride` must cover `width * 16` bytes. The last image row must fit inside `bytes`. The only format is `format::rgba32f`. Output must not overlap any input.
+
+```cpp
+bridge::images images{color_view, albedo_view, normal_view, output_view};
+auto task = denoiser.enqueue_copy(images, renderer_stream, input_scale);
+if (!task.result) {
+  // Keep an accepted task and its allocations for drain, even on an error.
+  handle_error(task);
+} else {
+  consume<<<grid, block, 0, renderer_stream>>>(output_pointer);
+}
+```
+
+Supported pointers refer to same-device, primary-context device allocations with a queryable allocation range, such as `cudaMalloc`/`cuMemAlloc`. Managed, host, peer and foreign-context memory are rejected. CUDA memory-pool allocations and arbitrary imported allocations are outside this first version's supported pointer contract. There is no CPU fallback or automatic format conversion; convert other renderer formats in a CUDA kernel before enqueue.
+
+The supplied stream must already contain input preparation. The adapter queues pitched D2D copies into shared buffers, a producer-ready signal, DX12 denoising, a CUDA wait and the D2D output copy. On success, later kernels in that stream can read output. Keep caller allocations and the stream valid until task completion; keep output valid until application consumers complete. This path incurs four image copies per execution and is not zero-copy.
+
+### Shared images
+
+```cpp
+auto lease = denoiser.acquire();
+if (!lease.result) handle_backpressure(lease.result);
+auto views = lease.views();
+produce<<<grid, block, 0, renderer_stream>>>(
+    static_cast<char *>(views.color.data) + views.color.offset);
+auto task = denoiser.enqueue_shared(lease, renderer_stream, input_scale);
+if (!task.result) handle_error(task);
+consume<<<grid, block, 0, renderer_stream>>>(
+    static_cast<char *>(views.output.data) + views.output.offset);
+auto returned = denoiser.release(lease, renderer_stream);
+```
+
+Check `returned` before dropping the lease. Fill albedo and normal too when required by the model. One acquisition permits one enqueue. Views have fixed dimensions, packed RGBA32F rows and offset 256. Each image has its own committed DEFAULT, SHARED, ROW_MAJOR UAV buffer, created in COMMON. CUDA imports use `D3D12Resource`, the dedicated flag and the DX12 allocation size; the mapped range and view length use the logical buffer size. The library independently imports the same resource. CUDA does not change DX12 resource state; the DX12 backend returns resources to COMMON. Fences order access and do not transition states.
+
+The move-only lease retains the allocation owner. Copies of its views and bare device pointers do not. Images from another adapter are rejected, even on the same CUDA device. Shared allocation/import failure is an error; this entry point never falls back to D2D copies.
+
+For a consumer in another stream, call `task.depend(consumer_stream)` before queueing its kernels, then `release(lease, consumer_stream)` after the last consumer. Release records retirement after those kernels and invalidates the lease. A slot is reusable only after retirement and task-handle release. A completed denoising task alone does not permit shared-slot reuse. An unreleased lease's destructor synchronizes the retained CUDA context to cover unknown consumers; explicit stream release avoids that shutdown wait. Stop submitting work that uses its pointers before either form of release.
+
+### Completion, backpressure and shutdown
+
+Tasks and image leases are move-only. Tasks expose `accepted()`, `sequence()`, `phase()`, `query(completed)`, `wait(timeout_ns)` and `depend(stream)`. Completion covers the ordinary-pointer output copy. `depend` inserts a CUDA event dependency without a CPU wait. Task phases distinguish `not_accepted`, `accepted`, `accepted_error` and `completed`; `result` retains any enqueue error after completion. `query` can return an error together with `completed=true` for a finished failed task; inspect both outputs.
+
+- Invalid inputs and pool exhaustion return an unaccepted object. `busy` means the caller should retire earlier work and retry; the pool never grows. Keep task handles only as long as needed, because they pin their slot and completion event.
+- An accepted task can have sequence zero if CUDA bridge work was queued before DX12 rejected the submission. A nonzero sequence always remains tracked, including accepted DLL errors. Keep the task, stream and caller allocations for drain. For a failed shared task, wait until `query` confirms completion before returning its lease; release returns `busy` while its work remains pending and preserves ownership on uncertain completion. Subsequent enqueues stop after a bridge/backend failure.
+- CUDA waits are issued only after the corresponding successful DX12 submission has issued its signal. Failed submissions do not place a wait for an unissued signal in the application stream. An error result does not authorize consuming output.
+- Each slot has separate producer-ready and denoise-done fences. Each fence has one signal producer and increasing values. Events protect CUDA consumer retirement; fence values are never reused for another outstanding ownership cycle.
+- `drain(timeout_ns)` waits for accepted work and recorded retirement. It returns `busy` for held shared leases. `close(timeout_ns)` additionally requires released task handles and closes the core context. Nanosecond timeout zero queries once; `UINT64_MAX` waits indefinitely. Timeout or busy preserves all resources, so release/drain and retry close. Successful close is idempotent.
+- Adapter, task and lease owners retain their common context. Destroying the outer adapter does not invalidate surviving children. Last-owner cleanup drains accepted work and can block. Failed cleanup terminates instead of freeing resources whose GPU use is uncertain. Real device-loss recovery is not implemented.
+
+Pool memory includes four shared image allocations per slot, CUDA mappings/events, per-slot fences, backend weights and the prepared tiled workspace. Allocation size can exceed logical image size because of DX12 heap alignment. Ordinary mode also needs the caller's input/output allocations. `stats()` reports shared allocation bytes and bridge copy bytes/enqueues; it excludes model/workspace memory and application copies. `info()` reports the loaded core DLL path, C ABI version, SDK version and compiler. No performance or long-term memory-stability conclusion follows from these counters.
 
 ## Vulkan preflight
 
