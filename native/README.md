@@ -381,7 +381,7 @@ Initialize the output to `{0}`. Information is immutable after prepare, so queri
 | `max_pending_submissions` | u32 | `64` | 1..=4096 |
 
 - A shared queue needs a command-buffer capacity of at least 4096. Lock callbacks run on the calling thread, must not reenter the library or unwind, and `user_data` must stay valid until the context is destroyed.
-- FP16, subgroups and experimental cooperative matrices are enabled when supported. Cooperative-matrix kernels have been exercised on Apple M4 Max Metal and NVIDIA RTX 4060 Laptop Vulkan; other hardware is unverified. For problems, set the platform's `NO_COOPERATIVE_MATRIX` flag or select `kernel = OIDNW_KERNEL_IMPLICIT_GEMM`. Matrix flags and GPU filter kernel/quality options are experimental and outside semver guarantees. FAST quality requires explicit selection.
+- FP16, subgroups and experimental cooperative matrices are enabled when supported. Metal cooperative matrices have been verified on Apple M4 Max through the Rust API, CPU filter and GPU C API. On NVIDIA RTX 4060 Laptop Vulkan, cooperative matrices have been verified through the Rust API and CPU filter; the GPU C API has only been verified with implicit GEMM, and its Vulkan cooperative-matrix path remains unverified. Other hardware is unverified. For problems, set the platform's `NO_COOPERATIVE_MATRIX` flag or select `kernel = OIDNW_KERNEL_IMPLICIT_GEMM`. Matrix flags and GPU filter kernel/quality options are experimental and outside semver guarantees. FAST quality requires explicit selection.
 
 Build and run both Metal hosts:
 
@@ -602,8 +602,8 @@ To use a package's core from Rust, pin the Cargo `rev` to `source.commit` and se
 
 | Platform | GPU | Checked |
 | --- | --- | --- |
-| macOS | Apple silicon | Metal: Rust API, CPU filter, GPU C API |
-| Windows | NVIDIA RTX 4060 Laptop | Vulkan cooperative matrices and DX12 implicit GEMM: Rust API, CPU filter, GPU C API |
+| macOS | Apple M4 Max | Metal cooperative matrices: Rust API, CPU filter and GPU C API |
+| Windows | NVIDIA RTX 4060 Laptop | Vulkan: cooperative matrices in the Rust API and CPU filter; GPU C API verified only with implicit GEMM, cooperative matrices unverified. DX12: implicit GEMM in the Rust API, CPU filter and GPU C API |
 | Linux | — | Builds only; GPU execution not verified |
 
 The Windows CI package at source `572efc0` was exercised on an RTX 4060 Laptop with NVIDIA 617.42. Vulkan output with and without runtime checks matched byte-for-byte for Small/Base/Large at 720p, 1080p, 1440p, partial workgroups and 128-pixel tiles, and real 1024x1024 HDR images matched official OIDN 2.5.1 CUDA numerically with the same weights. DX12 implicit GEMM passed with runtime checks disabled; DX12 with runtime checks is not validated.
