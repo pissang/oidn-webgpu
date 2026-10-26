@@ -184,7 +184,8 @@ file(GENERATE OUTPUT "\${CMAKE_BINARY_DIR}/executables-$<CONFIG>.txt"
   ));
   copyFileSync(path.join(directory, 'examples/validate.rs'), path.join(work, 'validate.rs'));
   copyFileSync(path.join(root, 'native/Cargo.lock'), path.join(consumer, 'Cargo.lock'));
-  const modelOutput = execFileSync('cargo', ['run', '--offline', '--release', '--target', context.target, '--target-dir', context.cargo_target_directory, '--manifest-path', path.join(consumer, 'Cargo.toml'), '--', '--inspect-model', weights], {
+  const consumerTarget = path.join(root, '.native-build/package-check-target');
+  const modelOutput = execFileSync('cargo', ['run', '--offline', '--release', '--target', context.target, '--target-dir', consumerTarget, '--manifest-path', path.join(consumer, 'Cargo.toml'), '--', '--inspect-model', weights], {
     cwd: work, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'],
     env: { ...process.env, OIDN_WEBGPU_CORE_ARCHIVE: core, OIDN_WEBGPU_NODE: path.join(work, 'node-must-not-be-invoked') }
   });
