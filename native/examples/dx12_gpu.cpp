@@ -2,7 +2,8 @@
 // Images stay in shared committed UAV buffers; the CPU maps integer flags only.
 #define NOMINMAX
 #define INITGUID
-#include "oidn_webgpu_dx12.h"
+#include "oidn_webgpu_dx12.hpp"
+#include "gpu_cpp_lifecycle.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -178,6 +179,69 @@ static oidnw_gpu_images images(const std::array<Buffer, 4> &group) {
           {group[2].imported, 256},
           {group[3].imported, 256}};
 }
+struct CppHost {
+  oidnw_gpu_dx12_device_desc desc;
+  ComPtr<ID3D12Device> host;
+  ComPtr<ID3D12CommandQueue> producer, consumer;
+  std::array<Buffer, 4> buffers;
+  ComPtr<ID3D12Fence> ready, done, gate, verified;
+  Kernels &kernels;
+  Buffer reference, flags, readback;
+  uint32_t size;
+  std::vector<Batch> batches;
+  CppHost(oidnw_gpu_dx12_device_desc description, ID3D12Device *device,
+          ID3D12CommandQueue *p, ID3D12CommandQueue *c, Kernels &k,
+          const Buffer &r, const Buffer &f, const Buffer &read, uint32_t edge)
+      : desc(description), host(device), producer(p), consumer(c), kernels(k),
+        reference(r), flags(f), readback(read), size(edge) {
+    for (auto &b : buffers) b = buffer(host.Get(), 256 + uint64_t(size) * size * 16,
+                                      true, false, nullptr);
+    for (auto fence : {&ready, &done, &gate, &verified})
+      hr(host->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(fence)));
+  }
+  oidnw::gpu::device context(oidnw::gpu::device_options options) {
+    return oidnw::dx12::create_device(desc, std::move(options));
+  }
+  oidnw::gpu::buffer image(const oidnw::gpu::device &context, unsigned i) {
+    return oidnw::dx12::import_buffer(context, buffers[i].raw.Get());
+  }
+  oidnw::gpu::sync sync(const oidnw::gpu::device &context, bool output) {
+    return oidnw::dx12::import_sync(context, output ? done.Get() : ready.Get());
+  }
+  void start() {
+    batches.push_back(kernels.batch(host.Get(), 0,
+        {buffers[0].raw.Get(), buffers[1].raw.Get(), buffers[2].raw.Get()}, {size, 2, 0, 0}));
+    hr(producer->Wait(gate.Get(), 1));
+    submit(producer.Get(), batches.back());
+    hr(producer->Signal(ready.Get(), 1));
+  }
+  void unblock() { hr(gate->Signal(1)); }
+  void verify() {
+    batches.push_back(kernels.batch(host.Get(), 1,
+        {buffers[3].raw.Get(), reference.raw.Get(), flags.raw.Get()}, {size, 2, 0, 0}));
+    hr(consumer->Wait(done.Get(), 1));
+    submit(consumer.Get(), batches.back());
+    Batch copy;
+    hr(host->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copy.allocator)));
+    hr(host->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copy.allocator.Get(), nullptr,
+                               IID_PPV_ARGS(&copy.list)));
+    auto bytes = size_t(size) * size * 16;
+    copy.list->CopyBufferRegion(readback.raw.Get(), 0, flags.raw.Get(), 0, bytes);
+    hr(copy.list->Close());
+    batches.push_back(copy);
+    submit(consumer.Get(), copy);
+    hr(consumer->Signal(verified.Get(), 1));
+    wait(verified.Get(), 1);
+    void *mapped;
+    D3D12_RANGE range{0, bytes};
+    hr(readback.raw->Map(0, &range, &mapped));
+    auto words = static_cast<const uint32_t *>(mapped);
+    bool valid = std::all_of(words, words + bytes / 4, [](uint32_t word) { return word == 0; });
+    D3D12_RANGE empty{};
+    readback.raw->Unmap(0, &empty);
+    cpp_lifecycle::ensure(valid, "C++ DX12 output mismatch");
+  }
+};
 int main(int argc, char **argv) {
   if (argc < 3) {
     std::cerr << "usage: dx12_gpu WEIGHTS SHADER_DIR [frames=1000] [size=16] [tile=0] [fp32=0] "
@@ -366,6 +430,11 @@ int main(int argc, char **argv) {
       if (value(done.Get()) < pattern + 1)
         throw std::runtime_error("wait missed external signal");
     }
+    if (!gpu_validation)
+      cpp_lifecycle::run([&] {
+        return std::make_shared<CppHost>(desc, host.Get(), producer.Get(), consumer.Get(),
+                                        kernels, references[2], flags, readback, size);
+      }, weights.data(), weights.size(), size, tile, checks);
     oidnw_gpu_submit_desc bad;
     oidnw_gpu_submit_desc_default(&bad);
     bad.images = initial;
@@ -498,7 +567,8 @@ int main(int argc, char **argv) {
     std::replace(dll, dll + strlen(dll), '\\', '/');
     std::cout << "{\"backend\":\"DX12\",\"formal_c_api\":true,\"route\":\"independent-device-"
                  "shared-memory\",\"dll\":\""
-              << dll << "\",\"frames\":" << frames << ",\"size\":" << size << ",\"tile\":" << tile
+              << dll << "\",\"cpp_lifecycle\":" << (gpu_validation ? "false" : "true")
+              << ",\"frames\":" << frames << ",\"size\":" << size << ",\"tile\":" << tile
               << ",\"precision\":\"" << ((enabled & 1) ? "fp16" : "fp32")
               << "\",\"runtime_checks\":" << (checks ? "true" : "false")
               << ",\"debug_layer\":" << (debug ? "true" : "false")

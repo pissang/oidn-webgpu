@@ -174,6 +174,12 @@ pub unsafe extern "C" fn oidnw_gpu_vulkan_requirements_get(
 ) -> i32 {
     unsafe {
         guard(error, capacity, || {
+            if !create_info.is_null() && create_info.is_aligned() {
+                create_info.write(std::mem::zeroed());
+            }
+            if !enabled_features.is_null() && enabled_features.is_aligned() {
+                enabled_features.write(0);
+            }
             check_pointer(create_info, "device create info output")?;
             let requirements = required(requirements, "requirements")?;
             if !enabled_features.is_null() {

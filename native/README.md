@@ -227,7 +227,7 @@ target_link_libraries(my_app PRIVATE oidn_webgpu::oidn_webgpu)
 | Target | Links |
 | --- | --- |
 | `oidn_webgpu::oidn_webgpu` | C shared library and public headers |
-| `oidn_webgpu::cpp` | C shared library, C++ wrappers and C++17 compiler requirement |
+| `oidn_webgpu::cpp` | C shared library, C++ wrappers, C++17 compiler requirement and MSVC exception handling |
 | `oidn_webgpu::oidn_webgpu_core` | Planner-only static library, public headers and required system libraries |
 
 The package can be moved without regenerating its CMake files. An optional version in `find_package` uses the native crate version; compatible patch versions share the same major and minor numbers. The headers and libraries must match the application's target OS and CPU architecture.

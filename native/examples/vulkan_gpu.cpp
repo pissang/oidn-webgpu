@@ -4,6 +4,7 @@
 #define VK_NO_PROTOTYPES
 #define NOMINMAX
 #include "oidn_webgpu_vulkan.hpp"
+#include "gpu_cpp_lifecycle.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -308,6 +309,66 @@ static oidnw_gpu_images images(const std::array<Buffer, 4> &buffers) {
           {buffers[2].imported, 256},
           {buffers[3].imported, 256}};
 }
+struct CppHost {
+  oidnw_gpu_vulkan_device_desc desc;
+  std::mutex mutex;
+  std::array<Buffer, 4> buffers;
+  VkSemaphore ready = semaphore(), done = semaphore(), gate = semaphore(), verified = semaphore();
+  Kernels &kernels;
+  Buffer &reference, &flags;
+  uint32_t size;
+  std::vector<Batch> batches;
+  CppHost(oidnw_gpu_vulkan_device_desc description, Kernels &k, Buffer &r, Buffer &f,
+          uint32_t edge) : desc(description), kernels(k), reference(r), flags(f), size(edge) {
+    desc.queue = queues[1];
+    desc.queue_index = 1;
+    desc.user_data = this;
+    desc.lock = [](void *p) noexcept { static_cast<CppHost *>(p)->mutex.lock(); };
+    desc.unlock = [](void *p) noexcept { static_cast<CppHost *>(p)->mutex.unlock(); };
+    for (auto &b : buffers) b = buffer(256 + uint64_t(size) * size * 16, false, nullptr);
+  }
+  oidnw::gpu::device context(oidnw::gpu::device_options options) {
+    return oidnw::vulkan::import_device(desc, std::move(options));
+  }
+  oidnw::gpu::buffer image(const oidnw::gpu::device &context, unsigned i) {
+    VkBufferCreateInfo create{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    create.size = buffers[i].size;
+    create.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    return oidnw::vulkan::import_buffer(context, buffers[i].raw, create);
+  }
+  oidnw::gpu::sync sync(const oidnw::gpu::device &context, bool output) {
+    VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo create{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    create.pNext = &type;
+    return oidnw::vulkan::import_sync(context, output ? done : ready, create);
+  }
+  void start() {
+    batches.push_back(kernels.batch(false, {&buffers[0], &buffers[1], &buffers[2]}, size, 2, 0));
+    submit(queues[0], batches.back().command, {{gate, 1}}, {ready, 1});
+  }
+  void unblock() { signal(gate); }
+  void verify() {
+    batches.push_back(kernels.batch(true, {&buffers[3], &reference, &flags}, size, 2, 0));
+    submit(queues[2], batches.back().command, {{done, 1}}, {verified, 1});
+    wait(verified, 1);
+    void *mapped;
+    vkcheck(vkMapMemory(device, flags.memory, 0, flags.size, 0, &mapped));
+    auto words = static_cast<const uint32_t *>(mapped);
+    bool valid = std::all_of(words, words + uint64_t(size) * size * 4,
+                             [](uint32_t word) { return word == 0; });
+    vkUnmapMemory(device, flags.memory);
+    cpp_lifecycle::ensure(valid, "C++ Vulkan output mismatch");
+  }
+  ~CppHost() {
+    for (auto b : batches) release(b);
+    for (auto b : buffers) {
+      vkDestroyBuffer(device, b.raw, nullptr);
+      vkFreeMemory(device, b.memory, nullptr);
+    }
+    for (auto s : {ready, done, gate, verified}) vkDestroySemaphore(device, s, nullptr);
+  }
+};
 int main(int argc, char **argv) {
   if (argc < 3) {
     std::cerr << "usage: vulkan_gpu WEIGHTS SHADER_DIR [frames=1000] [size=16] [tile=0] [fp32=0] "
@@ -337,6 +398,29 @@ int main(int argc, char **argv) {
     LOAD_GLOBAL(EnumerateInstanceExtensionProperties)
 #undef LOAD_GLOBAL
     uint32_t count = 0;
+    size_t extension_slots = 0;
+    API(oidnw_gpu_vulkan_instance_extensions(gipa, VK_API_VERSION_1_3, nullptr,
+                                            &extension_slots, ERR));
+    if (extension_slots) {
+      const char *sentinel = "unchanged";
+      std::vector<const char *> short_names(extension_slots, sentinel);
+      auto capacity = extension_slots - 1;
+      auto status = oidnw_gpu_vulkan_instance_extensions(gipa, VK_API_VERSION_1_3,
+                                                        short_names.data(), &capacity, ERR);
+      cpp_lifecycle::ensure(status == OIDNW_ERROR_INVALID_ARGUMENT && capacity == extension_slots &&
+          std::all_of(short_names.begin(), short_names.end(),
+                      [&](const char *p) { return p == sentinel; }), "short extension query wrote names");
+    }
+    size_t invalid_count = 99;
+    cpp_lifecycle::ensure(oidnw_gpu_vulkan_instance_extensions(nullptr, VK_API_VERSION_1_3,
+        nullptr, &invalid_count, ERR) == OIDNW_ERROR_INVALID_ARGUMENT && invalid_count == 0,
+        "invalid extension query did not clear count");
+    cpp_lifecycle::ensure(oidnw_gpu_vulkan_instance_extensions(gipa, VK_API_VERSION_1_3,
+        nullptr, nullptr, ERR) == OIDNW_ERROR_INVALID_ARGUMENT, "NULL count accepted");
+    invalid_count = 99;
+    cpp_lifecycle::ensure(oidnw_gpu_vulkan_instance_extensions(gipa, VK_API_VERSION_1_1,
+        nullptr, &invalid_count, ERR) == OIDNW_ERROR_INVALID_ARGUMENT && invalid_count == 0,
+        "old Vulkan version accepted");
     auto extensions = oidnw::vulkan::instance_extensions(gipa, VK_API_VERSION_1_3);
     if (std::none_of(extensions.begin(), extensions.end(), [](const char *name) {
           return !strcmp(name, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -394,7 +478,37 @@ int main(int argc, char **argv) {
     query.physical_device = physical;
     query.instance_create_info = &instance_create;
     auto requirements = oidnw::vulkan::query_requirements(query);
-    auto device_create = oidnw::vulkan::device_create_info(requirements);
+    uint32_t required_features = 0;
+    auto before_move = oidnw::vulkan::device_create_info(requirements, &required_features);
+    auto moved_requirements = std::move(requirements);
+    auto device_create = oidnw::vulkan::device_create_info(moved_requirements);
+    cpp_lifecycle::ensure(!requirements && before_move.pNext == device_create.pNext &&
+        before_move.pEnabledFeatures == device_create.pEnabledFeatures &&
+        before_move.ppEnabledExtensionNames == device_create.ppEnabledExtensionNames,
+        "requirements move changed borrowed pointers");
+    requirements = std::move(moved_requirements);
+    VkDeviceCreateInfo failed = device_create;
+    uint32_t failed_features = 99;
+    cpp_lifecycle::ensure(oidnw_gpu_vulkan_requirements_get(nullptr, &failed, &failed_features, ERR) ==
+        OIDNW_ERROR_INVALID_ARGUMENT && !failed.pNext && !failed.pEnabledFeatures &&
+        !failed.ppEnabledExtensionNames && !failed.enabledExtensionCount && !failed_features,
+        "failed requirements get retained outputs");
+    failed_features = 99;
+    cpp_lifecycle::ensure(oidnw_gpu_vulkan_requirements_get(requirements.get(), nullptr,
+        &failed_features, ERR) == OIDNW_ERROR_INVALID_ARGUMENT && !failed_features,
+        "NULL declaration accepted or feature output retained");
+    oidnw_gpu_vulkan_requirements *invalid_requirements = nullptr;
+    auto invalid_query = query;
+    invalid_query.flags = 4;
+    cpp_lifecycle::ensure(oidnw_gpu_vulkan_requirements_create(&invalid_query,
+        &invalid_requirements, ERR) == OIDNW_ERROR_INVALID_ARGUMENT && !invalid_requirements,
+        "invalid requirements flags accepted");
+    cpp_lifecycle::ensure(oidnw_gpu_vulkan_requirements_create(&query, nullptr, ERR) ==
+        OIDNW_ERROR_INVALID_ARGUMENT, "NULL requirements output accepted");
+    cpp_lifecycle::ensure(oidnw_gpu_vulkan_requirements_create(nullptr,
+        &invalid_requirements, ERR) == OIDNW_ERROR_INVALID_ARGUMENT && !invalid_requirements,
+        "NULL requirements description accepted");
+    oidnw_gpu_vulkan_requirements_destroy(nullptr);
     float priorities[] = {1, 1, 1};
     VkDeviceQueueCreateInfo queue_create{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     queue_create.queueFamilyIndex = family;
@@ -431,6 +545,8 @@ int main(int argc, char **argv) {
     API(oidnw_gpu_device_info(library, nullptr, 0, &backend, &enabled));
     if (backend != OIDNW_BACKEND_VULKAN)
       throw std::runtime_error("wrong backend");
+    cpp_lifecycle::ensure(enabled == required_features && (!fp32 || !(enabled & OIDNW_FEATURE_SHADER_F16)),
+                          "imported features differ from requirements");
     // Real DLL rejection of a missing HAL feature, extension and aggregate chain.
     oidnw_gpu_device *rejected = nullptr;
     auto core = *device_create.pEnabledFeatures;
@@ -455,6 +571,23 @@ int main(int argc, char **argv) {
         rejected)
       throw std::runtime_error("aggregate features accepted");
     device_create.pNext = chain;
+    VkPhysicalDeviceTimelineSemaphoreFeatures duplicate{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+    duplicate.timelineSemaphore = VK_TRUE;
+    duplicate.pNext = const_cast<void *>(chain);
+    device_create.pNext = &duplicate;
+    if (oidnw_gpu_device_import_vulkan(&desc, &rejected, ERR) != OIDNW_ERROR_INVALID_ARGUMENT || rejected)
+      throw std::runtime_error("duplicate feature structs accepted");
+    device_create.pNext = chain;
+    desc.flags |= 4;
+    if (oidnw_gpu_device_import_vulkan(&desc, &rejected, ERR) != OIDNW_ERROR_INVALID_ARGUMENT || rejected)
+      throw std::runtime_error("invalid import flags accepted");
+    desc.flags &= ~4u;
+    auto declared_queue_count = queue_create.queueCount;
+    queue_create.queueCount = 0;
+    if (oidnw_gpu_device_import_vulkan(&desc, &rejected, ERR) != OIDNW_ERROR_INVALID_ARGUMENT || rejected)
+      throw std::runtime_error("inconsistent queue declaration accepted");
+    queue_create.queueCount = declared_queue_count;
     uint64_t bytes = uint64_t(size) * size * 16;
     std::array<std::array<Buffer, 4>, 3> ring;
     std::vector<Buffer *> allocations;
@@ -541,6 +674,10 @@ int main(int argc, char **argv) {
       wait(done, pattern + 1);
       release(producer);
     }
+    if (!gpu_validation)
+      cpp_lifecycle::run([&] {
+        return std::make_shared<CppHost>(desc, kernels, references[2], flags, size);
+      }, weights.data(), weights.size(), size, tile, checks);
     // No synchronization may be accepted for bad parameters or aliased output.
     oidnw_gpu_submit_desc bad;
     oidnw_gpu_submit_desc_default(&bad);
@@ -676,7 +813,8 @@ int main(int argc, char **argv) {
     GetModuleFileNameA(GetModuleHandleA("oidn_webgpu.dll"), dll, MAX_PATH);
     std::replace(dll, dll + strlen(dll), '\\', '/');
     std::cout << "{\"backend\":\"Vulkan\",\"formal_c_api\":true,\"dll\":\"" << dll
-              << "\",\"frames\":" << frames << ",\"size\":" << size << ",\"tile\":" << tile
+              << "\",\"cpp_lifecycle\":" << (gpu_validation ? "false" : "true")
+              << ",\"frames\":" << frames << ",\"size\":" << size << ",\"tile\":" << tile
               << ",\"precision\":\"" << ((enabled & 1) ? "fp16" : "fp32")
               << "\",\"runtime_checks\":" << (checks ? "true" : "false") << ",\"queue\":\""
               << (shared ? "shared" : "dedicated")

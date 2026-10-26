@@ -37,7 +37,9 @@ int32_t oidnw_gpu_vulkan_requirements_create(const oidnw_gpu_vulkan_requirements
  * this owner alive through library import, which reads the original declaration.
  * Host additions require merging extension names and feature bits, without
  * duplicate feature structs; aggregated Vulkan11/12/13 structs remain unsupported.
- * enabled_features is optional and receives OIDNW_FEATURE_* bits. */
+ * enabled_features is optional and receives OIDNW_FEATURE_* bits. On failure,
+ * each non-NULL, aligned output is zeroed, including when another output is
+ * invalid. A NULL create_info is rejected. */
 int32_t oidnw_gpu_vulkan_requirements_get(const oidnw_gpu_vulkan_requirements *requirements,
   VkDeviceCreateInfo *create_info, uint32_t *enabled_features, char *error, size_t capacity);
 void oidnw_gpu_vulkan_requirements_destroy(oidnw_gpu_vulkan_requirements *requirements);

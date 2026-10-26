@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - C++17 GPU wrappers with shared context lifetime, asynchronous submission results, explicit shutdown and native-owner retention, plus an Objective-C++ integration example and `oidn_webgpu::cpp` CMake target.
+- Windows Vulkan and DX12 DLL examples include the common C++ GPU lifecycle, platform helpers and a native resource lifetime owner. The CMake C++ target enables MSVC exception handling.
 - Vulkan instance-extension and device-requirement queries for host device creation. C ABI version is 2.1.0; use matching headers and library.
 - A GPU C integration walkthrough for existing Metal, Vulkan and DX12 renderers, shipped with the native examples.
 - GPU-resident C API for macOS Metal with host device/buffer/event import, asynchronous submission, external-signal completion queries, bounded in-flight work, binding caches and an Objective-C integration example. GPU descriptions use fixed layouts and require explicit initialization; headers and libraries must match exactly.
@@ -15,6 +16,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Vulkan device-requirement queries clear valid declaration and feature outputs on failure.
+- Windows interoperability runs keep each DLL consumer and shader assets in its selected output directory and record C++ header hashes.
 - GPU completion queries keep `completed=0` when rejecting unknown submission sequences, including zero.
 - The Metal C host example rejects a mismatched library version before creating GPU resources.
 

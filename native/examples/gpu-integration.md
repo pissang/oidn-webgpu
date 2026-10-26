@@ -183,6 +183,8 @@ For Vulkan, keep all borrowed native objects and their memory alive until librar
 
 Use C++17 with exceptions enabled (`/EHsc` with MSVC). Include the backend's `.hpp` instead of `.h`. These headers wrap the same C ABI and do not upload or read back image pixels. Build the complete [Metal C++ program](metal_gpu_cpp.mm) with the `metal_gpu_cpp` CMake target; link other C++ hosts to `oidn_webgpu::cpp`.
 
+The Windows `vulkan_gpu` and `dx12_gpu` programs also run the common C++ model/filter/workspace/buffer/sync flow through their platform helpers. Their `gpu_cpp_lifecycle.hpp` helper uses a separate native resource owner and a gated producer for explicit timeout and retry shutdown. GPU-validation mode keeps the existing diagnostic protocol and skips this additional gated lifecycle flow. The CMake target enables C++17 and MSVC exception handling.
+
 Choose a platform entry point, using the C descriptions from step 1:
 
 | Backend | C++ context | Images | Synchronization |
@@ -249,3 +251,5 @@ create_info.pQueueCreateInfos = queue_infos.data();
 Use this declaration for `vkCreateDevice`, then supply it as `import_options.device_create_info` when importing the resulting device/queue. Queue declarations must provide unprotected graphics/compute queues. Keep `requirements`, the instance declaration and host queue declarations alive through import. No logical device or GPU work is created by the queries.
 
 The returned extension array, core features and feature-chain nodes are read-only and owned by `requirements`. The Vulkan import restrictions still apply to any host additions. For additional host requirements, merge extension names and copy/merge feature bits without duplicating feature structures. Aggregated Vulkan 1.1/1.2/1.3 structures are unsupported. The complete [Vulkan host](vulkan_gpu.cpp) uses this preflight sequence.
+
+`oidnw_gpu_vulkan_requirements_get` rejects a NULL declaration output. On failure it zeroes every non-NULL, aligned declaration and feature-bit output; discard previously borrowed pointers when replacing a failed query result.

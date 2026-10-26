@@ -680,17 +680,50 @@ fn vulkan_requirement_outputs_reject_invalid_inputs() {
             OIDNW_ERROR_INVALID_ARGUMENT
         );
         assert_eq!(count, 0);
-        let mut create = std::mem::MaybeUninit::<ash::vk::DeviceCreateInfo>::uninit();
+        let mut create = ash::vk::DeviceCreateInfo::default();
+        create.enabled_extension_count = 99;
+        let mut enabled = 99;
         assert_eq!(
             oidnw_gpu_vulkan_requirements_get(
                 std::ptr::null(),
-                create.as_mut_ptr(),
-                std::ptr::null_mut(),
+                &mut create,
+                &mut enabled,
                 std::ptr::null_mut(),
                 0
             ),
             OIDNW_ERROR_INVALID_ARGUMENT
         );
+        assert_eq!(create.s_type, ash::vk::StructureType::default());
+        assert_eq!(create.enabled_extension_count, 0);
+        assert!(create.p_next.is_null());
+        assert!(create.p_enabled_features.is_null());
+        assert_eq!(enabled, 0);
+        enabled = 99;
+        assert_eq!(
+            oidnw_gpu_vulkan_requirements_get(
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                &mut enabled,
+                std::ptr::null_mut(),
+                0,
+            ),
+            OIDNW_ERROR_INVALID_ARGUMENT
+        );
+        assert_eq!(enabled, 0);
+        let mut bad_output = [0u32; 2];
+        create.enabled_extension_count = 99;
+        assert_eq!(
+            oidnw_gpu_vulkan_requirements_get(
+                std::ptr::null(),
+                &mut create,
+                bad_output.as_mut_ptr().byte_add(1),
+                std::ptr::null_mut(),
+                0,
+            ),
+            OIDNW_ERROR_INVALID_ARGUMENT
+        );
+        assert_eq!(create.enabled_extension_count, 0);
+        assert_eq!(bad_output, [0, 0]);
         oidnw_gpu_vulkan_requirements_destroy(std::ptr::null_mut());
     }
 }

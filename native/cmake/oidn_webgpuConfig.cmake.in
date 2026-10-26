@@ -30,6 +30,7 @@ if(NOT TARGET oidn_webgpu::cpp)
   set_target_properties(oidn_webgpu::cpp PROPERTIES
     INTERFACE_LINK_LIBRARIES oidn_webgpu::oidn_webgpu
     INTERFACE_COMPILE_FEATURES cxx_std_17
+    INTERFACE_COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/EHsc>"
   )
 endif()
 

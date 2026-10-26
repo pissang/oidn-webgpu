@@ -55,6 +55,7 @@ copy(path.join(release, bench), path.join(output, 'bin', bench));
 copy(path.join(root, 'native/examples/denoise.c'), path.join(output, 'examples/denoise.c'));
 copy(path.join(root, 'native/examples/vulkan_gpu.cpp'), path.join(output, 'examples/vulkan_gpu.cpp'));
 copy(path.join(root, 'native/examples/dx12_gpu.cpp'), path.join(output, 'examples/dx12_gpu.cpp'));
+copy(path.join(root, 'native/examples/gpu_cpp_lifecycle.hpp'), path.join(output, 'examples/gpu_cpp_lifecycle.hpp'));
 copy(path.join(root, 'native/examples/metal_gpu.m'), path.join(output, 'examples/metal_gpu.m'));
 copy(path.join(root, 'native/examples/metal_gpu_cpp.mm'), path.join(output, 'examples/metal_gpu_cpp.mm'));
 copy(path.join(root, 'native/examples/gpu-integration.md'), path.join(output, 'examples/gpu-integration.md'));

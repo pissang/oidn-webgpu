@@ -28,7 +28,7 @@ Push-Location $root
 try {
     $output = New-Item -ItemType Directory -Force $OutputDirectory
     $example = "${Backend}_interop"
-    $formalDirectory = New-Item -ItemType Directory -Force '.native-build/interop/capi'
+    $formalDirectory = New-Item -ItemType Directory -Force (Join-Path $output.FullName 'consumer')
     $oracleFeatures = if ($RustOracle -and $Backend -eq 'dx12') { @('--features', 'interop-validation') } else { @() }
     if (!$SkipBuild -and ($Prototype -or $RustOracle)) {
         & cargo +stable-x86_64-pc-windows-msvc build --release --locked --target x86_64-pc-windows-msvc --manifest-path native/Cargo.toml --example $example @oracleFeatures
@@ -102,7 +102,8 @@ try {
                 utc = [DateTime]::UtcNow.ToString('o')
                 drivers = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion)
                 source_commit = (& git rev-parse HEAD)
-                source_files = @(Get-ChildItem native/examples/interop/*.rs, native/examples/interop/*.hlsl, "native/examples/$example.rs", "native/examples/${Backend}_gpu.cpp", native/src/gpu_capi/*.rs, native/include/oidn_webgpu*.h, native/Cargo.lock | Get-FileHash -Algorithm SHA256 | Select-Object Path, Hash)
+                source_dirty = [bool](& git status --porcelain --untracked-files=normal)
+                source_files = @(Get-ChildItem native/examples/interop/*.rs, native/examples/interop/*.hlsl, "native/examples/$example.rs", "native/examples/${Backend}_gpu.cpp", native/examples/gpu_cpp_lifecycle.hpp, native/src/gpu_capi/*.rs, native/include/oidn_webgpu*.h, native/include/oidn_webgpu*.hpp, native/Cargo.lock | Get-FileHash -Algorithm SHA256 | Select-Object Path, Hash)
                 core_archive_sha256 = if ($env:OIDN_WEBGPU_CORE_ARCHIVE) { (Get-FileHash -LiteralPath $env:OIDN_WEBGPU_CORE_ARCHIVE -Algorithm SHA256).Hash } else { $null }
                 validation_environment = @{}; report = $null
             }

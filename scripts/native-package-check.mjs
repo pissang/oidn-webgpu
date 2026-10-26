@@ -53,8 +53,12 @@ try {
   const windows = process.platform === 'win32';
   const lib = path.join(directory, 'lib');
   const include = path.join(directory, 'include');
-  for (const name of ['oidn_webgpu_gpu.h', 'oidn_webgpu_metal.h', 'oidn_webgpu_vulkan.h', 'oidn_webgpu_dx12.h']) {
+  for (const name of ['oidn_webgpu_gpu.h', 'oidn_webgpu_metal.h', 'oidn_webgpu_vulkan.h', 'oidn_webgpu_dx12.h',
+    'oidn_webgpu_gpu.hpp', 'oidn_webgpu_metal.hpp', 'oidn_webgpu_vulkan.hpp', 'oidn_webgpu_dx12.hpp']) {
     assert(existsSync(path.join(include, name)), `missing GPU header ${name}`);
+  }
+  for (const name of ['gpu-integration.md', 'gpu_cpp_lifecycle.hpp']) {
+    assert(existsSync(path.join(directory, 'examples', name)), `missing GPU integration file ${name}`);
   }
   const core = path.join(lib, windows ? 'oidn_webgpu_core.lib' : 'liboidn_webgpu_core.a');
   const shared = path.join(lib, windows ? 'oidn_webgpu.dll' : process.platform === 'darwin' ? 'liboidn_webgpu.dylib' : 'liboidn_webgpu.so');
