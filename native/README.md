@@ -4,6 +4,8 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 **Status:** experimental; APIs and results may change between versions. See [Tested configurations](#tested-configurations). CI builds and checks packages but does not run them on a GPU.
 
+**Availability:** the latest release, Native 0.1.1 (C ABI 1.0.0), contains the Rust API, the CPU C filter and the core planner. The GPU C API, C++17 wrappers and CUDA adapter (C ABI 2.1.0) are not released yet: [build from source](#build-from-source) or use a [CI package](#precompiled-packages) from a commit that contains them. Check `OIDNW_API_VERSION` in your `oidn_webgpu.h`; `0x00020100` or later has the GPU C API.
+
 - [Choose an API](#choose-an-api)
 - [Get the library](#get-the-library)
 - [GPU C API](#gpu-c-api): Metal, Vulkan and DX12 renderers
@@ -21,13 +23,13 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 Use a GPU API whenever your images are already on the GPU. The images stay in your buffers, and denoising is ordered with your render passes by GPU synchronization, so the CPU does not wait.
 
-| Your renderer | Use | Images | Start with |
-| --- | --- | --- | --- |
-| Metal, Vulkan or DX12, in C, C++ or Objective-C | **GPU C API** with the C++17 wrapper | Your GPU buffers | [GPU C API](#gpu-c-api) |
-| CUDA on Windows | **CUDA adapter** (C++17, on top of the DX12 route) | CUDA device pointers | [CUDA on Windows](#cuda-on-windows) |
-| Rust with wgpu `=30.0.1` | **Rust `Denoiser`** | Your `wgpu::Buffer`s, encoded into your command encoder | [Rust API](#rust-api) |
-| Offline tools, tests, any language with C FFI | CPU C filter | CPU arrays; each call uploads, denoises, reads back and blocks | [CPU C filter](#cpu-c-filter) |
-| Your own non-wgpu GPU executor | Core planner | Host-defined | [Core planner](#core-planner) |
+| Your renderer | Use | Images | Available in | Start with |
+| --- | --- | --- | --- | --- |
+| Metal, Vulkan or DX12, in C, C++ or Objective-C | **GPU C API** with the C++17 wrapper | Your GPU buffers | Unreleased (C ABI 2.1.0) | [GPU C API](#gpu-c-api) |
+| CUDA on Windows | **CUDA adapter** (C++17, on top of the DX12 route) | CUDA device pointers | Unreleased (C ABI 2.1.0) | [CUDA on Windows](#cuda-on-windows) |
+| Rust with wgpu `=30.0.1` | **Rust `Denoiser`** | Your `wgpu::Buffer`s, encoded into your command encoder | Native 0.1.0 | [Rust API](#rust-api) |
+| Offline tools, tests, any language with C FFI | CPU C filter | CPU arrays; each call uploads, denoises, reads back and blocks | Native 0.1.0 | [CPU C filter](#cpu-c-filter) |
+| Your own non-wgpu GPU executor | Core planner | Host-defined | Native 0.1.0 | [Core planner](#core-planner) |
 
 All APIs take linear RGBA32F images with the same [image contract](#image-contract). Weights are not bundled: choose a `.tza` file from the [weights table](https://github.com/pissang/oidn-webgpu#choose-weights) and ship it with your application.
 
@@ -51,12 +53,14 @@ add_executable(my_renderer main.cpp)
 target_link_libraries(my_renderer PRIVATE oidn_webgpu::cpp)
 ```
 
-| Target | Links | Use for |
-| --- | --- | --- |
-| `oidn_webgpu::cpp` | Shared library, headers, C++17 and MSVC exception handling | C++ GPU hosts (recommended) |
-| `oidn_webgpu::oidn_webgpu` | Shared library and C headers | C hosts: GPU C API or CPU filter |
-| `oidn_webgpu::oidn_webgpu_core` | Planner-only static library and its system libraries | [Core planner](#core-planner) |
-| `oidn_webgpu::cuda` | Optional CUDA adapter, built separately | [CUDA on Windows](#cuda-on-windows) |
+| Target | Links | Use for | Available in |
+| --- | --- | --- | --- |
+| `oidn_webgpu::cpp` | Shared library, headers, C++17 and MSVC exception handling | C++ GPU hosts (recommended) | Unreleased |
+| `oidn_webgpu::oidn_webgpu` | Shared library and C headers | C hosts: GPU C API or CPU filter | Native 0.1.1 |
+| `oidn_webgpu::oidn_webgpu_core` | Planner-only static library and its system libraries | [Core planner](#core-planner) | Native 0.1.1 |
+| `oidn_webgpu::cuda` | Optional CUDA adapter, built separately | [CUDA on Windows](#cuda-on-windows) | Unreleased |
+
+With a Native 0.1.1 package, link `oidn_webgpu::oidn_webgpu` and set `project(... LANGUAGES C)`.
 
 - The package can be moved without regenerating its CMake files. An optional `find_package` version uses the native crate version; patch versions with the same major and minor are compatible.
 - Headers and libraries must match the application's OS and CPU architecture, and must come from the same release ([Versioning](#versioning)).
@@ -84,6 +88,8 @@ The package is written to `.native-build/package`; pass `-- --output DIR` to cho
 
 ## GPU C API
 
+Unreleased: needs C ABI 2.1.0 headers and library; Native 0.1.1 packages do not contain them. See **Availability** at the [top of this guide](#oidn-webgpu-native).
+
 The GPU C API denoises your renderer's GPU buffers. It never uploads or reads back image pixels. Your render pass signals a timeline value when the inputs are ready, the library waits for it on the GPU, and signals another value when the output is written. Applications use only the C ABI (or the header-only C++17 wrapper); no Rust or wgpu types are involved.
 
 | Platform | How the library gets a device | Header | Complete host |
@@ -96,44 +102,95 @@ Each `.hpp` includes its C header (`oidn_webgpu_metal.h`, `oidn_webgpu_vulkan.h`
 
 ### Example
 
-A Metal renderer in Objective-C++. The steps are the same on Vulkan and DX12; only the import calls differ ([table below](#platform-imports)).
+A C++ Vulkan renderer on Windows or Linux (Linux is not GPU-tested), linked to `oidn_webgpu::cpp`. Metal and DX12 skip steps 1–2 and use the calls in the [import table](#platform-imports) for step 3; [`examples/metal_gpu_cpp.mm`](examples/metal_gpu_cpp.mm) is the complete Metal program.
 
-```objective-c
-#include "oidn_webgpu_metal.hpp"
+The library takes part in instance and device creation: it adds instance extensions and device features, and import checks the original create infos. The snippet assumes:
 
-// Startup: import the device, image buffers and two shared events.
-oidnw_gpu_metal_device_desc desc;
-oidnw_gpu_metal_device_desc_default(&desc);
-desc.device = (__bridge void *)mtlDevice;        // The library creates its own queue.
-auto context = oidnw::metal::import_device(desc);
+| Name | Type | Requirement |
+| --- | --- | --- |
+| `app_info` | `VkApplicationInfo` | `apiVersion` is `VK_API_VERSION_1_2` or newer |
+| `physical_device`, `family` | `VkPhysicalDevice`, `uint32_t` | Your GPU and a queue family with `GRAPHICS` and `COMPUTE` |
+| `my_device_info` | `VkDeviceCreateInfo` | Your declaration: one unprotected queue in `family`, plus your own extensions and features as individual feature structs or `VkPhysicalDeviceFeatures2` |
+| `color_buffer`, `albedo_buffer`, `normal_buffer`, `output_buffer` | `VkBuffer` | Created with `buffer_info` and bound to memory |
+| `buffer_info` | `VkBufferCreateInfo` | `VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`, size at least `width * height * 16`, exclusive to `family` |
+| `ready_semaphore`, `done_semaphore` | `VkSemaphore` | Created with `semaphore_info` |
+| `semaphore_info` | `VkSemaphoreCreateInfo` | `pNext` = `VkSemaphoreTypeCreateInfo` with `VK_SEMAPHORE_TYPE_TIMELINE`, initial value 0 |
+| `tza` | `std::vector<uint8_t>` | Contents of a `.tza` weights file |
+| `width`, `height` | `uint32_t` | Image size, 1..=16384 |
+| `frame` | `uint64_t` | Starts at 1 and increases every frame; used as both semaphore values |
+| `exposure` | `float` | HDR input scale, positive; `1.0f` if unused |
 
-auto color  = oidnw::metal::import_buffer(context, (__bridge void *)colorBuf,  colorBuf.length);
-auto albedo = oidnw::metal::import_buffer(context, (__bridge void *)albedoBuf, albedoBuf.length);
-auto normal = oidnw::metal::import_buffer(context, (__bridge void *)normalBuf, normalBuf.length);
-auto output = oidnw::metal::import_buffer(context, (__bridge void *)outputBuf, outputBuf.length);
-auto ready  = oidnw::metal::import_sync(context, (__bridge void *)readyEvent);  // id<MTLSharedEvent>
-auto done   = oidnw::metal::import_sync(context, (__bridge void *)doneEvent);
+```cpp
+#include <memory>
+#include <vector>
+#include "oidn_webgpu_vulkan.hpp"
+namespace ovk = oidnw::vulkan;
 
+// 1. Instance: enable the library's extensions (append your own to the list).
+std::vector<const char *> extensions = ovk::instance_extensions(vkGetInstanceProcAddr, app_info.apiVersion);
+VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+instance_info.pApplicationInfo = &app_info;
+instance_info.enabledExtensionCount = uint32_t(extensions.size());
+instance_info.ppEnabledExtensionNames = extensions.data();
+VkInstance instance;
+vkCreateInstance(&instance_info, nullptr, &instance);
+
+// 2. Device: merge the library's requirements into your own declaration.
+oidnw_gpu_vulkan_requirements_desc query;
+oidnw_gpu_vulkan_requirements_desc_default(&query);
+query.get_instance_proc_addr = vkGetInstanceProcAddr;
+query.instance = instance;
+query.physical_device = physical_device;
+query.instance_create_info = &instance_info;
+ovk::merged_device_info device_info = ovk::merge_requirements(ovk::query_requirements(query), my_device_info);
+VkDevice device;
+vkCreateDevice(physical_device, &device_info.get(), nullptr, &device);
+VkQueue queue;
+vkGetDeviceQueue(device, family, 0, &queue);
+
+// 3. Import the device, image buffers and timeline semaphores. Keep instance_info,
+//    extensions, device_info and my_device_info's queue array alive until here.
+auto queue_lock = std::make_shared<ovk::queue_lock>();  // Retained by the context.
+auto context = ovk::import_device({vkGetInstanceProcAddr, instance, physical_device, device, queue, family, 0},
+                                 instance_info, device_info.get(), queue_lock);
+
+auto color  = ovk::import_buffer(context, color_buffer,  buffer_info);
+auto albedo = ovk::import_buffer(context, albedo_buffer, buffer_info);
+auto normal = ovk::import_buffer(context, normal_buffer, buffer_info);
+auto output = ovk::import_buffer(context, output_buffer, buffer_info);
+auto ready  = ovk::import_sync(context, ready_semaphore, semaphore_info);
+auto done   = ovk::import_sync(context, done_semaphore,  semaphore_info);
 oidnw_gpu_images images = {{color.get(), 0}, {albedo.get(), 0}, {normal.get(), 0}, {output.get(), 0}};
 
-// Per image size: may compile shaders and block.
+// 4. Per image size: may compile shaders and block.
 auto model     = oidnw::gpu::load_model(tza.data(), tza.size());
 auto filter    = oidnw::gpu::make_filter(context, model);
 auto workspace = oidnw::gpu::prepare(filter, width, height, images);
+uint64_t last_sequence = 0;  // Renderer state: latest accepted submission.
 
-// Per frame: render signals readyEvent = frame; display waits for doneEvent = frame.
+// 5. Per frame. Your render submit signals ready = frame and your display submit
+//    waits for done = frame, both at VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+//    (VkTimelineSemaphoreSubmitInfo). Hold the lock around your own submits:
+//      { std::lock_guard<ovk::queue_lock> guard(*queue_lock); vkQueueSubmit(queue, ...); }
 auto submitted = workspace.submit(images, {ready.get(), frame}, {done.get(), frame}, exposure);
+if (submitted.code == OIDNW_ERROR_QUEUE_FULL && last_sequence) {
+  // Vulkan admits a submission only after earlier external waits resolve.
+  context.wait(last_sequence);
+  submitted = workspace.submit(images, {ready.get(), frame}, {done.get(), frame}, exposure);
+}
+if (submitted.accepted()) last_sequence = submitted.sequence;
 if (!submitted.accepted()) {
-  // Nothing was queued. OIDNW_ERROR_QUEUE_FULL: skip or retry after earlier frames complete.
+  // Rejected, nothing queued: show the noisy frame; do not wait for done = frame.
 } else if (!submitted) {
-  // Accepted but failed: this frame's output is invalid; recreate the context.
+  // Accepted but failed: output is invalid; recreate the context.
 }
 
-// Shutdown: destroy workspace, filter, model and imports first, then:
+// 6. Shutdown: reset workspace, filter, model and imports (for example by leaving
+//    their scope), then close. Destroy your Vulkan objects only after this.
 context.close();   // Waits for accepted work.
 ```
 
-Startup failures throw `oidnw::gpu::error` (with the C status in `code`). Submit, poll, wait and close never throw; check their returned status. Image buffers can be any size that holds the bound range, and a fixed-size workspace accepts different buffers on every submit.
+Startup failures throw `oidnw::gpu::error` (with the C status in `code`). Submit, poll, wait and close never throw; check their returned status. `model`, `filter` and `workspace` can be recreated when the image size changes; the imports and context live as long as the renderer. A fixed-size workspace accepts different imported buffers on every submit.
 
 ### Platform imports
 
@@ -175,7 +232,7 @@ A quarantined context can hold submissions whose outcome is unknown, so normal d
 - Startup order: context, then imports, model, filter, workspace. Models can be released after filter creation, and filters after preparation.
 - Handles may be released while their submissions are in flight; accepted work retains what it needs. A workspace's binding cache can retain an imported buffer until it is evicted or the workspace is destroyed.
 - Shutdown order: release every child handle, wait for accepted sequences, then destroy the context (C++: `close(timeout_ns)`; a busy or timed-out close keeps everything and can be retried). Only then free your native buffers, syncs and device.
-- C++ wrappers are move-only and keep the context alive. The last owner drains accepted work without a deadline and may block. If cleanup fails, the default handler terminates; `device_options::on_cleanup_failure` or `release()` hands you the native context instead. `device_options::host_lifetime` can retain a `std::shared_ptr` that owns your native objects and queue-lock data; keep the C++ device itself outside that owner. If you also submit through raw `.get()` handles with the C API, register each accepted sequence with `context.track(sequence)`.
+- C++ wrappers are move-only and keep the context alive. The last owner drains accepted work without a deadline and may block; a failed cleanup terminates unless you install a handler. Handlers, host-lifetime tokens, `release()` and `track()` are in the [C++17 wrapper walkthrough](examples/gpu-integration.md#c17-wrapper).
 - Different handles on one context may be used from different threads; queue access is serialized. Calls on the same workspace must not overlap, and no handle may be destroyed while another call uses it.
 
 ### Filter options
@@ -219,11 +276,17 @@ The hosts produce inputs with a Metal shader, denoise a 31×31 image and validat
 
 ### Vulkan
 
-Vulkan 1.2 or newer. Create your instance and device with what the library needs:
+Vulkan 1.2 or newer. The library takes part in instance and device creation, as in the [example](#example). The C++ helpers in `oidn_webgpu_vulkan.hpp`:
 
-1. Before `vkCreateInstance`, add the extensions from `oidnw::vulkan::instance_extensions(loader, api_version)`.
-2. After choosing a physical device, call `oidnw::vulkan::query_requirements(desc)` and build your `VkDeviceCreateInfo` from `device_create_info(requirements)`, then add your queues. Keep `requirements` alive until import. The [preflight walkthrough](examples/gpu-integration.md#vulkan-preflight) shows the code.
-3. Import with the original `VkInstanceCreateInfo` and `VkDeviceCreateInfo`; import checks what was enabled.
+| Helper | Does |
+| --- | --- |
+| `instance_extensions(loader, api_version)` | Instance extensions to enable before `vkCreateInstance` |
+| `query_requirements(desc)` | Device extensions and features the library needs, after choosing the physical device |
+| `merge_requirements(requirements, host_info)` | Returns a `merged_device_info` that enables yours and the library's: extensions deduplicated, features OR-ed, `VkPhysicalDeviceFeatures2` converted to `pEnabledFeatures`. Throws `INVALID_ARGUMENT` for declarations import rejects (aggregate `VkPhysicalDeviceVulkan1xFeatures`, other `pNext` structures, duplicates). Owns copies of names and features; borrows your queue and layer arrays. `requirements` may be released afterwards |
+| `queue_lock` | Mutex the library and your code share for the queue; lock it with `std::lock_guard` around your queue calls |
+| `import_device(handles, instance_info, device_info, lock, flags = 0, options = {})` | Fills `oidnw_gpu_vulkan_device_desc` and retains `lock` until the context is destroyed. `query.flags` must equal `flags` |
+
+The C descriptor below is what these helpers fill; use it directly for `max_pending_submissions` or from C.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -232,7 +295,7 @@ Vulkan 1.2 or newer. Create your instance and device with what the library needs
 | `queue_family_index`, `queue_index` | u32 | `0` | An unprotected graphics/compute queue |
 | `instance_create_info`, `device_create_info` | pointers | NULL | Original creation declarations, valid during import |
 | `flags` | bitmask | `0` | `OIDNW_GPU_VULKAN_FP32` disables FP16; `OIDNW_GPU_VULKAN_NO_SUBGROUPS` disables subgroups |
-| `lock`, `unlock`, `user_data` | callbacks, pointer | NULL | Required; all your access to this queue must take the same lock. Release it before calling the library |
+| `lock`, `unlock`, `user_data` | callbacks, pointer | NULL | Required; all your access to this queue must take the same lock (`queue_lock` provides both). Release it before calling the library |
 | `max_pending_submissions` | u32 | `64` | 1..=4096 |
 
 - Import fully bound, non-sparse storage buffers and timeline semaphores with their original creation info. Buffers must belong to the queue family or use concurrent sharing that includes it; you perform any queue-family ownership transfers. Overlapping memory aliases, binary semaphores and aggregated Vulkan 1.1/1.2/1.3 feature structs are unsupported.
@@ -284,7 +347,7 @@ The Windows hosts' arguments after the shader directory are frame count, image e
 
 ## CUDA on Windows
 
-CUDA renderers use the optional C++17 adapter in [`oidn_webgpu_cuda.hpp`](include/oidn_webgpu_cuda.hpp) (CMake target `oidn_webgpu::cuda`). It builds the DX12 bridge for you and orders denoising on your CUDA streams:
+Unreleased, like the GPU C API. CUDA renderers use the optional C++17 adapter in [`oidn_webgpu_cuda.hpp`](include/oidn_webgpu_cuda.hpp) (CMake target `oidn_webgpu::cuda`). It builds the DX12 bridge for you and orders denoising on your CUDA streams:
 
 ```cpp
 #include <oidn_webgpu_cuda.hpp>

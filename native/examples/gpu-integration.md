@@ -1,6 +1,6 @@
 # Integrating the GPU C API
 
-This walkthrough adapts an existing renderer that already owns its GPU device and buffers. It uses the plain C API so every call is visible; C++ hosts should start from the shorter [C++ example](../README.md#example) and the [C++17 wrapper](#c17-wrapper) section, which follow the same steps.
+This walkthrough adapts an existing renderer that already owns its GPU device and buffers. It uses the plain C API so every call is visible; C++ hosts should start from the [C++ Vulkan example](../README.md#example) and the [C++17 wrapper](#c17-wrapper) section, which follow the same steps.
 
 | Backend | Complete program | Native resources |
 | --- | --- | --- |
@@ -139,11 +139,11 @@ oidnw_gpu_images images = {
 };
 ```
 
-Use `{NULL, 0}` for unused auxiliary images. Preparation is outside the frame loop. If dimensions change, prepare another workspace; at fixed dimensions, pass the current frame's imported buffers to each submit. Tiling reduces workspace memory, while full image allocations remain required.
+Use `{NULL, 0}` for unused auxiliary images. Preparation is outside the frame loop. If dimensions change, prepare another workspace; at fixed dimensions, pass the current frame's imported buffers to each submit.
 
 ## 4. Submit each frame
 
-The producer writes inputs and signals its ready value independently of the CPU submit returning. Choose increasing completion values, coordinated with any host signals to the same native object.
+Choose `ready_value` and `done_value` so that each native sync object's values increase across the library's and your own signals. The [frame loop rules](../README.md#frame-loop) cover producer ordering, backpressure and reclamation.
 
 ```c
 oidnw_gpu_timeline_point wait = {ready, ready_value};
@@ -161,11 +161,9 @@ status = oidnw_gpu_submit(prepared, &submit, &sequence,
     error, sizeof error);
 ```
 
-Store both `status` and `sequence`. A nonzero sequence records accepted work even when status is an error. A zero sequence with `QUEUE_FULL` permits retry after earlier work progresses; do not attach a consumer wait to that rejected signal. Other failures are listed in [Errors and recovery](../README.md#errors-and-recovery).
+Keep both `status` and `sequence`; [Errors and recovery](../README.md#errors-and-recovery) lists what each combination means. On success, your consumer waits on `done_value` on the GPU before reading the output. Use the backend's required memory scopes or resource states at both handoffs.
 
-After a successful submit, the host consumer waits on `done_value` before reading output. It does not need a CPU wait. Use the native backend's required memory scopes or resource states at both handoffs. Before reusing an image set, also account for the host consumer's completion.
-
-For CPU reclamation, poll the returned sequence:
+Poll the returned sequence from time to time so completed work is reclaimed:
 
 ```c
 uint32_t completed = 0;
@@ -174,9 +172,17 @@ status = oidnw_gpu_poll(device, sequence, &completed, error, sizeof error);
 
 ## 5. Shut down
 
-Release the public workspace, image wrappers and synchronization wrappers, then drain accepted sequences with `oidnw_gpu_wait` before destroying the library device. Releasing public handles alone does not complete GPU work. On a timeout or uncertain submission, follow [Errors and recovery](../README.md#errors-and-recovery) rather than freeing native allocations.
+```c
+oidnw_gpu_prepared_destroy(prepared);
+oidnw_gpu_buffer_destroy(color);   /* and albedo, normal, output */
+oidnw_gpu_sync_destroy(ready);
+oidnw_gpu_sync_destroy(done);
+uint32_t completed = 0;
+status = oidnw_gpu_wait(device, last_sequence, UINT64_MAX, &completed, error, sizeof error);
+if (status == OIDNW_OK && completed) status = oidnw_gpu_device_destroy(device, error, sizeof error);
+```
 
-For Vulkan, keep all borrowed native objects and their memory alive until library device destruction succeeds. For Metal and DX12, retained library objects do not replace the host consumer's own resource lifetime requirements.
+Free your native buffers, syncs and device only after `oidnw_gpu_device_destroy` succeeds. The order, `BUSY` retries and recovery after errors are in [Lifetime and threads](../README.md#lifetime-and-threads) and [Errors and recovery](../README.md#errors-and-recovery).
 
 ## C++17 wrapper
 
@@ -184,15 +190,7 @@ Use C++17 with exceptions enabled (`/EHsc` with MSVC). Include the backend's `.h
 
 The Windows `vulkan_gpu` and `dx12_gpu` programs also run the common C++ model/filter/workspace/buffer/sync flow through their platform helpers. Their `gpu_cpp_lifecycle.hpp` helper uses a separate native resource owner and a gated producer for explicit timeout and retry shutdown. GPU-validation mode keeps the existing diagnostic protocol and skips this additional gated lifecycle flow. The CMake target enables C++17 and MSVC exception handling.
 
-Choose a platform entry point, using the C descriptions from step 1:
-
-| Backend | C++ context | Images | Synchronization |
-| --- | --- | --- | --- |
-| Metal | `oidnw::metal::import_device(desc)` | `import_buffer(context, native, bytes)` | `import_sync(context, native)` |
-| Vulkan | `oidnw::vulkan::import_device(desc)` | `import_buffer(context, native, create_info)` | `import_sync(context, native, create_info)` |
-| DX12 | `oidnw::dx12::create_device(desc)` | `import_buffer(context, native)` | `import_sync(context, native)` |
-
-The resource functions use the same namespace as the context function. Pass `.get()` from the returned buffer/sync wrappers when building the common C image and timeline-point structures. The common flow then uses the same C++ types on every platform:
+Create the context and imports with the C descriptions from step 1 and the functions in the [platform import table](../README.md#platform-imports). The common flow then uses the same C++ types on every platform:
 
 ```cpp
 auto model = oidnw::gpu::load_model(weights, weights_size);
@@ -204,9 +202,9 @@ auto prepared = oidnw::gpu::prepare(filter, width, height, images);
 auto submitted = prepared.submit(images, wait, signal, input_scale);
 ```
 
-Initialization failures throw `oidnw::gpu::error`, whose `code` is the native status. For multiple waits or signals, pass an `oidnw_gpu_submit_desc` to the same `submit` method. Submission never throws: inspect `submitted.code`, `submitted.sequence`, `submitted.accepted()` and `submitted.message`. A nonzero error status can still have an accepted sequence. `context.poll(sequence)` and `context.wait(sequence, timeout_ns)` return both status and a `completed` boolean. GPU synchronization remains the host's responsibility.
+For multiple waits or signals, pass an `oidnw_gpu_submit_desc` (from `oidnw::gpu::submit_options()`) to the same `submit` method. The returned `submission` has `code`, `message`, `sequence` and `accepted()`; `context.poll(sequence)` and `context.wait(sequence, timeout_ns)` return a `completion` with `code` and `completed`.
 
-The C API's same-handle concurrency rules also apply to these wrappers. All wrappers are move-only. Buffer, sync, filter and workspace wrappers hold the context alive even if its original C++ device owner has been moved or destroyed. Keep native Vulkan objects and queue callback userdata alive as well. An optional second argument to each context factory supplies a lifetime token:
+All wrappers are move-only, and buffer, sync, filter and workspace wrappers keep the context alive even after the C++ device owner is moved or destroyed. An optional second argument to each context factory supplies a lifetime token for your native objects:
 
 ```cpp
 oidnw::gpu::device_options ownership;
@@ -214,9 +212,9 @@ ownership.host_lifetime = native_owner;
 auto context = oidnw::vulkan::import_device(desc, ownership);
 ```
 
-Here `native_owner` is a `std::shared_ptr` to a separate owner of the native instance/device and queue lock. Keep the C++ device and children outside that object.
+Here `native_owner` is a `std::shared_ptr` to a separate owner of the native instance/device and queue lock. Keep the C++ device and children outside that object. The Vulkan `import_device(handles, instance_info, device_info, lock)` overload retains its `queue_lock` the same way, together with any `host_lifetime` you pass.
 
-Release child wrappers before calling `context.close(timeout_ns)`. A busy or timed-out close leaves ownership intact. Last-owner destruction waits for accepted submissions without a deadline, so it can block. Producers must signal independently of this cleanup. For C submissions made through borrowed `.get()` handles, register every accepted sequence with `context.track(sequence)` and release the raw public children before closing.
+Release child wrappers before calling `context.close(timeout_ns)`; a busy or timed-out close leaves ownership intact. Producers must signal independently of cleanup. For C submissions made through borrowed `.get()` handles, register every accepted sequence with `context.track(sequence)` and release the raw public children before closing.
 
 After releasing child wrappers, if shutdown needs host recovery, `context.release()` returns an `oidnw::gpu::detached_device` containing the native handle and host-lifetime token. Retain both until safe C API destruction succeeds. `context.close_quiescent()` delegates to the native recovery contract and requires host proof that GPU access has ceased. Default destructor cleanup failure terminates. A custom `device_options::on_cleanup_failure` callback can take the detached context and token instead; the callback must be `noexcept` and keep them alive for host recovery.
 
@@ -351,33 +349,12 @@ Pool memory includes four shared image allocations per slot, CUDA mappings/event
 
 ## Vulkan preflight
 
-Get the library's instance extensions before `vkCreateInstance`, then merge any extensions the host needs:
+The [C++ Vulkan example](../README.md#example) shows the complete preflight: `instance_extensions` before `vkCreateInstance`, `query_requirements` and `merge_requirements` before `vkCreateDevice`, then import with the same create infos. This section covers what the example leaves out.
 
-```cpp
-auto names = oidnw::vulkan::instance_extensions(
-    host_get_instance_proc_addr, VK_API_VERSION_1_2);
-host_instance_create_info.enabledExtensionCount = uint32_t(names.size());
-host_instance_create_info.ppEnabledExtensionNames = names.data();
-```
+- `query.flags` must equal the later import's `flags` (for example `OIDNW_GPU_VULKAN_FP32`).
+- The queries create no logical device and no GPU work. Keep the instance declaration, the merged device declaration and your queue declarations alive through import.
+- Without your own extensions or features, `device_create_info(requirements)` returns the library's declaration directly. Its extension array, core features and feature-chain nodes are read-only and owned by `requirements`, so keep `requirements` alive through import in that case.
+- From C, merge by hand: combine extension names and feature bits without duplicating feature structures. The [Vulkan import rules](../README.md#vulkan) apply either way.
+- `oidnw_gpu_vulkan_requirements_get` rejects a NULL declaration output. On failure it zeroes every non-NULL, aligned declaration and feature-bit output; discard previously borrowed pointers when replacing a failed query result.
 
-After selecting a physical device, query the logical-device requirements:
-
-```cpp
-oidnw_gpu_vulkan_requirements_desc query;
-oidnw_gpu_vulkan_requirements_desc_default(&query);
-query.flags = import_options.flags;
-query.get_instance_proc_addr = host_get_instance_proc_addr;
-query.instance = host_instance;
-query.physical_device = host_physical_device;
-query.instance_create_info = &host_instance_create_info;
-auto requirements = oidnw::vulkan::query_requirements(query);
-auto create_info = oidnw::vulkan::device_create_info(requirements);
-create_info.queueCreateInfoCount = uint32_t(queue_infos.size());
-create_info.pQueueCreateInfos = queue_infos.data();
-```
-
-Use this declaration for `vkCreateDevice`, then supply it as `import_options.device_create_info` when importing the resulting device/queue. Queue declarations must provide unprotected graphics/compute queues. Keep `requirements`, the instance declaration and host queue declarations alive through import. No logical device or GPU work is created by the queries.
-
-The returned extension array, core features and feature-chain nodes are read-only and owned by `requirements`. The Vulkan import restrictions still apply to any host additions. For additional host requirements, merge extension names and copy/merge feature bits without duplicating feature structures. Aggregated Vulkan 1.1/1.2/1.3 structures are unsupported. The complete [Vulkan host](vulkan_gpu.cpp) uses this preflight sequence.
-
-`oidnw_gpu_vulkan_requirements_get` rejects a NULL declaration output. On failure it zeroes every non-NULL, aligned declaration and feature-bit output; discard previously borrowed pointers when replacing a failed query result.
+The complete [Vulkan host](vulkan_gpu.cpp) also exercises the C entry points `oidnw_gpu_vulkan_instance_extensions` and `oidnw_gpu_vulkan_requirements_create/get`.

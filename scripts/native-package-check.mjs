@@ -90,6 +90,16 @@ try {
   }
   run(executable('gpu-cpp'), []);
   const vulkanInclude = process.env.OIDNW_GPU_INTEROP_VULKAN_INCLUDE;
+  if (vulkanInclude) {
+    const vulkanCppSource = path.join(root, 'native/tests/gpu_cpp_vulkan.cpp');
+    if (windows) {
+      run('cl.exe', ['/nologo', '/std:c++17', '/EHsc', '/O2', '/MD', `/I${include}`, `/I${vulkanInclude}`,
+        vulkanCppSource, `/Fe${executable('gpu-cpp-vulkan')}`]);
+    } else {
+      run('c++', ['-std=c++17', '-O2', '-I', include, '-I', vulkanInclude, vulkanCppSource, '-o', executable('gpu-cpp-vulkan')]);
+    }
+    run(executable('gpu-cpp-vulkan'), []);
+  }
   const dx12Include = process.env.OIDNW_GPU_INTEROP_DX12_INCLUDE;
   if (windows) {
     const exports = execFileSync('dumpbin.exe', ['/nologo', '/exports', shared], { encoding: 'utf8' });
