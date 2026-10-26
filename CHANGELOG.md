@@ -8,7 +8,7 @@ The runtime changes below affect the native library only; the npm package is unc
 
 ### Breaking changes
 
-- Rust `DenoiseParams`, `DenoiseInfo`, `KernelPath`, `Transfer`, `Limit` and `Precision` are non-exhaustive. Construct execution parameters with `DenoiseParams::default().with_input_scale(scale)` and include wildcard arms when matching these enums. C ABI implementation modules are hidden from Rust documentation and outside Rust semver guarantees.
+- Rust `DenoiseParams`, `DenoiseInfo`, `Kernel`, `KernelPath`, `Transfer`, `Limit` and `Precision` are non-exhaustive. Construct execution parameters with `DenoiseParams::default().with_input_scale(scale)` and include wildcard arms when matching these enums. C ABI implementation modules are hidden from Rust documentation and outside Rust semver guarantees.
 
 - C ABI 3.0.0 replaces 1.0.0. `oidnw_filter_desc` no longer has a `size` field, and the library no longer accepts older descriptor layouts. Headers and library must come from the same version; no compatibility adapter is provided. Every descriptor starts with a NULL `next` extension pointer. CPU filter `input_scale` must be positive and finite; zero is rejected.
 
@@ -47,7 +47,7 @@ The runtime changes below affect the native library only; the npm package is unc
 
 - Rebuild C consumers against the 3.0.0 headers and remove assignments to `oidnw_filter_desc.size`. Ship the library from the same release.
 - Initialize descriptors with their default functions, keep `next` NULL and replace zero CPU input scales with `1.0`.
-- Replace Rust `DenoiseParams { input_scale: scale }` literals with `DenoiseParams::default().with_input_scale(scale)`. Add wildcard arms to matches on the newly non-exhaustive enums.
+- Replace Rust `DenoiseParams { input_scale: scale }` literals with `DenoiseParams::default().with_input_scale(scale)`. Add wildcard arms when matching `Kernel` or the other newly non-exhaustive enums.
 - Dynamic loaders must check `oidnw_api_version() == OIDNW_API_VERSION` before calling the API.
 
 ## [Native 0.1.1] - 2026-10-25
