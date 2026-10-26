@@ -6,16 +6,16 @@
 
 ![Classroom 2 at 8 samples: noisy input on the left, OIDN denoised output on the right](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/images/classroom2-comparison.png)
 
-[Classroom 2 in MuTracer](https://mutracer-dev.meimu-studio.com/viewer/#model=research-classroom2&envIntensity=4&skyTime=16.0833&envResolution=2k&groundShadow=false&maxSamples=8&denoiseWhileConverging=true), rendered at 1280 × 720.
+[Classroom 2 in MuTracer](https://mutracer.meimu-studio.com/viewer/#model=research-classroom2&envIntensity=4&skyTime=16.0833&envResolution=2k&groundShadow=false&maxSamples=8&denoiseWhileConverging=true), rendered at 1280 × 720.
 
 ## Runtimes
 
-| Runtime | Status | Distribution | Guide |
-| --- | --- | --- | --- |
-| Browser (WebGPU) | Released (0.x) | npm `oidn-webgpu` | [docs/web.md](docs/web.md) |
-| C/C++, sharing the host's Metal, Vulkan or DX12 buffers | Experimental | GitHub Releases or build from source | [native/README.md](native/README.md#gpu-c-api) |
-| Rust, sharing the host's wgpu device and buffers | Experimental | crates.io or Cargo Git dependency | [native/README.md](native/README.md#rust-api) |
-| C, CPU images in and out | Experimental | GitHub Releases or build from source | [native/README.md](native/README.md#cpu-c-filter) |
+| Runtime                                                 | Status         | Distribution                         | Guide                                             |
+| ------------------------------------------------------- | -------------- | ------------------------------------ | ------------------------------------------------- |
+| Browser (WebGPU)                                        | Released (0.x) | npm `oidn-webgpu`                    | [docs/web.md](docs/web.md)                        |
+| C/C++, sharing the host's Metal, Vulkan or DX12 buffers | Experimental   | GitHub Releases or build from source | [native/README.md](native/README.md#gpu-c-api)    |
+| Rust, sharing the host's wgpu device and buffers        | Experimental   | crates.io or Cargo Git dependency    | [native/README.md](native/README.md#rust-api)     |
+| C, CPU images in and out                                | Experimental   | GitHub Releases or build from source | [native/README.md](native/README.md#cpu-c-filter) |
 
 Every runtime executes the same WGSL kernels, planned by the same TypeScript core. The [native guide](native/README.md) records tested GPU configurations and output validation.
 
@@ -53,32 +53,32 @@ HDR input, auxiliary images, GPU buffers, tiling and performance options are in 
 
 Pick the weights from what your renderer produces. The same files work in every runtime.
 
-| File | Color | Auxiliary inputs | Browser options |
-| --- | --- | --- | --- |
-| `rt_ldr.tza` | LDR | none | `{}` |
-| `rt_ldr_alb_nrm.tza` | LDR | albedo + normal | `{ aux: true }` |
-| `rt_hdr.tza` | HDR | none | `{ hdr: true }` |
-| `rt_hdr_alb_nrm.tza` | HDR | albedo + normal | `{ hdr: true, aux: true }` |
-| `rt_hdr_alb_nrm_small.tza` | HDR | albedo + normal; faster, lower quality | `{ hdr: true, aux: true }` |
-| `rt_hdr_calb_cnrm.tza` | HDR | noise-free albedo + normal | `{ hdr: true, aux: true }` |
-| `rt_hdr_calb_cnrm_large.tza` | HDR | noise-free albedo + normal; slower, higher quality | `{ hdr: true, aux: true }` |
-| `rtlightmap_hdr.tza` ([oidn-weights](https://github.com/RenderKit/oidn-weights)) | HDR lightmap | none | `{ hdr: true, hdrTransfer: 'log' }` |
+| File                                                                             | Color        | Auxiliary inputs                                   | Browser options                     |
+| -------------------------------------------------------------------------------- | ------------ | -------------------------------------------------- | ----------------------------------- |
+| `rt_ldr.tza`                                                                     | LDR          | none                                               | `{}`                                |
+| `rt_ldr_alb_nrm.tza`                                                             | LDR          | albedo + normal                                    | `{ aux: true }`                     |
+| `rt_hdr.tza`                                                                     | HDR          | none                                               | `{ hdr: true }`                     |
+| `rt_hdr_alb_nrm.tza`                                                             | HDR          | albedo + normal                                    | `{ hdr: true, aux: true }`          |
+| `rt_hdr_alb_nrm_small.tza`                                                       | HDR          | albedo + normal; faster, lower quality             | `{ hdr: true, aux: true }`          |
+| `rt_hdr_calb_cnrm.tza`                                                           | HDR          | noise-free albedo + normal                         | `{ hdr: true, aux: true }`          |
+| `rt_hdr_calb_cnrm_large.tza`                                                     | HDR          | noise-free albedo + normal; slower, higher quality | `{ hdr: true, aux: true }`          |
+| `rtlightmap_hdr.tza` ([oidn-weights](https://github.com/RenderKit/oidn-weights)) | HDR lightmap | none                                               | `{ hdr: true, hdrTransfer: 'log' }` |
 
 The model size (small, default, large) is chosen by the file alone; no option changes. Loading throws if `aux` does not match the file's inputs. An HDR/LDR mismatch cannot be detected from the file, so set `hdr` to match the weights.
 
 ## Documentation
 
-| Document | Covers |
-| --- | --- |
-| [docs/web.md](docs/web.md) | Browser API: loading, inputs, `tileExecute`, GPU pipelines, tiling, precision, profiling |
-| [native/README.md](native/README.md) | GPU C/C++, CUDA, Rust and CPU C APIs, image contract, builds and precompiled packages |
-| [native/examples/gpu-integration.md](native/examples/gpu-integration.md) | GPU C API step by step in plain C, C++17 wrapper details, Windows CUDA adapter |
-| [docs/development.md](docs/development.md) | Architecture, build/test/benchmark commands, updating OIDN models, CI |
-| [docs/native-release.md](docs/native-release.md) | Maintainer guide for publishing native packages and the crate |
-| [AGENTS.md](AGENTS.md) | Repository map and working rules for coding agents and contributors |
-| [llms.txt](llms.txt) | Doc index for LLM tools |
-| [CHANGELOG.md](CHANGELOG.md) | Browser package release notes and migration steps |
-| [native/CHANGELOG.md](native/CHANGELOG.md) | Native library (Rust crate, C/C++ packages) release notes and migration steps |
+| Document                                                                 | Covers                                                                                   |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| [docs/web.md](docs/web.md)                                               | Browser API: loading, inputs, `tileExecute`, GPU pipelines, tiling, precision, profiling |
+| [native/README.md](native/README.md)                                     | GPU C/C++, CUDA, Rust and CPU C APIs, image contract, builds and precompiled packages    |
+| [native/examples/gpu-integration.md](native/examples/gpu-integration.md) | GPU C API step by step in plain C, C++17 wrapper details, Windows CUDA adapter           |
+| [docs/development.md](docs/development.md)                               | Architecture, build/test/benchmark commands, updating OIDN models, CI                    |
+| [docs/native-release.md](docs/native-release.md)                         | Maintainer guide for publishing native packages and the crate                            |
+| [AGENTS.md](AGENTS.md)                                                   | Repository map and working rules for coding agents and contributors                      |
+| [llms.txt](llms.txt)                                                     | Doc index for LLM tools                                                                  |
+| [CHANGELOG.md](CHANGELOG.md)                                             | Browser package release notes and migration steps                                        |
+| [native/CHANGELOG.md](native/CHANGELOG.md)                               | Native library (Rust crate, C/C++ packages) release notes and migration steps            |
 
 ## Examples and users
 
