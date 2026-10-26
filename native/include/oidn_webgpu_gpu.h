@@ -10,7 +10,7 @@ extern "C" {
  * call using it. Models may be shared; other same-handle CPU calls are exclusive.
  * Different handles on a device serialize queue operations internally.
  * Descriptions are required and initialized with their *_default function.
- * next must be NULL; use headers and a library from the same version.
+ * next must be NULL; see oidn_webgpu.h for version compatibility.
  * prepared_get_info may overlap submit on the same workspace.
  * No background threads are created. Queue lock callbacks run on the caller. */
 typedef struct oidnw_gpu_device oidnw_gpu_device;
@@ -60,6 +60,7 @@ typedef struct oidnw_gpu_submit_desc {
 } oidnw_gpu_submit_desc;
 
 typedef struct oidnw_gpu_limits {
+  const void *next; /* Initialize to NULL; non-NULL extensions are rejected. */
   uint32_t image_offset_alignment;
   uint64_t max_buffer_size;
   uint64_t max_image_bytes; /* Min of binding, buffer and planner limits. */
@@ -138,6 +139,7 @@ int32_t oidnw_gpu_wait(oidnw_gpu_device *device, uint64_t sequence, uint64_t tim
   uint32_t *completed, char *error, size_t capacity);
 int32_t oidnw_gpu_device_info(const oidnw_gpu_device *device, char *name, size_t name_capacity,
   uint32_t *backend, uint32_t *features);
+/* Initialize limits to {0} before querying. */
 int32_t oidnw_gpu_get_limits(const oidnw_gpu_device *device, oidnw_gpu_limits *limits,
   char *error, size_t capacity);
 /* Release all device-owned public handles first. BUSY leaves device alive if

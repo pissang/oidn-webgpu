@@ -101,6 +101,7 @@ pub struct SubmitDesc {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DeviceLimits {
+    pub next: *const c_void,
     pub image_offset_alignment: u32,
     pub max_buffer_size: u64,
     pub max_image_bytes: u64,
@@ -1463,13 +1464,17 @@ pub unsafe extern "C" fn oidnw_gpu_get_limits(
 ) -> i32 {
     unsafe {
         guard(error, capacity, || {
-            // The result is output-only; do not read its uninitialized body.
             check_pointer(limits, "limits output")?;
+            if !(*limits).next.is_null() {
+                return Err(invalid("unknown limits extension"));
+            }
+            limits.write(std::mem::zeroed());
             let device = required(device, "device")?;
             let _call = exclusive(&device.gate, "device handle is busy")?;
             with_runtime(&device.state, |runtime| {
                 let supported = runtime.context.device.limits();
                 limits.write(DeviceLimits {
+                    next: std::ptr::null(),
                     image_offset_alignment: supported.min_storage_buffer_offset_alignment,
                     max_buffer_size: supported.max_buffer_size,
                     max_image_bytes: supported

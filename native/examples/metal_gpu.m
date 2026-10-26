@@ -29,7 +29,7 @@ static id<MTLComputePipelineState> pipeline(id<MTLDevice> device, id<MTLLibrary>
 int main(int argc, const char **argv) {
   @autoreleasepool {
     if (argc != 2) { fprintf(stderr, "usage: metal_gpu MODEL.tza\n"); return 2; }
-    if (oidnw_api_version() != OIDNW_API_VERSION) {
+    if (!OIDNW_API_VERSION_IS_COMPATIBLE(oidnw_api_version())) {
       fprintf(stderr, "header/library version mismatch\n"); return 1;
     }
     const NSUInteger edge = 31, count = edge * edge, offset = 256, bytes = offset + count * 16;
@@ -61,7 +61,7 @@ int main(int argc, const char **argv) {
     device_desc.device = (__bridge void *)metal; /* Library creates a dedicated queue. */
     oidnw_gpu_device *device = NULL;
     check(oidnw_gpu_device_import_metal(&device_desc, &device, error_text, sizeof error_text));
-    oidnw_gpu_limits limits;
+    oidnw_gpu_limits limits = {0};
     check(oidnw_gpu_get_limits(device, &limits, error_text, sizeof error_text));
     if (!limits.image_offset_alignment || offset % limits.image_offset_alignment ||
         bytes > limits.max_buffer_size || count * 16 > limits.max_image_bytes) {

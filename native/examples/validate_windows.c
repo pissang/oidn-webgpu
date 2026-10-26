@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
     "invalid dimensions or runs");
   REQUIRE((backend == OIDNW_BACKEND_VULKAN || backend == OIDNW_BACKEND_DX12) &&
     kernel <= OIDNW_KERNEL_SUBGROUP_MATRIX && checks <= 1, "invalid backend, kernel or runtime checks");
-  REQUIRE(oidnw_api_version() == OIDNW_API_VERSION, "API version mismatch");
+  REQUIRE(OIDNW_API_VERSION_IS_COMPATIBLE(oidnw_api_version()), "API version mismatch");
   size_t pixels = (size_t)width * height, bytes = pixels * 4 * sizeof(float), weights_size;
   void *weights = read_file(argv[1], &weights_size);
   float *images[3];

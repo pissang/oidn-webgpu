@@ -4,7 +4,7 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 **Status:** experimental; APIs and results may change between versions. See [Tested configurations](#tested-configurations). CI builds and checks packages but does not run them on a GPU.
 
-**Availability:** the latest release, Native 0.1.1 (C ABI 1.0.0; [changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)), contains the Rust API, the CPU C filter and the core planner. The GPU C API, C++17 wrappers and CUDA adapter (C ABI 3.0.0) are not released yet: [build from source](#build-from-source) or use a [CI package](#precompiled-packages) from a commit that contains them. Check `OIDNW_API_VERSION` in your `oidn_webgpu.h`; `0x00030000` identifies the interface described here.
+**Availability:** the latest release, Native 0.1.1 (C ABI 1.0.0; [changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)), contains the Rust API, the CPU C filter and the core planner. The GPU C API, C++17 wrappers and CUDA adapter (C ABI 3.0.0) are not released yet: [build from source](#build-from-source) or use a [CI package](#precompiled-packages) from a commit that contains them. The interface described here uses C ABI 3.0.0 headers; see [Versioning](#versioning) for compatible library versions.
 
 - [Choose an API](#choose-an-api)
 - [Get the library](#get-the-library)
@@ -63,7 +63,7 @@ target_link_libraries(my_renderer PRIVATE oidn_webgpu::cpp)
 With a Native 0.1.1 package, link `oidn_webgpu::oidn_webgpu` and set `project(... LANGUAGES C)`.
 
 - The package can be moved without regenerating its CMake files. An optional `find_package` version uses the native crate version; patch versions with the same major and minor are compatible.
-- Headers and libraries must match the application's OS and CPU architecture, and must come from the same release ([Versioning](#versioning)).
+- Headers and libraries must match the application's OS and CPU architecture and satisfy [version compatibility](#versioning).
 - Ship the shared library and your TZA weights with the application. On Windows, use the DLL CRT (`/MD`) and place `oidn_webgpu.dll` beside the executable or on `PATH`:
 
 ```cmake
@@ -353,7 +353,7 @@ A quarantined context can hold submissions whose outcome is unknown, so normal d
 
 `oidnw_gpu_filter_warm_up(filter, w, h, ...)` (C++: `oidnw::gpu::warm_up(filter, w, h)`) optionally compiles pipelines before image buffers exist. It can block, but does not allocate image bindings or a workspace. A later prepare on the same filter and size reuses those pipelines; planning, weight upload and workspace allocation still occur during prepare. A different size may require more pipelines. Serialize warm-up and prepare on each filter.
 
-Per-submit `input_scale` (default `1`, finite and positive) multiplies HDR color before the transfer and is undone on output. `get_limits` (C++: `context.limits()`) reports the image offset alignment, maximum buffer and image bytes and the pending-submission limit.
+Per-submit `input_scale` (default `1`, finite and positive) multiplies HDR color before the transfer and is undone on output. `get_limits` (C++: `context.limits()`) reports the image offset alignment, maximum buffer and image bytes and the pending-submission limit. In C, initialize `oidnw_gpu_limits` to `{0}` before the query; a non-NULL `next` returns `OIDNW_ERROR_INVALID_ARGUMENT`.
 
 `oidnw_gpu_prepared_get_info` (C++: `workspace.info()`) reports the prepared workspace:
 
@@ -532,7 +532,7 @@ Check every `int32_t` status (`OIDNW_OK` = 0); [`examples/denoise.c`](examples/d
 | `kernel` | enum | `OIDNW_KERNEL_AUTO` | Subgroup-matrix kernels with cooperative matrices, otherwise implicit GEMM |
 | `max_tile_size` | u32 | `0` | `0` = whole image; otherwise rounded down to a multiple of 16 |
 | `input_scale` | float | `1.0` | Positive finite scale applied to HDR color before the transfer; zero is rejected |
-| `flags` | bitmask | `0` | `OIDNW_FILTER_RUNTIME_CHECKS` enables shader bounds checks (off by default) |
+| `flags` | bitmask | `0` | `OIDNW_FILTER_RUNTIME_CHECKS` enables shader bounds checks (off by default); unknown bits return `OIDNW_ERROR_INVALID_ARGUMENT` |
 
 Use `OIDNW_BACKEND_VULKAN` for cooperative-matrix kernels on Windows and Linux. `oidnw_device_info` reports the adapter name, backend and enabled `OIDNW_FEATURE_*` bits. The [header](include/oidn_webgpu.h) documents every option and lifetime rule.
 
@@ -540,8 +540,10 @@ Use `OIDNW_BACKEND_VULKAN` for cooperative-matrix kernels on Windows and Linux. 
 
 `oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 3.0.0 (`0x00030000`). It covers the CPU filter and GPU C API.
 
-- Use headers and a library from the same release. Dynamic loaders must require `oidnw_api_version() == OIDNW_API_VERSION` before calling the API; the C++ wrappers check this at startup.
-- ABI 3.0.0 replaces 1.0.0: `oidnw_filter_desc.size` is removed and every descriptor starts with `next`, which must be NULL. Rebuild 1.x consumers and reject mismatched library versions. CPU filter input scales must now be positive and finite; replace zero with `1.0`.
+- Before calling the API, dynamic loaders must check `OIDNW_API_VERSION_IS_COMPATIBLE(oidnw_api_version())`. Compatibility requires the library's major to equal the header's major and its minor to be at least the header's minor; patch is ignored. For example, a 3.0 consumer accepts a 3.1 library, while a 3.1 consumer rejects a 3.0 library. The C++ wrappers perform this check.
+- `OIDNW_API_VERSION_MAJOR`, `OIDNW_API_VERSION_MINOR` and `OIDNW_API_VERSION_PATCH` expose the header version components.
+- Minor versions may add functions, enum values, flag bits and extension structures linked through `next`. They cannot change existing structure layouts. Removals and changes to existing layouts require a major version bump.
+- ABI 3.0.0 replaces 1.0.0: `oidnw_filter_desc.size` is removed. Descriptors, `oidnw_gpu_limits` and `oidnw_gpu_prepared_info` start with `next`, which must be NULL. Rebuild 1.x consumers and use the [CPU filter options](#cpu-c-filter) described above.
 
 ### Core planner
 

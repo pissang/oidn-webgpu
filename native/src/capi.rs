@@ -254,6 +254,12 @@ pub unsafe extern "C" fn oidnw_device_destroy(device: *mut OidnwDevice) {
 }
 
 fn validate_filter_desc(desc: &OidnwFilterDesc) -> Outcome<()> {
+    if desc.flags & !OIDNW_FILTER_RUNTIME_CHECKS != 0 {
+        return Err(invalid(format!(
+            "unknown filter desc.flags bits {:#x}",
+            desc.flags & !OIDNW_FILTER_RUNTIME_CHECKS
+        )));
+    }
     if desc.quality > OIDNW_QUALITY_FAST {
         return Err(invalid(format!("unknown quality {}", desc.quality)));
     }
@@ -547,6 +553,15 @@ mod tests {
             oidnw_filter_desc_default(&mut desc);
             assert!(desc.next.is_null());
             assert!(validate_filter_desc(&desc).is_ok());
+            desc.flags = OIDNW_FILTER_RUNTIME_CHECKS;
+            assert!(validate_filter_desc(&desc).is_ok());
+            for flags in [2, OIDNW_FILTER_RUNTIME_CHECKS | 2, 0x80000000, u32::MAX] {
+                desc.flags = flags;
+                let error = validate_filter_desc(&desc).unwrap_err();
+                assert_eq!(error.0, OIDNW_ERROR_INVALID_ARGUMENT);
+                assert!(error.1.contains("desc.flags"));
+            }
+            desc.flags = 0;
             for scale in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
                 desc.input_scale = scale;
                 assert_eq!(validate_filter_desc(&desc).unwrap_err().0, OIDNW_ERROR_INVALID_ARGUMENT);

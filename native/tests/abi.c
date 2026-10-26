@@ -14,6 +14,12 @@ _Static_assert(sizeof(oidnw_gpu_metal_device_desc) == 64, "Metal device ABI");
 _Static_assert(sizeof(oidnw_gpu_submit_desc) == 112, "submit ABI");
 
 _Static_assert(sizeof(oidnw_gpu_filter_desc) == 40, "GPU filter ABI 3.0.0");
+_Static_assert(sizeof(oidnw_gpu_limits) == 40, "limits ABI 3.0.0");
+_Static_assert(offsetof(oidnw_gpu_limits, next) == 0, "limits extension prefix");
+_Static_assert(offsetof(oidnw_gpu_limits, image_offset_alignment) == 8, "limits alignment offset");
+_Static_assert(offsetof(oidnw_gpu_limits, max_buffer_size) == 16, "limits buffer size offset");
+_Static_assert(offsetof(oidnw_gpu_limits, max_image_bytes) == 24, "limits image bytes offset");
+_Static_assert(offsetof(oidnw_gpu_limits, max_pending_submissions) == 32, "limits pending offset");
 _Static_assert(sizeof(oidnw_gpu_prepared_info) == 48, "prepared info ABI 3.0.0");
 _Static_assert(offsetof(oidnw_filter_desc, hdr) == 8, "CPU descriptor extension prefix");
 _Static_assert(offsetof(oidnw_gpu_filter_desc, kernel) == 20, "GPU kernel offset");
@@ -21,7 +27,24 @@ _Static_assert(offsetof(oidnw_gpu_submit_desc, images) == 16, "submit images off
 _Static_assert(offsetof(oidnw_gpu_prepared_info, workspace_bytes) == 24, "workspace bytes offset");
 
 int main(void) {
-  if (oidnw_api_version() != OIDNW_API_VERSION) return 1;
+  if (!OIDNW_API_VERSION_IS_COMPATIBLE(oidnw_api_version())) return 1;
+  if (OIDNW_API_VERSION != 0x00030000u || OIDNW_API_VERSION_MAJOR != 3 ||
+      OIDNW_API_VERSION_MINOR != 0 || OIDNW_API_VERSION_PATCH != 0) return 1;
+  if (!OIDNW_API_VERSION_IS_COMPATIBLE(0x00030100u) ||
+      !OIDNW_API_VERSION_IS_COMPATIBLE(0x000300ffu) ||
+      OIDNW_API_VERSION_IS_COMPATIBLE(0x000200ffu) ||
+      OIDNW_API_VERSION_IS_COMPATIBLE(0x00040000u)) return 1;
+  const struct { uint32_t library, header; int compatible; } versions[] = {
+    {0x00030000u, 0x00030000u, 1},
+    {0x00030200u, 0x000301ffu, 1},
+    {0x000300ffu, 0x00030100u, 0},
+    {0x00030100u, 0x000301ffu, 1},
+    {0x000301ffu, 0x00030100u, 1},
+    {0x0002ffffu, 0x00030000u, 0},
+    {0x00040000u, 0x00030100u, 0}
+  };
+  for (size_t i = 0; i < sizeof versions / sizeof versions[0]; ++i)
+    if (oidnw_api_version_is_compatible(versions[i].library, versions[i].header) != versions[i].compatible) return 1;
   oidnw_gpu_dx12_device_desc dx12;
   oidnw_gpu_dx12_device_desc_default(&dx12);
   if (dx12.next || dx12.flags || dx12.host_device || dx12.agility_sdk_version || dx12.agility_sdk_path || dx12.max_pending_submissions != 64) return 1;
@@ -62,7 +85,7 @@ int main(void) {
   uint32_t completed = 9;
   if (oidnw_gpu_wait(NULL, 1, 0, &completed, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT || completed != 0) return 1;
   if (oidnw_gpu_device_destroy(NULL, NULL, 0) != OIDNW_OK) return 1;
-  oidnw_gpu_limits limits;
+  oidnw_gpu_limits limits = {0};
   if (oidnw_gpu_get_limits(NULL, &limits, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT) return 1;
   if (oidnw_gpu_filter_warm_up(NULL, 16, 16, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT) return 1;
   if (oidnw_filter_prepare(NULL, 16, 16, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT) return 1;
@@ -100,7 +123,21 @@ int main(void) {
   if (oidnw_gpu_vulkan_requirements_create(&query, &requirements, error, sizeof error) != OIDNW_ERROR_INVALID_ARGUMENT || !strstr(error, "extension")) return 1;
   if (oidnw_gpu_device_import_vulkan(&vulkan, &dx12_device, error, sizeof error) != OIDNW_ERROR_INVALID_ARGUMENT || !strstr(error, "extension")) return 1;
 #endif
+  limits.next = unknown;
+  if (oidnw_gpu_get_limits(NULL, &limits, error, sizeof error) != OIDNW_ERROR_INVALID_ARGUMENT || !strstr(error, "limits extension")) return 1;
+  limits.next = NULL;
+  limits.image_offset_alignment = limits.max_pending_submissions = 99;
+  limits.max_buffer_size = limits.max_image_bytes = 99;
+  if (oidnw_gpu_get_limits(NULL, &limits, NULL, 0) != OIDNW_ERROR_INVALID_ARGUMENT ||
+      limits.next || limits.image_offset_alignment || limits.max_buffer_size ||
+      limits.max_image_bytes || limits.max_pending_submissions) return 1;
   desc.next = NULL;
+  const uint32_t invalid_flags[] = {2u, OIDNW_FILTER_RUNTIME_CHECKS | 2u, 0x80000000u, UINT32_MAX};
+  for (size_t i = 0; i < sizeof invalid_flags / sizeof invalid_flags[0]; ++i) {
+    desc.flags = invalid_flags[i];
+    if (oidnw_filter_create(NULL, "x", 1, &desc, &cpu_handle, error, sizeof error) != OIDNW_ERROR_INVALID_ARGUMENT || !strstr(error, "desc.flags")) return 1;
+  }
+  desc.flags = 0;
   desc.input_scale = 0;
   if (oidnw_filter_create(NULL, "x", 1, &desc, &cpu_handle, error, sizeof error) != OIDNW_ERROR_INVALID_ARGUMENT || !strstr(error, "positive")) return 1;
   oidnw_gpu_prepared_info info = {0};

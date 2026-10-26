@@ -14,13 +14,14 @@ struct oidnw_gpu_buffer { oidnw_gpu_device *device; };
 struct oidnw_gpu_sync { oidnw_gpu_device *device; };
 static unsigned destroyed = 0, waits = 0, model_frees = 0;
 static bool fail_next = false;
+static uint32_t library_version = OIDNW_API_VERSION;
 static oidnw::gpu::detached_device orphan;
 static void retain_orphan(oidnw::gpu::detached_device value, const oidnw::gpu::status &status) noexcept {
   ensure(status.code == OIDNW_ERROR_DEVICE_LOST);
   orphan = std::move(value);
 }
 extern "C" {
-uint32_t oidnw_api_version() { return OIDNW_API_VERSION; }
+uint32_t oidnw_api_version() { return library_version; }
 void oidnw_gpu_filter_desc_default(oidnw_gpu_filter_desc *p) { std::memset(p, 0, sizeof *p); p->hdr = 1; }
 void oidnw_gpu_submit_desc_default(oidnw_gpu_submit_desc *p) { std::memset(p, 0, sizeof *p); p->input_scale = 1; }
 int32_t oidnw_gpu_model_create(const void *bytes, size_t, oidnw_gpu_model **out, char *, size_t) {
@@ -88,12 +89,23 @@ int32_t oidnw_gpu_device_info(const oidnw_gpu_device *d, char *name, size_t capa
   return OIDNW_OK;
 }
 int32_t oidnw_gpu_get_limits(const oidnw_gpu_device *, oidnw_gpu_limits *out, char *, size_t) {
-  *out = {256, 1024 * 1024, 1024 * 1024, 8}; return OIDNW_OK;
+  if (out->next) return OIDNW_ERROR_INVALID_ARGUMENT;
+  *out = {nullptr, 256, 1024 * 1024, 1024 * 1024, 8}; return OIDNW_OK;
 }
 }
 
 int main() {
   using namespace oidnw::gpu;
+  for (auto version : {OIDNW_API_VERSION, 0x00030100u, 0x000300ffu}) {
+    library_version = version;
+    require_version();
+  }
+  for (auto version : {0x0002ffffu, 0x00040000u}) {
+    library_version = version;
+    try { require_version(); ensure(false); }
+    catch (const error &e) { ensure(e.code == OIDNW_ERROR_INVALID_ARGUMENT); }
+  }
+  library_version = OIDNW_API_VERSION;
   static_assert(!std::is_copy_constructible_v<device>);
   static_assert(!std::is_copy_constructible_v<workspace>);
   static_assert(std::is_nothrow_move_constructible_v<workspace>);
@@ -135,7 +147,8 @@ int main() {
     }
     context.track(sent.sequence);
     ensure(context.close(0).code == OIDNW_ERROR_BUSY);
-    ensure(context.limits().image_offset_alignment == 256);
+    const auto limits = context.limits();
+    ensure(!limits.next && limits.image_offset_alignment == 256 && limits.max_pending_submissions == 8);
     weights.reset(); source.reset();
     context = device{};
     ensure(destroyed == 0 && !host_lifetime.expired());

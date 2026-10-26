@@ -50,7 +50,7 @@ inline void require(int32_t code, const char *message) {
   if (code != OIDNW_OK) throw error(code, message);
 }
 inline void require_version() {
-  if (oidnw_api_version() != OIDNW_API_VERSION)
+  if (!OIDNW_API_VERSION_IS_COMPATIBLE(oidnw_api_version()))
     throw error(OIDNW_ERROR_INVALID_ARGUMENT, "header/library version mismatch");
 }
 
@@ -207,7 +207,7 @@ public:
     return result;
   }
   oidnw_gpu_limits limits() const {
-    oidnw_gpu_limits result;
+    oidnw_gpu_limits result{};
     std::array<char, 1024> message{};
     require(oidnw_gpu_get_limits(get(), &result, message.data(), message.size()), message.data());
     return result;

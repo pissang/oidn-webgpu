@@ -376,7 +376,7 @@ int main(int argc, char **argv) {
     return 2;
   }
   try {
-    if (oidnw_api_version() != OIDNW_API_VERSION)
+    if (!OIDNW_API_VERSION_IS_COMPATIBLE(oidnw_api_version()))
       throw std::runtime_error("header/DLL version mismatch");
     unsigned frames = argc > 3 ? std::stoul(argv[3]) : 1000,
              size = argc > 4 ? std::stoul(argv[4]) : 16;

@@ -9,7 +9,7 @@ The native library adds a GPU C API for host-owned Metal, Vulkan and DX12 buffer
 ### Breaking changes
 
 - Rust `DenoiseParams`, `DenoiseInfo`, `Kernel`, `KernelPath`, `Transfer`, `Limit` and `Precision` are non-exhaustive. Construct execution parameters with `DenoiseParams::default().with_input_scale(scale)` and include wildcard arms when matching these enums. C ABI implementation modules are hidden from Rust documentation and outside Rust semver guarantees.
-- C ABI 3.0.0 replaces 1.0.0. `oidnw_filter_desc` no longer has a `size` field, and the library no longer accepts older descriptor layouts. Headers and library must come from the same version; no compatibility adapter is provided. Every descriptor starts with a NULL `next` extension pointer. CPU filter `input_scale` must be positive and finite; zero is rejected.
+- C ABI 3.0.0 replaces 1.0.0. `oidnw_filter_desc` no longer has a `size` field, and older descriptor layouts are not accepted. Descriptors, `oidnw_gpu_limits` and `oidnw_gpu_prepared_info` start with a NULL `next` extension pointer; non-NULL extensions return `INVALID_ARGUMENT`. CPU filter `input_scale` must be positive and finite, and `flags` accepts only defined `OIDNW_FILTER_*` bits; zero scales and unknown flag bits return `INVALID_ARGUMENT`.
 
 ### Added
 
@@ -33,10 +33,10 @@ The native library adds a GPU C API for host-owned Metal, Vulkan and DX12 buffer
 
 ### Migration notes
 
-- Rebuild C consumers against the 3.0.0 headers and remove assignments to `oidnw_filter_desc.size`. Ship the library from the same release.
-- Initialize descriptors with their default functions, keep `next` NULL and replace zero CPU input scales with `1.0`.
+- Rebuild C consumers against the 3.0.0 headers and remove assignments to `oidnw_filter_desc.size`. Ship a compatible library as described below.
+- Initialize descriptors with their default functions and query outputs with `{0}`, keep `next` NULL and replace zero CPU input scales with `1.0`. Use only defined CPU filter flag bits.
 - Replace Rust `DenoiseParams { input_scale: scale }` literals with `DenoiseParams::default().with_input_scale(scale)`. Add wildcard arms when matching `Kernel` or the other newly non-exhaustive enums.
-- Dynamic loaders must check `oidnw_api_version() == OIDNW_API_VERSION` before calling the API.
+- Dynamic loaders must check `OIDNW_API_VERSION_IS_COMPATIBLE(oidnw_api_version())` before calling the API: the library major must equal the header major and the library minor must be at least the header minor; patch is ignored. C++ wrappers, including those used by the CUDA adapter, apply this rule. The header exposes `OIDNW_API_VERSION_MAJOR`, `OIDNW_API_VERSION_MINOR` and `OIDNW_API_VERSION_PATCH`. Minor versions may add functions, enum values, flag bits and extension structures linked through `next`, but cannot change existing structure layouts; removals and layout changes require a major version bump.
 
 ## [0.1.1] - 2026-10-25
 

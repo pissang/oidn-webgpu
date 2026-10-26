@@ -108,16 +108,29 @@ typedef struct oidnw_filter_desc {
   uint32_t max_tile_size;
   /* Positive finite scale applied to HDR color before the transfer (default 1). */
   float input_scale;
-  /* OIDNW_FILTER_* flags (default 0). */
+  /* Defined OIDNW_FILTER_* bits only (default 0); unknown bits are rejected. */
   uint32_t flags;
 } oidnw_filter_desc;
 
 typedef struct oidnw_device oidnw_device;
 typedef struct oidnw_filter oidnw_filter;
 
-/* API version = major << 16 | minor << 8 | patch. Use matching headers
- * and library; dynamic loaders must require the exact version. */
-#define OIDNW_API_VERSION 0x00030000u
+/* API version = major << 16 | minor << 8 | patch. A library is compatible
+ * when its major equals the header's and its minor is at least the header's;
+ * patch is ignored. Dynamic loaders must check compatibility before API calls.
+ * Minor versions may add functions, enum values, flag bits and extension
+ * structures linked through next, but must preserve existing structure layouts.
+ * Removals and changes to existing layouts require a major version bump. */
+#define OIDNW_API_VERSION_MAJOR 3u
+#define OIDNW_API_VERSION_MINOR 0u
+#define OIDNW_API_VERSION_PATCH 0u
+#define OIDNW_API_VERSION ((OIDNW_API_VERSION_MAJOR << 16) | (OIDNW_API_VERSION_MINOR << 8) | OIDNW_API_VERSION_PATCH)
+static inline int oidnw_api_version_is_compatible(uint32_t library_version, uint32_t header_version) {
+  return (library_version >> 16) == (header_version >> 16) &&
+    ((library_version >> 8) & 0xffu) >= ((header_version >> 8) & 0xffu);
+}
+#define OIDNW_API_VERSION_IS_COMPATIBLE(library_version) \
+  oidnw_api_version_is_compatible((library_version), OIDNW_API_VERSION)
 uint32_t oidnw_api_version(void);
 
 void oidnw_filter_desc_default(oidnw_filter_desc *desc);
