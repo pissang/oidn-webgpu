@@ -1,17 +1,15 @@
 # Integrating the GPU C API
 
-Use this sequence when the renderer already owns its GPU resources. The snippets use existing host objects; the complete programs below include native device creation, shaders and command submission.
+This walkthrough adapts an existing renderer that already owns its GPU device and buffers. It uses the plain C API so every call is visible; C++ hosts should start from the shorter [C++ example](../README.md#example) and the [C++17 wrapper](#c17-wrapper) section, which follow the same steps.
 
 | Backend | Complete program | Native resources |
 | --- | --- | --- |
-| Metal | [metal_gpu.m](metal_gpu.m) | `MTLDevice`, `MTLBuffer`, `MTLSharedEvent` |
+| Metal | [metal_gpu_cpp.mm](metal_gpu_cpp.mm) (C++), [metal_gpu.m](metal_gpu.m) (C) | `MTLDevice`, `MTLBuffer`, `MTLSharedEvent` |
 | Vulkan | [vulkan_gpu.cpp](vulkan_gpu.cpp) | Host instance, device, queue, storage buffers and timeline semaphores |
 | DX12 | [dx12_gpu.cpp](dx12_gpu.cpp) | Host device, shared committed UAV buffers and shared fences; the library creates another device on the same LUID |
 | CUDA / Windows DX12 | [cuda_dx12_gpu.cu](cuda_dx12_gpu.cu) | CUDA pointers and streams; the optional [adapter](#windows-cuda-adapter) owns DX12 bridge resources |
 
-Build commands and backend requirements are in the [native guide](../README.md#gpu-c-api). Use matching headers and a library. Include `oidn_webgpu_metal.h`, `oidn_webgpu_vulkan.h` or `oidn_webgpu_dx12.h` for the chosen backend. Keep an error buffer such as `char error[1024]` and handle every returned status.
-
-Images use tightly packed RGBA32F storage buffers. If the renderer uses textures, convert or copy them to these buffers on the GPU and convert the output back as needed. Those passes add time and memory beyond denoising.
+Build commands and per-platform requirements are in the [native guide](../README.md#gpu-c-api). Include `oidn_webgpu_metal.h`, `oidn_webgpu_vulkan.h` or `oidn_webgpu_dx12.h`, keep an error buffer such as `char error[1024]`, and check every returned status. Images are RGBA32F storage buffers ([image contract](../README.md#image-contract)).
 
 ## 1. Create the library context
 
@@ -26,7 +24,7 @@ int32_t status = oidnw_gpu_device_import_metal(
     &desc, &device, error, sizeof error);
 ```
 
-This creates a dedicated library queue. For a shared host queue, use the [Metal queue contract](../README.md#metal-device-options).
+This creates a dedicated library queue. For a shared host queue, use the [Metal queue contract](../README.md#metal).
 
 ### Vulkan
 
@@ -50,7 +48,7 @@ int32_t status = oidnw_gpu_device_import_vulkan(
     &desc, &device, error, sizeof error);
 ```
 
-Use `void lock_host_queue(void *)` and `void unlock_host_queue(void *)` callbacks. Release that lock before entering the library. The device must have been created with the [required features, extensions and queue configuration](../README.md#vulkan-device-options); importing an arbitrary existing `VkDevice` can fail.
+Use `void lock_host_queue(void *)` and `void unlock_host_queue(void *)` callbacks. Release that lock before entering the library. The device must have been created with the [required features, extensions and queue configuration](../README.md#vulkan); importing an arbitrary existing `VkDevice` can fail.
 
 ### DX12
 
@@ -65,7 +63,7 @@ int32_t status = oidnw_gpu_device_create_dx12(
     &desc, &device, error, sizeof error);
 ```
 
-The SDK directory is an absolute UTF-8 path ending in `/` or `\`. Use the host's exact SDK version. The context has its own device and queue; [DX12 sharing and resource-state requirements](../README.md#dx12-device-options) apply.
+The SDK directory is an absolute UTF-8 path ending in `/` or `\`. Use the host's exact SDK version. The context has its own device and queue; [DX12 sharing and resource-state requirements](../README.md#dx12) apply.
 
 ## 2. Import images and synchronization
 
@@ -163,7 +161,7 @@ status = oidnw_gpu_submit(prepared, &submit, &sequence,
     error, sizeof error);
 ```
 
-Store both `status` and `sequence`. A nonzero sequence records accepted work even when status is an error. A zero sequence with `QUEUE_FULL` permits retry after earlier work progresses; do not attach a consumer wait to that rejected signal. Follow the [execution and error contract](../README.md#objects-and-execution) for other failures.
+Store both `status` and `sequence`. A nonzero sequence records accepted work even when status is an error. A zero sequence with `QUEUE_FULL` permits retry after earlier work progresses; do not attach a consumer wait to that rejected signal. Other failures are listed in [Errors and recovery](../README.md#errors-and-recovery).
 
 After a successful submit, the host consumer waits on `done_value` before reading output. It does not need a CPU wait. Use the native backend's required memory scopes or resource states at both handoffs. Before reusing an image set, also account for the host consumer's completion.
 
@@ -176,7 +174,7 @@ status = oidnw_gpu_poll(device, sequence, &completed, error, sizeof error);
 
 ## 5. Shut down
 
-Release the public workspace, image wrappers and synchronization wrappers, then drain accepted sequences with `oidnw_gpu_wait` before destroying the library device. Releasing public handles alone does not complete GPU work. On a timeout or uncertain submission, follow the [lifetime and recovery contract](../README.md#objects-and-execution) rather than freeing native allocations.
+Release the public workspace, image wrappers and synchronization wrappers, then drain accepted sequences with `oidnw_gpu_wait` before destroying the library device. Releasing public handles alone does not complete GPU work. On a timeout or uncertain submission, follow [Errors and recovery](../README.md#errors-and-recovery) rather than freeing native allocations.
 
 For Vulkan, keep all borrowed native objects and their memory alive until library device destruction succeeds. For Metal and DX12, retained library objects do not replace the host consumer's own resource lifetime requirements.
 

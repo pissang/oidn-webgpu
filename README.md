@@ -13,8 +13,9 @@
 | Runtime | Status | Distribution | Guide |
 | --- | --- | --- | --- |
 | Browser (WebGPU) | Released (0.x) | npm `oidn-webgpu` | [docs/web.md](docs/web.md) |
+| C/C++, sharing the host's Metal, Vulkan or DX12 buffers | Experimental | GitHub Releases or build from source | [native/README.md](native/README.md#gpu-c-api) |
 | Rust, sharing the host's wgpu device and buffers | Experimental | crates.io or Cargo Git dependency | [native/README.md](native/README.md#rust-api) |
-| C, CPU images in and out | Experimental | GitHub Releases or build from source | [native/README.md](native/README.md#c-api) |
+| C, CPU images in and out | Experimental | GitHub Releases or build from source | [native/README.md](native/README.md#cpu-c-filter) |
 
 Every runtime executes the same WGSL kernels, planned by the same TypeScript core. The [native guide](native/README.md) records tested GPU configurations and output validation.
 
@@ -70,7 +71,7 @@ The model size (small, default, large) is chosen by the file alone; no option ch
 | Document | Covers |
 | --- | --- |
 | [docs/web.md](docs/web.md) | Browser API: loading, inputs, `tileExecute`, GPU pipelines, tiling, precision, profiling |
-| [native/README.md](native/README.md) | Rust and C APIs, image contracts, builds and precompiled packages |
+| [native/README.md](native/README.md) | GPU C/C++, CUDA, Rust and CPU C APIs, image contract, builds and precompiled packages |
 | [docs/development.md](docs/development.md) | Architecture, build/test/benchmark commands, updating OIDN models, CI |
 | [AGENTS.md](AGENTS.md) | Repository map and working rules for coding agents and contributors |
 | [llms.txt](llms.txt) | Doc index for LLM tools |
