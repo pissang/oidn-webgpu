@@ -8,9 +8,9 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 - [Choose an API](#choose-an-api)
 - [Get the library](#get-the-library)
+- [Rust API](#rust-api): wgpu renderers
 - [GPU C API](#gpu-c-api): Metal, Vulkan and DX12 renderers
 - [CUDA on Windows](#cuda-on-windows)
-- [Rust API](#rust-api)
 - [CPU C filter](#cpu-c-filter)
 - [Image contract](#image-contract)
 - [Precompiled packages](#precompiled-packages)
@@ -25,9 +25,9 @@ Use a GPU API whenever your images are already on the GPU. The images stay in yo
 
 | Your renderer | Use | Images | Available in | Start with |
 | --- | --- | --- | --- | --- |
+| Rust with wgpu `=30.0.1` | **Rust `Denoiser`** | Your `wgpu::Buffer`s, encoded into your command encoder | Native 0.1.0 | [Rust API](#rust-api) |
 | Metal, Vulkan or DX12, in C, C++ or Objective-C | **GPU C API** with the C++17 wrapper | Your GPU buffers | Unreleased (C ABI 2.1.0) | [GPU C API](#gpu-c-api) |
 | CUDA on Windows | **CUDA adapter** (C++17, on top of the DX12 route) | CUDA device pointers | Unreleased (C ABI 2.1.0) | [CUDA on Windows](#cuda-on-windows) |
-| Rust with wgpu `=30.0.1` | **Rust `Denoiser`** | Your `wgpu::Buffer`s, encoded into your command encoder | Native 0.1.0 | [Rust API](#rust-api) |
 | Offline tools, tests, any language with C FFI | CPU C filter | CPU arrays; each call uploads, denoises, reads back and blocks | Native 0.1.0 | [CPU C filter](#cpu-c-filter) |
 | Your own non-wgpu GPU executor | Core planner | Host-defined | Native 0.1.0 | [Core planner](#core-planner) |
 
@@ -37,8 +37,8 @@ All APIs take linear RGBA32F images with the same [image contract](#image-contra
 
 | Language | Get it |
 | --- | --- |
-| C, C++, Objective-C | Download a [precompiled package](#precompiled-packages) and use its CMake config, or build one from source |
 | Rust | Add the crate from crates.io; see [Rust API](#rust-api) |
+| C, C++, Objective-C | Download a [precompiled package](#precompiled-packages) and use its CMake config, or build one from source |
 
 ### CMake
 
@@ -85,6 +85,95 @@ npm run native:build
 ```
 
 The package is written to `.native-build/package`; pass `-- --output DIR` to choose another directory. The commands in this guide use that path; any extracted download works the same way.
+
+## Rust API
+
+For Rust renderers on wgpu: the denoiser records into your command encoder and reads and writes your buffers.
+
+### Install
+
+```toml
+[dependencies]
+oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.1" }
+# Git source:
+# oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
+# Local checkout:
+# oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
+```
+
+- The registry crate bundles cores for the four [supported targets](#precompiled-packages); on Windows that is `x86_64-pc-windows-msvc`. It needs only Rust and a platform linker.
+- A Git or path dependency builds the core from source: stable Rust, a C toolchain, Node 22+ and npm, and on Windows Zig 0.16.0 on `PATH`. The first build installs the pinned scriptc compiler from the npm registry. To skip Node, use a [precompiled core](#build-configuration).
+- **wgpu version:** the crate pins `wgpu = "=30.0.1"`. Your `Device`, `Buffer` and `CommandEncoder` must come from the same wgpu crate; another release or a fork gives incompatible types. Use the re-export: `use oidn_webgpu::wgpu;`.
+
+### Usage
+
+```rust
+use oidn_webgpu::{DenoiseBuffers, DenoiseParams, Denoiser, DenoiserOptions, Model};
+
+// Once.
+let model = Model::from_tza(&weights)?;
+let mut denoiser = Denoiser::new(&device, &adapter, &model, DenoiserOptions::default())?;
+
+// Per image size (may block for shader compilation).
+let mut prepared = denoiser.prepare([width, height], DenoiseBuffers {
+    color: (&color).into(),
+    albedo: Some((&albedo).into()),
+    normal: Some((&normal).into()),
+    output: (&output).into(),
+})?;
+
+// Per frame.
+let mut encoder = device.create_command_encoder(&Default::default());
+// ... your render pass writes color/albedo/normal ...
+prepared.encode(&mut encoder, DenoiseParams { input_scale: exposure })?;
+// ... your display pass reads output ...
+queue.submit([encoder.finish()]);
+```
+
+| Step | Call | Cost and behavior |
+| --- | --- | --- |
+| Load | `Model::from_tza(&[u8])` | Validates the TZA file on the CPU. Clones share CPU weights and per-device GPU weights |
+| Bind | `Denoiser::new(&device, &adapter, &model, options)` | Cheap. `adapter` must be the device's adapter |
+| Prepare | `denoiser.prepare([w, h], buffers)` | May block for shader compilation. Allocates a workspace for that size; call again when the size changes |
+| Encode | `prepared.encode(&mut encoder, params)` | Appends commands only: no submit, wait or readback |
+| Rebind | `prepared.rebind(buffers)` | Swaps image buffers at the same size. Already encoded commands keep their old bindings |
+| Inspect | `prepared.info()` | `DenoiseInfo`: precision, `kernels` used, `tile_count`, `workspace_bytes`, `shared_weight_bytes`, `planning_ms`, `prepare_ms`, `runtime_checks` |
+
+[`examples/host_buffers.rs`](examples/host_buffers.rs) is a complete program that renders inputs on the GPU, denoises in the same encoder and writes RGBA32F output:
+
+```bash
+cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- weights/rt_hdr_alb_nrm_small.tza output.f32 256 192 128
+```
+
+### Device setup
+
+- Before requesting the device, add `Denoiser::required_features()`, `Denoiser::recommended_features(&adapter)` and `Denoiser::required_limits()`. Large images may need higher buffer limits. The library cannot enable features later.
+- Precision is FP16 when the device enables `SHADER_F16`, otherwise FP32. On DX12, `SHADER_F16` also needs DXC (Shader Model 6.2+): ship `dxcompiler.dll` and its matching `dxil.dll`.
+- Cooperative-matrix kernels are used when the device enables `EXPERIMENTAL_COOPERATIVE_MATRIX` (wgpu's experimental feature contract applies); on Windows and Linux they need Vulkan. Otherwise implicit GEMM.
+
+### Options
+
+`DenoiserOptions` is fixed per `Denoiser` and `#[non_exhaustive]`: start from `default()` and assign fields.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `hdr` | `true` | `false` for LDR weights |
+| `transfer` | `Transfer::Pu` | `Transfer::Log` for RTLightmap HDR weights |
+| `max_tile_size` | `0` | `0` = whole image; otherwise 16..=16384, rounded down to a multiple of 16. Reduces workspace memory only |
+
+`DenoiseParams` is passed to every `encode` and may change every frame:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `input_scale` | `1.0` | Positive, finite. Multiplies HDR color before the transfer and is undone on output. Ignored for LDR |
+
+### Buffers, memory and errors
+
+- `ImageBuffer { buffer, offset }` binds `width * height * 16` bytes from `offset`; `(&buffer).into()` uses offset 0. The offset must be a multiple of `min_storage_buffer_offset_alignment`. Input ranges may share a buffer if they do not overlap; output must be a different buffer from every input.
+- Each prepared instance owns its workspace. Denoisers made from one `Model` (or its clones) share GPU weights per device; count `shared_weight_bytes` once. Loading the same TZA again as a new `Model` creates a separate cache.
+- Prepared instances may outlive the `Denoiser`. Do not destroy buffers that pending GPU work uses. Submit one prepared instance's executions in encode order.
+- Errors are a typed `Error`: `InvalidArgument`, `Model`, `UnsupportedDevice`, `Gpu`, `BufferTooSmall { .. }`, `LimitExceeded { .. }`. A successful `encode` does not mean the GPU succeeded; execution errors and device loss go through your wgpu error handling.
+- `Denoiser::new` compiles shaders with bounds checks and workgroup initialization. `unsafe Denoiser::new_unchecked` disables them and can be faster; the caller upholds its documented safety contract.
 
 ## GPU C API
 
@@ -364,95 +453,6 @@ if (task.result) consume<<<grid, block, 0, stream>>>(output_pointer);
 ```
 
 The shared-image mode (`acquire` / `enqueue_shared` / `release`) renders straight into adapter-owned buffers with no copies. CUDA is needed only when you build the adapter. The [CUDA guide](examples/gpu-integration.md#windows-cuda-adapter) covers both modes, build, deployment and shutdown.
-
-## Rust API
-
-For Rust renderers on wgpu: the denoiser records into your command encoder and reads and writes your buffers.
-
-### Install
-
-```toml
-[dependencies]
-oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.1" }
-# Git source:
-# oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
-# Local checkout:
-# oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
-```
-
-- The registry crate bundles cores for the four [supported targets](#precompiled-packages); on Windows that is `x86_64-pc-windows-msvc`. It needs only Rust and a platform linker.
-- A Git or path dependency builds the core from source: stable Rust, a C toolchain, Node 22+ and npm, and on Windows Zig 0.16.0 on `PATH`. The first build installs the pinned scriptc compiler from the npm registry. To skip Node, use a [precompiled core](#build-configuration).
-- **wgpu version:** the crate pins `wgpu = "=30.0.1"`. Your `Device`, `Buffer` and `CommandEncoder` must come from the same wgpu crate; another release or a fork gives incompatible types. Use the re-export: `use oidn_webgpu::wgpu;`.
-
-### Usage
-
-```rust
-use oidn_webgpu::{DenoiseBuffers, DenoiseParams, Denoiser, DenoiserOptions, Model};
-
-// Once.
-let model = Model::from_tza(&weights)?;
-let mut denoiser = Denoiser::new(&device, &adapter, &model, DenoiserOptions::default())?;
-
-// Per image size (may block for shader compilation).
-let mut prepared = denoiser.prepare([width, height], DenoiseBuffers {
-    color: (&color).into(),
-    albedo: Some((&albedo).into()),
-    normal: Some((&normal).into()),
-    output: (&output).into(),
-})?;
-
-// Per frame.
-let mut encoder = device.create_command_encoder(&Default::default());
-// ... your render pass writes color/albedo/normal ...
-prepared.encode(&mut encoder, DenoiseParams { input_scale: exposure })?;
-// ... your display pass reads output ...
-queue.submit([encoder.finish()]);
-```
-
-| Step | Call | Cost and behavior |
-| --- | --- | --- |
-| Load | `Model::from_tza(&[u8])` | Validates the TZA file on the CPU. Clones share CPU weights and per-device GPU weights |
-| Bind | `Denoiser::new(&device, &adapter, &model, options)` | Cheap. `adapter` must be the device's adapter |
-| Prepare | `denoiser.prepare([w, h], buffers)` | May block for shader compilation. Allocates a workspace for that size; call again when the size changes |
-| Encode | `prepared.encode(&mut encoder, params)` | Appends commands only: no submit, wait or readback |
-| Rebind | `prepared.rebind(buffers)` | Swaps image buffers at the same size. Already encoded commands keep their old bindings |
-| Inspect | `prepared.info()` | `DenoiseInfo`: precision, `kernels` used, `tile_count`, `workspace_bytes`, `shared_weight_bytes`, `planning_ms`, `prepare_ms`, `runtime_checks` |
-
-[`examples/host_buffers.rs`](examples/host_buffers.rs) is a complete program that renders inputs on the GPU, denoises in the same encoder and writes RGBA32F output:
-
-```bash
-cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- weights/rt_hdr_alb_nrm_small.tza output.f32 256 192 128
-```
-
-### Device setup
-
-- Before requesting the device, add `Denoiser::required_features()`, `Denoiser::recommended_features(&adapter)` and `Denoiser::required_limits()`. Large images may need higher buffer limits. The library cannot enable features later.
-- Precision is FP16 when the device enables `SHADER_F16`, otherwise FP32. On DX12, `SHADER_F16` also needs DXC (Shader Model 6.2+): ship `dxcompiler.dll` and its matching `dxil.dll`.
-- Cooperative-matrix kernels are used when the device enables `EXPERIMENTAL_COOPERATIVE_MATRIX` (wgpu's experimental feature contract applies); on Windows and Linux they need Vulkan. Otherwise implicit GEMM.
-
-### Options
-
-`DenoiserOptions` is fixed per `Denoiser` and `#[non_exhaustive]`: start from `default()` and assign fields.
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `hdr` | `true` | `false` for LDR weights |
-| `transfer` | `Transfer::Pu` | `Transfer::Log` for RTLightmap HDR weights |
-| `max_tile_size` | `0` | `0` = whole image; otherwise 16..=16384, rounded down to a multiple of 16. Reduces workspace memory only |
-
-`DenoiseParams` is passed to every `encode` and may change every frame:
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `input_scale` | `1.0` | Positive, finite. Multiplies HDR color before the transfer and is undone on output. Ignored for LDR |
-
-### Buffers, memory and errors
-
-- `ImageBuffer { buffer, offset }` binds `width * height * 16` bytes from `offset`; `(&buffer).into()` uses offset 0. The offset must be a multiple of `min_storage_buffer_offset_alignment`. Input ranges may share a buffer if they do not overlap; output must be a different buffer from every input.
-- Each prepared instance owns its workspace. Denoisers made from one `Model` (or its clones) share GPU weights per device; count `shared_weight_bytes` once. Loading the same TZA again as a new `Model` creates a separate cache.
-- Prepared instances may outlive the `Denoiser`. Do not destroy buffers that pending GPU work uses. Submit one prepared instance's executions in encode order.
-- Errors are a typed `Error`: `InvalidArgument`, `Model`, `UnsupportedDevice`, `Gpu`, `BufferTooSmall { .. }`, `LimitExceeded { .. }`. A successful `encode` does not mean the GPU succeeded; execution errors and device loss go through your wgpu error handling.
-- `Denoiser::new` compiles shaders with bounds checks and workgroup initialization. `unsafe Denoiser::new_unchecked` disables them and can be faster; the caller upholds its documented safety contract.
 
 ## CPU C filter
 

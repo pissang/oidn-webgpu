@@ -14,8 +14,9 @@
 - [Native guide](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/README.md): native APIs, availability by release, packages and builds. Sections by heading anchor (github.com pages resolve them; in the raw file, find the matching heading):
   - `#choose-an-api`: which API fits which renderer, and which release contains it
   - `#get-the-library`: CMake targets, Windows deployment, building from source
+  - `#rust-api`: wgpu renderers; `Denoiser` encodes into your command encoder
   - `#gpu-c-api`: C++ Vulkan example with instance/device preflight (`#example`), `#platform-imports`, `#frame-loop`, `#errors-and-recovery`, `#lifetime-and-threads`, `#filter-options`, and per-platform `#metal`, `#vulkan`, `#dx12`
-  - `#cuda-on-windows`, `#rust-api`, `#cpu-c-filter`, `#versioning`, `#core-planner`
+  - `#cuda-on-windows`, `#cpu-c-filter`, `#versioning`, `#core-planner`
   - `#image-contract`: RGBA32F layout, which images, value ranges, sanitizing; shared by every API
   - `#precompiled-packages`, `#validate-a-build`, `#build-configuration`
 - [GPU C integration walkthrough](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/examples/gpu-integration.md): the GPU C API step by step in plain C (`#1-create-the-library-context` to `#5-shut-down`), `#c17-wrapper` details, `#vulkan-preflight`, and the `#windows-cuda-adapter` guide
