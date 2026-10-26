@@ -282,7 +282,10 @@ Initialize with `oidnw_filter_desc_default`, then override fields.
 
 ### Versioning
 
-`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 2.1.0 (`0x00020100`). Use matching headers and a library from the same version. Dynamic loaders must require an exact version match before calling the API. ABI 2.0.0 removes the CPU filter descriptor's `size` field and layout-size check; rebuild consumers with the fixed layout. Older layouts are unsupported.
+`oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 2.1.0 (`0x00020100`).
+
+- Use headers and a library from the same version. Dynamic loaders must require `oidnw_api_version() == OIDNW_API_VERSION` before calling the API.
+- ABI 2.0.0 removed the `oidnw_filter_desc.size` field and its layout-size check. Consumers built against 1.x headers must be rebuilt; older layouts are rejected.
 
 ### Validate a Windows package
 
@@ -343,14 +346,6 @@ cmake -S .native-build/package/examples -B .native-build/metal-examples \
 cmake --build .native-build/metal-examples --target metal_gpu
 .native-build/metal-examples/metal_gpu weights/rt_hdr_alb_nrm_small.tza
 ```
-
-### C++17 wrappers
-
-The wrappers require C++17 and enabled exceptions (`/EHsc` with MSVC). The [C++ integration example](examples/gpu-integration.md#c17-wrapper) uses move-only model, filter, workspace, buffer and sync owners. Children retain the library context. Include `oidn_webgpu_metal.hpp`, `oidn_webgpu_vulkan.hpp` or `oidn_webgpu_dx12.hpp` and link `oidn_webgpu::cpp` with CMake. The common `oidn_webgpu_gpu.hpp` does not include a platform SDK.
-
-Initialization failures throw `oidnw::gpu::error`. Submit, poll, wait and close return status values; an accepted submit always preserves its sequence, including on error. Last-owner destruction drains accepted work without a deadline and can block. Use explicit `close(timeout_ns)` for fallible shutdown; release child wrappers first. Its timeout applies to the submission wait and does not bound native queue destruction or queue-lock callbacks. Unhandled cleanup failure terminates by default. `device_options::on_cleanup_failure` may instead take ownership of the native context and host-lifetime token for deferred cleanup; `release()` transfers the same pair explicitly. Neither path proves GPU quiescence.
-
-`device_options::host_lifetime` optionally retains a shared native-owner object, including queue callback userdata. Keep the C++ device and children outside that owner object. A complete [Objective-C++ program](examples/metal_gpu_cpp.mm) is built as `metal_gpu_cpp` alongside the Metal C example.
 
 ### Objects and execution
 
@@ -442,9 +437,11 @@ cmake --build .native-build/dx12-examples --config Release --target dx12_gpu
 .native-build/dx12-examples/Release/dx12_gpu.exe weights/rt_hdr_alb_nrm_small.tza .native-build/package/examples/shaders 1000 16 0 0 0 0
 ```
 
-CUDA renderers can use the optional [Windows CUDA adapter](examples/gpu-integration.md#windows-cuda-adapter) through `oidn_webgpu_cuda.hpp` and `oidn_webgpu::cuda`. It owns the DX12 bridge and offers separate ordinary-pointer D2D-copy and adapter-allocated shared-image entry points. The guide covers construction, CUDA stream ordering, slot return, deployment and shutdown. CUDA is required only when explicitly building the adapter or its example; the core C ABI is unchanged.
-
 The final arguments are frame count, image edge, tile edge, FP32, reserved zero and shader checks. This command explicitly disables shader checks and enables the host/library debug layers. GPU validation can be enabled with `WGPU_GPU_BASED_VALIDATION=1` before running. These tests include deliberate delays and are not performance measurements.
+
+### Windows CUDA adapter
+
+CUDA renderers can use the optional [Windows CUDA adapter](examples/gpu-integration.md#windows-cuda-adapter) through `oidn_webgpu_cuda.hpp` and `oidn_webgpu::cuda`. It owns the DX12 bridge and offers separate ordinary-pointer D2D-copy and adapter-allocated shared-image entry points. The guide covers construction, CUDA stream ordering, slot return, deployment and shutdown. CUDA is required only when explicitly building the adapter or its example; the core C ABI is unchanged.
 
 ### GPU filter options
 
@@ -457,6 +454,17 @@ The final arguments are frame count, image edge, tile edge, FP32, reserved zero 
 | `binding_cache_capacity` | u32 | `8` | 1..=64 binding sets per workspace; cached image allocations increase retained GPU memory |
 
 Per-submit `input_scale` defaults to 1 and must be finite and positive. Full declarations and pointer/lifetime requirements are in [`include/oidn_webgpu_gpu.h`](include/oidn_webgpu_gpu.h) and the platform headers above.
+
+### C++17 wrappers
+
+The wrappers require C++17 and enabled exceptions (`/EHsc` with MSVC). The [C++ integration example](examples/gpu-integration.md#c17-wrapper) uses move-only model, filter, workspace, buffer and sync owners. Children retain the library context. Include `oidn_webgpu_metal.hpp`, `oidn_webgpu_vulkan.hpp` or `oidn_webgpu_dx12.hpp` and link `oidn_webgpu::cpp` with CMake. The common `oidn_webgpu_gpu.hpp` does not include a platform SDK.
+
+- Initialization failures throw `oidnw::gpu::error`. Submit, poll, wait and close return status values; an accepted submit always preserves its sequence, including on error.
+- Last-owner destruction drains accepted work without a deadline and can block. Use explicit `close(timeout_ns)` for fallible shutdown; release child wrappers first. Its timeout applies to the submission wait and does not bound native queue destruction or queue-lock callbacks.
+- Unhandled cleanup failure terminates by default. `device_options::on_cleanup_failure` may instead take ownership of the native context and host-lifetime token for deferred cleanup; `release()` transfers the same pair explicitly. Neither path proves GPU quiescence.
+- `device_options::host_lifetime` optionally retains a shared native-owner object, including queue callback userdata. Keep the C++ device and children outside that owner object.
+
+A complete [Objective-C++ program](examples/metal_gpu_cpp.mm) is built as `metal_gpu_cpp` alongside the Metal C example. The Windows Vulkan and DX12 examples share [`examples/gpu_cpp_lifecycle.hpp`](examples/gpu_cpp_lifecycle.hpp).
 
 ## Precompiled packages
 
@@ -478,12 +486,14 @@ The build host does not guarantee compatibility with older systems; `manifest.js
 | `include/oidn_webgpu.h` | C filter API |
 | `include/oidn_webgpu_core.h` | Core planner API |
 | `include/oidn_webgpu_gpu.h`, `include/oidn_webgpu_metal.h`, `include/oidn_webgpu_vulkan.h`, `include/oidn_webgpu_dx12.h` | Shared GPU C API and platform imports |
+| `include/oidn_webgpu_gpu.hpp`, `include/oidn_webgpu_metal.hpp`, `include/oidn_webgpu_vulkan.hpp`, `include/oidn_webgpu_dx12.hpp` | C++17 GPU wrappers |
 | `lib/liboidn_webgpu.dylib`, `.so`, or `oidn_webgpu.dll` + `oidn_webgpu.dll.lib` | C filter and GPU C shared library |
 | `lib/liboidn_webgpu_core.a` or `oidn_webgpu_core.lib` | Core planner static library; also the Rust core override |
 | `lib/cmake/oidn_webgpu/` | CMake config, version checks and imported targets |
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `examples/denoise.c`, `examples/plan.c`, `examples/host_buffers.rs` | Complete examples |
-| `examples/metal_gpu.m`, `examples/vulkan_gpu.cpp`, `examples/dx12_gpu.cpp`, `examples/shaders/` | Native GPU C ABI consumers and SPIR-V host shaders |
+| `examples/gpu-integration.md` | GPU C API integration walkthrough |
+| `examples/metal_gpu.m`, `examples/metal_gpu_cpp.mm`, `examples/vulkan_gpu.cpp`, `examples/dx12_gpu.cpp`, `examples/gpu_cpp_lifecycle.hpp`, `examples/shaders/` | GPU C and C++ hosts and SPIR-V host shaders |
 | `include/oidn_webgpu_cuda.hpp`, `examples/cuda-adapter/`, `examples/cuda_dx12_gpu.cu` | Optional Windows CUDA/DX12 adapter source, public C++ interface and CUDA consumer |
 | `examples/CMakeLists.txt` | C examples using the packaged CMake targets |
 | `examples/validate_windows.c` | Windows DLL output and latency check |

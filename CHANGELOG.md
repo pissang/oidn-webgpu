@@ -4,32 +4,31 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+These changes affect the native library only; the npm package and the Rust `Denoiser` API are unchanged. The native C library adds a GPU C API that denoises Metal, Vulkan and DX12 buffers owned by the host renderer, with C++17 wrappers and an optional Windows CUDA adapter. The C ABI moves from 1.0.0 to 2.1.0, a breaking change.
+
+### Breaking changes
+
+- C ABI 2.1.0 replaces 1.0.0. `oidnw_filter_desc` no longer has a `size` field, and the library no longer accepts older descriptor layouts. Headers and library must come from the same version; no compatibility adapter is provided. CPU image denoising through `oidnw_filter_*` is otherwise unchanged.
+
 ### Added
 
-- Optional Windows CUDA/DX12 C++17 adapter with ordinary CUDA device-pointer copies, adapter-owned shared images without bridge copies, CUDA stream dependencies, bounded slots and explicit drain/close. The native package ships its source and CUDA example; CUDA is required only when explicitly enabled. Denoising uses the existing DX12 backend and unchanged C ABI 2.1.0.
-- C++17 GPU wrappers with shared context lifetime, asynchronous submission results, explicit shutdown and native-owner retention, plus an Objective-C++ integration example and `oidn_webgpu::cpp` CMake target.
-- Windows Vulkan and DX12 DLL examples include the common C++ GPU lifecycle, platform helpers and a native resource lifetime owner. The CMake C++ target enables MSVC exception handling.
-- Vulkan instance-extension and device-requirement queries for host device creation. C ABI version is 2.1.0; use matching headers and library.
-- A GPU C integration walkthrough for existing Metal, Vulkan and DX12 renderers, shipped with the native examples.
-- GPU-resident C API for macOS Metal with host device/buffer/event import, asynchronous submission, external-signal completion queries, bounded in-flight work, binding caches and an Objective-C integration example. GPU descriptions use fixed layouts and require explicit initialization; headers and libraries must match exactly.
-- A macOS Metal interoperability validation example that imports host GPU buffers and checks asynchronous execution without uploading or reading back image pixels.
-- Windows Vulkan host-device/buffer import and DX12 shared-buffer/fence validation prototypes, plus a reproducible GPU test runner. Both routes are exposed through the GPU C API and have independent C++ DLL consumers.
-
-### Fixed
-
-- Vulkan device-requirement queries clear valid declaration and feature outputs on failure.
-- Windows interoperability runs keep each DLL consumer and shader assets in its selected output directory and record C++ header hashes.
-- GPU completion queries keep `completed=0` when rejecting unknown submission sequences, including zero.
-- The Metal C host example rejects a mismatched library version before creating GPU resources.
+- GPU C API ([`oidn_webgpu_gpu.h`](native/include/oidn_webgpu_gpu.h)): denoises host GPU buffers without uploads or readback. Submissions are asynchronous with up to 64 external waits and 64 signals each, `oidnw_gpu_poll` / `oidnw_gpu_wait` report completion including every external signal, accepted submissions are bounded by `max_pending_submissions` (default 64), and each workspace caches up to `binding_cache_capacity` binding sets (default 8). GPU errors and device loss quarantine the context; `oidnw_gpu_device_destroy_quiescent` releases it once the host knows the GPU is idle. See the [GPU C API guide](native/README.md#gpu-c-api).
+  - **Metal (macOS):** imports the host `MTLDevice`, buffers and shared events, with an optional shared queue guarded by host lock callbacks.
+  - **Vulkan (Windows; Linux not GPU-tested):** borrows the host instance, physical device, device and queue, and imports storage buffers and timeline semaphores. `oidnw_gpu_vulkan_instance_extensions` and `oidnw_gpu_vulkan_requirements_create/get` report the extensions and features to enable before creating the instance and device.
+  - **DX12 (Windows):** creates a separate library device on the host adapter's LUID with a matching Agility SDK, and imports shared committed UAV buffers and shared fences.
+- C++17 wrappers (`oidn_webgpu_gpu.hpp` and one header per platform) with move-only owners, shared context lifetime, status-returning submit/poll/wait, explicit `close(timeout_ns)` and optional host-object retention. CMake target `oidn_webgpu::cpp`; it enables MSVC exception handling.
+- Optional Windows CUDA/DX12 C++17 adapter (`oidn_webgpu_cuda.hpp`, CMake target `oidn_webgpu::cuda`) for CUDA renderers: copies from ordinary CUDA device pointers or denoises adapter-allocated shared images without copies, and orders work on CUDA streams. It uses the DX12 backend and is built only when enabled, so CUDA is not otherwise required.
+- The [GPU C integration walkthrough](native/examples/gpu-integration.md) and complete hosts for each route: `metal_gpu.m`, `metal_gpu_cpp.mm`, `vulkan_gpu.cpp`, `dx12_gpu.cpp` and `cuda_dx12_gpu.cu`. All ship in native packages with their SPIR-V shaders.
 
 ### Changed
 
-- Breaking C ABI 2.0.0: use matching headers and rebuild consumers. Remove the CPU filter descriptor's `size` field and its layout-size acceptance check. CPU image denoising remains supported; no ABI compatibility adapters are provided.
-- Add the DX12 GPU C backend using an independent device on the host LUID, a matching required Agility SDK, shared committed UAV buffers and fences. Completion includes every external signal; native completion-query and debug-layer errors quarantine the context.
-- Vulkan GPU C imports borrow the host instance/device/queue, validate the complete HAL creation contract, and enforce conservative admission behind unresolved external waits. Add a standalone C++ DLL consumer and separate platform header. Timeline query errors quarantine the context rather than reporting completion.
+- The macOS ARM64 C shared library is 4.67 MB instead of 6.49 MB before compression, including the new GPU C API.
+- Windows native releases support `x86_64-pc-windows-msvc` only. Windows GNU has no bundled core or precompiled package, and its source builds are not validated.
 
-- Reduce the macOS ARM64 native C shared library from 6.49 MB to 4.67 MB before compression, including the new GPU C API and excluding model weights.
-- Clarify that Windows native releases support `x86_64-pc-windows-msvc` only; Windows GNU has no bundled core or precompiled package, and its source builds are not validated.
+### Migration notes
+
+- Rebuild C consumers against the 2.1.0 headers and remove assignments to `oidnw_filter_desc.size`. Ship the library from the same release.
+- Dynamic loaders must check `oidnw_api_version() == OIDNW_API_VERSION` before calling the API.
 
 ## [Native 0.1.1] - 2026-10-25
 
@@ -214,6 +213,7 @@ oidn-web 0.4.0 replaces the TensorFlow.js inference stack with a purpose-built, 
 - Set `dynamicTile: false` to restore fixed-size tiling.
 
 [Unreleased]: https://github.com/pissang/oidn-webgpu/compare/v0.6.0...HEAD
+[Native 0.1.1]: https://github.com/pissang/oidn-webgpu/compare/native-v0.1.0...native-v0.1.1
 [0.6.0]: https://github.com/pissang/oidn-webgpu/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/pissang/oidn-webgpu/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/pissang/oidn-webgpu/compare/v0.3.5...v0.4.0

@@ -25,9 +25,7 @@
 - [native/include/oidn_webgpu.h](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu.h): C filter API and its contracts
 - [native/include/oidn_webgpu_gpu.h](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_gpu.h): GPU C handles, submissions, completion and lifetime contracts
 - [native/include/oidn_webgpu_metal.h](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_metal.h): Metal device, buffer and shared-event import
-
 - [native/include/oidn_webgpu_vulkan.h](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_vulkan.h): Vulkan host-device, buffer and timeline-semaphore import
-
 - [native/include/oidn_webgpu_dx12.h](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_dx12.h): independent DX12 device, shared committed buffers and fences
 - [native/include/oidn_webgpu_gpu.hpp](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_gpu.hpp): common C++17 GPU ownership, submission results, shutdown and host lifetime
 - [native/include/oidn_webgpu_cuda.hpp](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/native/include/oidn_webgpu_cuda.hpp): optional Windows CUDA/DX12 C++ adapter, CUDA pointer images, shared leases, tasks and stream dependencies
