@@ -4,9 +4,7 @@
 
 > Formerly published as `oidn-web`; versions up to 0.5.0 remain available under that name.
 
-| 2048 samples (reference) | 8 samples | 8 samples + OIDN |
-| :---: | :---: | :---: |
-| ![Classroom 2 reference](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/images/classroom2-reference.webp) | ![Classroom 2 noisy](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/images/classroom2-noisy.webp) | ![Classroom 2 denoised](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/images/classroom2-denoised.webp) |
+![Classroom 2 at 8 samples: noisy input on the left, OIDN denoised output on the right](https://raw.githubusercontent.com/pissang/oidn-webgpu/main/docs/images/classroom2-comparison.png)
 
 [Classroom 2 in MuTracer](https://mutracer-dev.meimu-studio.com/viewer/#model=research-classroom2&envIntensity=4&skyTime=16.0833&envResolution=2k&groundShadow=false&maxSamples=8&denoiseWhileConverging=true), rendered at 1280 × 720.
 
