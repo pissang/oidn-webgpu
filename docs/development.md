@@ -169,7 +169,7 @@ OIDN_LIBRARY=/absolute/path/to/libOpenImageDenoise.dylib node benchmarks/mac-per
 
 When one case is slower in every column, OIDN Metal included, remeasure only that case, for example `--models large --sizes 720p`.
 
-### Native Metal interoperability prototype
+### Native Metal interoperability checks
 
 On macOS, `native/examples/metal_interop.rs` validates importing a host Metal device and private image buffers through the Rust and GPU C APIs. Native Metal kernels produce inputs and consume denoised outputs on separate queues; image pixels stay on the GPU. The CPU inspects only per-pixel validation flags after execution.
 
@@ -268,15 +268,11 @@ On 2026-10-25: Windows 11 build 26200, RTX 4060 Laptop, NVIDIA 617.42, wgpu 30.0
 | DX12 C / serial Rust, same library device | 1000 | enabled and disabled separately | Debug layer on both devices | Byte equal |
 | DX12 DLL | 12 | enabled and disabled separately | Debug layer and GPU validation on both devices | Byte equal |
 
-Vulkan is **not clean shader validation**: Naga workgroup/ArrayStride decorations still trigger `VUID-StandaloneSpirv-None-10684`. The native messenger counts these separately in `known_naga_workgroup_layout_diagnostics` (8 or 10 per DLL case, and the layer's duplicate-message cap can limit oracle counts). All final cases report zero other validation errors. GPU-assisted runs additionally record two layer configuration warnings: instrumentation enables memory-model/address/scalar/8-bit features and disables irrelevant ray/mesh instrumentation. Warnings are recorded independently.
+Vulkan is **not clean shader validation**: Naga workgroup/ArrayStride decorations still trigger `VUID-StandaloneSpirv-None-10684`. The native messenger counts these separately in `known_naga_workgroup_layout_diagnostics`; all final cases report zero other validation errors. GPU-assisted validation uses a serialized protocol; asynchronous GPU-assisted validation with deeply gated future signals is not validated.
 
-An initial asynchronous Vulkan GPUAV gate test queried an external counter before releasing its producer gate. The layer waited for timeline state, emitted timeout warnings in Small, and the Base FP16 process was interrupted after more than six minutes. Those runs are retained as failed diagnostic evidence. GPUAV now uses a serialized protocol with independent producer release and no gated completion queries; all six 12-frame reruns completed without timeline-state timeout diagnostics. The normal 1000-frame tests, rather than that serialized diagnostic protocol, establish blocked-producer and in-flight-release behavior. Asynchronous GPUAV with deeply gated future signals is not validated.
+The GPU state-machine tests cover argument, range, alignment, role and duplicate-sync rejection, same-workspace `BUSY`, multi-workspace contention, queue backpressure, zero-timeout waits, in-flight handle release, controlled post-acceptance encoding failure, quarantine and quiescent teardown. DX12's state-machine fixture uses unchecked shaders; checked image correctness comes from the matrices above.
 
-The previous Rust DX12 prototype's checked Small 1000-frame run timed out at 300 seconds; that historical run remains inconclusive. The formal checked DLL and same-device Rust-oracle matrices now pass separately from unchecked matrices. No bounds checks were disabled for the checked results, and this work does not attribute the historical timeout to a verified cause.
-
-The GPU state-machine tests run parameter/range/alignment/role/duplicate-sync rejections, same-workspace BUSY, multi-workspace CPU contention, queue backpressure, zero-timeout waits, public handle release in flight, controlled post-acceptance encoding failure with the promised wait/signal, quarantine and explicit quiescent teardown. DX12's state-machine fixture explicitly uses unchecked shaders; checked image correctness is established by the separate matrices. A software-completion advance after injected uncertainty does not retire resources. The tests establish real completion before injecting that uncertainty, so quiescent teardown has host proof.
-
-Real device removal and recovery, independently lost DX12 devices, hidden memory aliases, unlimited-duration GPU memory behavior, other GPUs/drivers and performance remain unverified. Metal was not rerun on Windows. Existing allocator samples from a separate Vulkan reference wrapper do not measure the C context's allocator. Controlled encoding failure does not prove that external signals can be recovered after real device loss.
+Not verified: real device removal and recovery, independently lost DX12 devices, hidden memory aliases, long-duration memory behavior, other GPUs and drivers, and performance.
 
 ### Native Metal profiling
 

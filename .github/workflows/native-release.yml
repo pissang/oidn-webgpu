@@ -7,7 +7,7 @@ on:
         description: 'Native crate version (must match native/Cargo.toml)'
         type: string
         required: true
-        default: '0.1.1'
+        default: '0.2.0'
       publish:
         description: 'Publish GitHub Release assets and upload the crate to crates.io'
         type: boolean

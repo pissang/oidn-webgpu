@@ -17,8 +17,8 @@ and macOS ARM64. `build.rs` selects the Cargo `TARGET`, verifies the version,
 source commit, asset name, size, archive signature and SHA-256, then links it.
 Consumers need Rust and their platform linker; they do not need Node, npm, Zig,
 or a build-time download from GitHub. Offline builds work when Cargo dependencies
-are already cached. The assembled crate currently compresses to about 3.2 MiB;
-assembly rejects packages at or above 10,000,000 bytes.
+are already cached. Assembly rejects compressed crates at or above 10,000,000
+bytes.
 
 The crate and native packages carry `NOTICE` and the required scriptc runtime
 and V8 license texts under `licenses/scriptc/`. The same texts accompany raw

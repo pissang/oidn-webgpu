@@ -1,15 +1,15 @@
 [package]
 name = "oidn-webgpu-native"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 # Own code is MIT; bundled cores also contain scriptc, V8-derived code and Ryū.
 license = "MIT AND Apache-2.0 AND BSD-3-Clause AND BSL-1.0"
-description = "Experimental GPU denoising on host-owned wgpu devices and buffers, with a standalone C API"
+description = "Experimental GPU denoising on host-owned wgpu devices and buffers, with C APIs for Metal, Vulkan and DX12 buffers and CPU images"
 publish = ["crates-io"]
 repository = "https://github.com/pissang/oidn-webgpu"
 homepage = "https://github.com/pissang/oidn-webgpu"
 readme = "README.md"
-include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE", "licenses/**", "build.rs", "build_support/*.rs", "prebuilt/**", "src/**", "include/**", "examples/**/*.rs", "examples/**/*.hlsl", "examples/*.c", "examples/*.m", "examples/*.mm", "examples/*.cpp", "examples/*.md"]
+include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE", "licenses/**", "build.rs", "build_support/*.rs", "prebuilt/**", "src/**", "include/**", "examples/**/*.rs", "examples/**/*.hlsl", "examples/*.c", "examples/*.m", "examples/*.mm", "examples/*.cpp", "examples/*.hpp", "examples/*.cu", "examples/*.md"]
 
 [lib]
 name = "oidn_webgpu"

@@ -4,7 +4,7 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 **Status:** experimental; APIs and results may change between versions. See [Tested configurations](#tested-configurations). CI builds and checks packages but does not run them on a GPU.
 
-**Availability:** the latest release, Native 0.1.1 (C ABI 1.0.0; [changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)), contains the Rust API, the CPU C filter and the core planner. The GPU C API, C++17 wrappers and CUDA adapter (C ABI 3.0.0) are not released yet: [build from source](#build-from-source) or use a [CI package](#precompiled-packages) from a commit that contains them. The interface described here uses C ABI 3.0.0 headers; see [Versioning](#versioning) for compatible library versions.
+**Version:** this guide describes Native 0.2.0 with C ABI 3.0.0 ([changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)). Native 0.1.x shipped C ABI 1.0.0 with the Rust API, CPU C filter and core planner only; see [Versioning](#versioning) for compatible library versions.
 
 - [Choose an API](#choose-an-api)
 - [Get the library](#get-the-library)
@@ -12,6 +12,8 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 - [GPU C API](#gpu-c-api): Metal, Vulkan and DX12 renderers
 - [CUDA on Windows](#cuda-on-windows)
 - [CPU C filter](#cpu-c-filter)
+- [Versioning](#versioning)
+- [Core planner](#core-planner)
 - [Image contract](#image-contract)
 - [Precompiled packages](#precompiled-packages)
 - [Validate a build](#validate-a-build)
@@ -26,12 +28,12 @@ Use a GPU API whenever your images are already on the GPU. The images stay in yo
 | Your renderer | Use | Images | Available in | Start with |
 | --- | --- | --- | --- | --- |
 | Rust with wgpu `=30.0.1` | **Rust `Denoiser`** | Your `wgpu::Buffer`s, encoded into your command encoder | Native 0.1.0 | [Rust API](#rust-api) |
-| Metal, Vulkan or DX12, in C, C++ or Objective-C | **GPU C API** with the C++17 wrapper | Your GPU buffers | Unreleased (C ABI 3.0.0) | [GPU C API](#gpu-c-api) |
-| CUDA on Windows | **CUDA adapter** (C++17, on top of the DX12 route) | CUDA device pointers | Unreleased (C ABI 3.0.0) | [CUDA on Windows](#cuda-on-windows) |
+| Metal, Vulkan or DX12, in C, C++ or Objective-C | **GPU C API** with the C++17 wrapper | Your GPU buffers | Native 0.2.0 | [GPU C API](#gpu-c-api) |
+| CUDA on Windows | **CUDA adapter** (C++17, on top of the DX12 route) | CUDA device pointers | Native 0.2.0 | [CUDA on Windows](#cuda-on-windows) |
 | Offline tools, tests, any language with C FFI | CPU C filter | CPU arrays; each call uploads, denoises, reads back and blocks | Native 0.1.0 | [CPU C filter](#cpu-c-filter) |
 | Your own non-wgpu GPU executor | Core planner | Host-defined | Native 0.1.0 | [Core planner](#core-planner) |
 
-All APIs take linear RGBA32F images with the same [image contract](#image-contract). Weights are not bundled: choose a `.tza` file from the [weights table](https://github.com/pissang/oidn-webgpu#choose-weights) and ship it with your application.
+All APIs take linear RGBA32F images with the same [image contract](#image-contract). Shader runtime checks (bounds checks and workgroup initialization) are on by default in the Rust `Denoiser::new`, the GPU C API and the CUDA adapter, and off by default in the CPU C filter; disabling them can be faster. Weights are not bundled: choose a `.tza` file from the [weights table](https://github.com/pissang/oidn-webgpu#choose-weights) and ship it with your application.
 
 ## Get the library
 
@@ -55,12 +57,12 @@ target_link_libraries(my_renderer PRIVATE oidn_webgpu::cpp)
 
 | Target | Links | Use for | Available in |
 | --- | --- | --- | --- |
-| `oidn_webgpu::cpp` | Shared library, headers, C++17 and MSVC exception handling | C++ GPU hosts (recommended) | Unreleased |
-| `oidn_webgpu::oidn_webgpu` | Shared library and C headers | C hosts: GPU C API or CPU filter | Native 0.1.1 |
+| `oidn_webgpu::cpp` | Shared library, headers, C++17 and MSVC exception handling | C++ GPU hosts (recommended) | Native 0.2.0 |
+| `oidn_webgpu::oidn_webgpu` | Shared library and C headers | C hosts: GPU C API or CPU filter | CPU filter: Native 0.1.1; GPU C API: Native 0.2.0 |
 | `oidn_webgpu::oidn_webgpu_core` | Planner-only static library and its system libraries | [Core planner](#core-planner) | Native 0.1.1 |
-| `oidn_webgpu::cuda` | Optional CUDA adapter, built separately | [CUDA on Windows](#cuda-on-windows) | Unreleased |
+| `oidn_webgpu::cuda` | Optional CUDA adapter, built separately | [CUDA on Windows](#cuda-on-windows) | Native 0.2.0 |
 
-With a Native 0.1.1 package, link `oidn_webgpu::oidn_webgpu` and set `project(... LANGUAGES C)`.
+C hosts link `oidn_webgpu::oidn_webgpu` and set `project(... LANGUAGES C)`.
 
 - The package can be moved without regenerating its CMake files. An optional `find_package` version uses the native crate version; patch versions with the same major and minor are compatible.
 - Headers and libraries must match the application's OS and CPU architecture and satisfy [version compatibility](#versioning).
@@ -92,14 +94,10 @@ For Rust renderers on wgpu: the denoiser records into your command encoder and r
 
 ### Install
 
-The updated examples below use unreleased `warm_up` and `with_input_scale` methods; the `kernel` and `quality` options are also unreleased. Use a local checkout or a Git commit containing them; the published Native 0.1.1 crate does not provide these additions.
-
 ```toml
 [dependencies]
-oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
-# Published API, without the new methods:
-# oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.1" }
-# Git source:
+oidn-webgpu = { package = "oidn-webgpu-native", version = "0.2.0" }
+# Or a Git source:
 # oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
 ```
 
@@ -187,7 +185,7 @@ Kernel and quality selection are experimental and outside semver guarantees. Qua
 
 ## GPU C API
 
-Unreleased: needs C ABI 3.0.0 headers and library; Native 0.1.1 packages do not contain them. See **Availability** at the [top of this guide](#oidn-webgpu-native).
+Needs Native 0.2.0 or newer (C ABI 3.0.0).
 
 The GPU C API denoises your renderer's GPU buffers. It never uploads or reads back image pixels. Your render pass signals a timeline value when the inputs are ready, the library waits for it on the GPU, and signals another value when the output is written. Applications use only the C ABI (or the header-only C++17 wrapper); no Rust or wgpu types are involved.
 
@@ -345,8 +343,8 @@ A quarantined context can hold submissions whose outcome is unknown, so normal d
 | `next` | pointer | NULL | Reserved for extensions; must be NULL |
 | `hdr` | u32 | `1` | `0` for LDR weights |
 | `transfer` | enum | `OIDNW_TRANSFER_PU` | `OIDNW_TRANSFER_LOG` for RTLightmap HDR weights |
-| `kernel` | enum | `OIDNW_KERNEL_AUTO` | Uses subgroup matrix when enabled on the device, otherwise implicit GEMM; explicit `SUBGROUP_MATRIX` returns `UNAVAILABLE` if not enabled |
-| `quality` | enum | `OIDNW_QUALITY_HIGH` | HIGH/BALANCED use f32 matrix accumulation; FAST explicitly enables f16 accumulation |
+| `quality` | enum | `OIDNW_QUALITY_HIGH` | `HIGH`/`BALANCED` use f32 matrix accumulation; `FAST` explicitly enables f16 accumulation |
+| `kernel` | enum | `OIDNW_KERNEL_AUTO` | `AUTO` uses subgroup matrix when enabled on the device, otherwise implicit GEMM. `IMPLICIT_GEMM`, `DIRECT` and `SUBGROUP_MATRIX` select a path; `SUBGROUP_MATRIX` returns `UNAVAILABLE` if not enabled |
 | `max_tile_size` | u32 | `0` | `0` = whole image; otherwise 16..=16384, rounded down to a multiple of 16. Reduces workspace memory only |
 | `flags` | bitmask | `OIDNW_FILTER_RUNTIME_CHECKS` | `0` disables shader runtime checks, which can be faster |
 | `binding_cache_capacity` | u32 | `8` | 1..=64 cached image binding sets per workspace |
@@ -381,7 +379,7 @@ Initialize the output to `{0}`. Information is immutable after prepare, so queri
 | `max_pending_submissions` | u32 | `64` | 1..=4096 |
 
 - A shared queue needs a command-buffer capacity of at least 4096. Lock callbacks run on the calling thread, must not reenter the library or unwind, and `user_data` must stay valid until the context is destroyed.
-- FP16, subgroups and experimental cooperative matrices are enabled when supported. Metal cooperative matrices have been verified on Apple M4 Max through the Rust API, CPU filter and GPU C API. On NVIDIA RTX 4060 Laptop Vulkan, cooperative matrices have been verified through the Rust API and CPU filter; the GPU C API has only been verified with implicit GEMM, and its Vulkan cooperative-matrix path remains unverified. Other hardware is unverified. For problems, set the platform's `NO_COOPERATIVE_MATRIX` flag or select `kernel = OIDNW_KERNEL_IMPLICIT_GEMM`. Matrix flags and GPU filter kernel/quality options are experimental and outside semver guarantees. FAST quality requires explicit selection.
+- FP16, subgroups and experimental cooperative matrices are enabled when supported. Verified hardware is listed in [Tested configurations](#tested-configurations). If cooperative matrices cause problems, set the platform's `NO_COOPERATIVE_MATRIX` flag or select `kernel = OIDNW_KERNEL_IMPLICIT_GEMM`. Matrix flags and GPU filter kernel/quality options are experimental and outside semver guarantees. FAST quality requires explicit selection.
 
 Build and run both Metal hosts:
 
@@ -420,7 +418,7 @@ The C descriptor below is what these helpers fill; use it directly for `max_pend
 | `lock`, `unlock`, `user_data` | callbacks, pointer | NULL | Required; all your access to this queue must take the same lock (`queue_lock` provides both). Release it before calling the library |
 | `max_pending_submissions` | u32 | `64` | 1..=4096 |
 
-- Requirements queries include supported cooperative matrices by default; use the same flags for query and import. Import enables matrices only if the host enabled both the extension and `cooperativeMatrix`; otherwise AUTO uses implicit GEMM. For hardware coverage and fallback options, see [Metal](#metal).
+- Requirements queries include supported cooperative matrices by default; use the same flags for query and import. Import enables matrices only if the host enabled both the extension and `cooperativeMatrix`; otherwise AUTO uses implicit GEMM. Verified hardware is listed in [Tested configurations](#tested-configurations); to fall back, set `OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX` or select `kernel = OIDNW_KERNEL_IMPLICIT_GEMM`.
 - Import fully bound, non-sparse storage buffers and timeline semaphores with their original creation info. Buffers must belong to the queue family or use concurrent sharing that includes it; you perform any queue-family ownership transfers. Overlapping memory aliases, binary semaphores and aggregated Vulkan 1.1/1.2/1.3 feature structs are unsupported.
 - The library borrows your objects: keep them and their memory alive until the context is destroyed.
 - While an earlier submission's external waits are unresolved, the next submit returns `QUEUE_FULL`. Signal those producers independently and poll before retrying.
@@ -467,11 +465,11 @@ cmake --build .native-build/dx12-examples --config Release --target dx12_gpu
 .native-build/dx12-examples/Release/dx12_gpu.exe weights/rt_hdr_alb_nrm_small.tza .native-build/package/examples/shaders 1000 16 0 0 0 0
 ```
 
-The Windows hosts' arguments after the shader directory are frame count, image edge, tile edge, FP32 (`0`/`1`), shared queue (Vulkan; `0` on DX12) and shader runtime checks (`0`/`1`). They select the adapter whose name contains `OIDNW_INTEROP_ADAPTER` (default `RTX 4060`). The Vulkan host additionally needs Vulkan 1.3 and three graphics/compute queues in one family; this is an example requirement, not a library one. Set `WGPU_GPU_BASED_VALIDATION=1` to enable DX12 GPU validation. Known Naga workgroup/ArrayStride diagnostics are counted separately from other validation errors; a nonzero known count is not clean shader validation. These runs include deliberate delays and are not benchmarks.
+The Windows hosts' arguments after the shader directory are frame count, image edge, tile edge, FP32 (`0`/`1`), shared queue (Vulkan; `0` on DX12) and shader runtime checks (`0`/`1`). They select the adapter whose name contains `OIDNW_INTEROP_ADAPTER` (default `RTX 4060`); on other hardware, set it to part of your GPU's name. The Vulkan host additionally needs Vulkan 1.3 and three graphics/compute queues in one family; this is an example requirement, not a library one. Set `WGPU_GPU_BASED_VALIDATION=1` to enable DX12 GPU validation. Known Naga workgroup/ArrayStride diagnostics are counted separately from other validation errors; a nonzero known count is not clean shader validation. These runs include deliberate delays and are not benchmarks.
 
 ## CUDA on Windows
 
-Unreleased, like the GPU C API. CUDA renderers use the optional C++17 adapter in [`oidn_webgpu_cuda.hpp`](include/oidn_webgpu_cuda.hpp) (CMake target `oidn_webgpu::cuda`). It builds the DX12 bridge for you and orders denoising on your CUDA streams:
+Needs Native 0.2.0 or newer. CUDA renderers use the optional C++17 adapter in [`oidn_webgpu_cuda.hpp`](include/oidn_webgpu_cuda.hpp) (CMake target `oidn_webgpu::cuda`). It builds the DX12 bridge for you and orders denoising on your CUDA streams:
 
 ```cpp
 #include <oidn_webgpu_cuda.hpp>
@@ -526,26 +524,26 @@ Check every `int32_t` status (`OIDNW_OK` = 0); [`examples/denoise.c`](examples/d
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `next` | pointer | NULL | Reserved for extensions; must be NULL |
-| `hdr` | u32 | nonzero | `0` for LDR weights |
+| `hdr` | u32 | `1` | `0` for LDR weights |
 | `transfer` | enum | `OIDNW_TRANSFER_PU` | `OIDNW_TRANSFER_LOG` for RTLightmap HDR weights |
 | `quality` | enum | `OIDNW_QUALITY_HIGH` | `FAST` uses f16 accumulation in subgroup-matrix kernels |
-| `kernel` | enum | `OIDNW_KERNEL_AUTO` | Subgroup-matrix kernels with cooperative matrices, otherwise implicit GEMM |
+| `kernel` | enum | `OIDNW_KERNEL_AUTO` | `AUTO` uses subgroup-matrix kernels with cooperative matrices, otherwise implicit GEMM. `IMPLICIT_GEMM`, `DIRECT` and `SUBGROUP_MATRIX` select a path |
 | `max_tile_size` | u32 | `0` | `0` = whole image; otherwise rounded down to a multiple of 16 |
 | `input_scale` | float | `1.0` | Positive finite scale applied to HDR color before the transfer; zero is rejected |
 | `flags` | bitmask | `0` | `OIDNW_FILTER_RUNTIME_CHECKS` enables shader bounds checks (off by default); unknown bits return `OIDNW_ERROR_INVALID_ARGUMENT` |
 
 Use `OIDNW_BACKEND_VULKAN` for cooperative-matrix kernels on Windows and Linux. `oidnw_device_info` reports the adapter name, backend and enabled `OIDNW_FEATURE_*` bits. The [header](include/oidn_webgpu.h) documents every option and lifetime rule.
 
-### Versioning
+## Versioning
 
 `oidnw_api_version()` returns `major << 16 | minor << 8 | patch`; `OIDNW_API_VERSION` in the header is 3.0.0 (`0x00030000`). It covers the CPU filter and GPU C API.
 
 - Before calling the API, dynamic loaders must check `OIDNW_API_VERSION_IS_COMPATIBLE(oidnw_api_version())`. Compatibility requires the library's major to equal the header's major and its minor to be at least the header's minor; patch is ignored. For example, a 3.0 consumer accepts a 3.1 library, while a 3.1 consumer rejects a 3.0 library. The C++ wrappers perform this check.
 - `OIDNW_API_VERSION_MAJOR`, `OIDNW_API_VERSION_MINOR` and `OIDNW_API_VERSION_PATCH` expose the header version components.
 - Minor versions may add functions, enum values, flag bits and extension structures linked through `next`. They cannot change existing structure layouts. Removals and changes to existing layouts require a major version bump.
-- ABI 3.0.0 replaces 1.0.0: `oidnw_filter_desc.size` is removed. Descriptors, `oidnw_gpu_limits` and `oidnw_gpu_prepared_info` start with `next`, which must be NULL. Rebuild 1.x consumers and use the [CPU filter options](#cpu-c-filter) described above.
+- ABI 3.0.0 replaces 1.0.0 (2.x was never released): `oidnw_filter_desc.size` is removed. Descriptors, `oidnw_gpu_limits` and `oidnw_gpu_prepared_info` start with `next`, which must be NULL. Rebuild 1.x consumers and use the [CPU filter options](#cpu-c-filter) described above.
 
-### Core planner
+## Core planner
 
 Hosts with their own non-wgpu GPU executor can link the planner-only static library (`oidn_webgpu::oidn_webgpu_core`) and replay its programs; see [`include/oidn_webgpu_core.h`](include/oidn_webgpu_core.h) and [`examples/plan.c`](examples/plan.c). Rust and wgpu hosts should use `Denoiser`. On Windows, use the DLL CRT (`/MD`); no MinGW installation or extra runtime DLL is needed.
 
@@ -594,7 +592,7 @@ Windows GNU, Linux musl and other architectures are not provided, and Windows GN
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `manifest.json`, `SHA256SUMS` | Source commit, target, compiler versions, file hashes |
 
-Release package names contain the crate version and target triple, for example `oidn-webgpu-native-0.1.1-aarch64-apple-darwin.tar.gz`; `manifest.json` records the full source commit as `source.commit`. CI and local archive names also include the commit, and archives built from modified sources end in `-dirty`.
+Release package names contain the crate version and target triple, for example `oidn-webgpu-native-0.2.0-aarch64-apple-darwin.tar.gz`; `manifest.json` records the full source commit as `source.commit`. CI and local archive names also include the commit, and archives built from modified sources end in `-dirty`.
 
 To use a package's core from Rust, pin the Cargo `rev` to `source.commit` and set `OIDN_WEBGPU_CORE_ARCHIVE` to its core library. Cargo still compiles the Rust layer; precompiled `rlib`s are not provided.
 
@@ -608,7 +606,7 @@ To use a package's core from Rust, pin the Cargo `rev` to `source.commit` and se
 | Windows | NVIDIA RTX 4060 Laptop | Vulkan: cooperative matrices in the Rust API and CPU filter; GPU C API verified only with implicit GEMM, cooperative matrices unverified. DX12: implicit GEMM in the Rust API, CPU filter and GPU C API |
 | Linux | — | Builds only; GPU execution not verified |
 
-The Windows CI package at source `572efc0` was exercised on an RTX 4060 Laptop with NVIDIA 617.42. Vulkan output with and without runtime checks matched byte-for-byte for Small/Base/Large at 720p, 1080p, 1440p, partial workgroups and 128-pixel tiles, and real 1024x1024 HDR images matched official OIDN 2.5.1 CUDA numerically with the same weights. DX12 implicit GEMM passed with runtime checks disabled; DX12 with runtime checks is not validated.
+Before Native 0.1.1, the Windows CI package at source `572efc0` was exercised on an RTX 4060 Laptop with NVIDIA 617.42. Vulkan output with and without runtime checks matched byte-for-byte for Small/Base/Large at 720p, 1080p, 1440p, partial workgroups and 128-pixel tiles, and real 1024x1024 HDR images matched official OIDN 2.5.1 CUDA numerically with the same weights. DX12 implicit GEMM passed with runtime checks disabled; DX12 with runtime checks is not validated. These runs have not been repeated for Native 0.2.0.
 
 ### Validation tools
 

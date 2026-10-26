@@ -39,7 +39,7 @@ Measured on 2026-10-24 with the [Mac benchmark suite](docs/development.md#benchm
 
 - Cells are median milliseconds per image over 21 executions after 5 warmups, with no outliers removed. Parentheses show the latency reduction relative to 0.5.0 in Chrome.
 - Each execution denoises one whole HDR image with albedo and normals (`inputScale=1`) in GPU-resident RGBA32F buffers and synchronizes before the next. Timings include preprocessing, network execution and output conversion; they exclude device creation, model preparation, uploads and readback.
-- oidn-webgpu uses FP16 with default accumulation; native runs with shader runtime checks disabled, the C API default. Official OIDN loads the same weights: Small `rt_hdr_alb_nrm_small.tza` at fast quality, Base `rt_hdr_alb_nrm.tza` at high quality, Large `rt_hdr_calb_cnrm_large.tza` at high quality with clean auxiliary images.
+- oidn-webgpu uses FP16 with default accumulation; native runs with shader runtime checks disabled, the CPU C filter default. Official OIDN loads the same weights: Small `rt_hdr_alb_nrm_small.tza` at fast quality, Base `rt_hdr_alb_nrm.tza` at high quality, Large `rt_hdr_calb_cnrm_large.tza` at high quality with clean auxiliary images.
 - 720p = 1280 x 720, 1080p = 1920 x 1080, 1440p = 2560 x 1440. Image quality is not compared.
 
 #### Apple M4 Max

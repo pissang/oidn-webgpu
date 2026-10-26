@@ -72,7 +72,9 @@ The model size (small, default, large) is chosen by the file alone; no option ch
 | --- | --- |
 | [docs/web.md](docs/web.md) | Browser API: loading, inputs, `tileExecute`, GPU pipelines, tiling, precision, profiling |
 | [native/README.md](native/README.md) | GPU C/C++, CUDA, Rust and CPU C APIs, image contract, builds and precompiled packages |
+| [native/examples/gpu-integration.md](native/examples/gpu-integration.md) | GPU C API step by step in plain C, C++17 wrapper details, Windows CUDA adapter |
 | [docs/development.md](docs/development.md) | Architecture, build/test/benchmark commands, updating OIDN models, CI |
+| [docs/native-release.md](docs/native-release.md) | Maintainer guide for publishing native packages and the crate |
 | [AGENTS.md](AGENTS.md) | Repository map and working rules for coding agents and contributors |
 | [llms.txt](llms.txt) | Doc index for LLM tools |
 | [CHANGELOG.md](CHANGELOG.md) | Browser package release notes and migration steps |
