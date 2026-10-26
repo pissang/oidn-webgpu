@@ -5,7 +5,11 @@
 //! the host submits it. Images are tightly packed RGBA f32 storage buffers.
 //! The API is experimental. See `examples/host_buffers.rs` for a complete host.
 
+/// Internal C ABI implementation used by interop examples; outside Rust semver guarantees.
+#[doc(hidden)]
 pub mod capi;
+/// Internal GPU C ABI implementation used by interop examples; outside Rust semver guarantees.
+#[doc(hidden)]
 pub mod gpu_capi;
 mod denoiser;
 pub use denoiser::*;
@@ -47,6 +51,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub type PlanResult<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Precision {
     Auto = 0,
     Fp32 = 1,

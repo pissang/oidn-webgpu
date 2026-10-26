@@ -4,13 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-The runtime changes below affect the native library only; the npm package and the Rust `Denoiser` API are unchanged. The native C library adds a GPU C API that denoises Metal, Vulkan and DX12 buffers owned by the host renderer, with C++17 wrappers and an optional Windows CUDA adapter. The C ABI moves from 1.0.0 to 3.0.0, a breaking change.
+The runtime changes below affect the native library only; the npm package is unchanged. The native C library adds a GPU C API that denoises Metal, Vulkan and DX12 buffers owned by the host renderer, with C++17 wrappers and an optional Windows CUDA adapter. The C ABI moves from 1.0.0 to 3.0.0, a breaking change.
 
 ### Breaking changes
+
+- Rust `DenoiseParams`, `DenoiseInfo`, `KernelPath`, `Transfer`, `Limit` and `Precision` are non-exhaustive. Construct execution parameters with `DenoiseParams::default().with_input_scale(scale)` and include wildcard arms when matching these enums. C ABI implementation modules are hidden from Rust documentation and outside Rust semver guarantees.
 
 - C ABI 3.0.0 replaces 1.0.0. `oidnw_filter_desc` no longer has a `size` field, and the library no longer accepts older descriptor layouts. Headers and library must come from the same version; no compatibility adapter is provided. Every descriptor starts with a NULL `next` extension pointer. CPU filter `input_scale` must be positive and finite; zero is rejected.
 
 ### Added
+
+- C++ GPU helpers expose device information, model input count and status names.
+- CUDA adapter options select HDR/LDR and PU/log transfer. `resize(width, height)` reuses devices and weights after task/lease release and consumer retirement; `info().workspace` reports memory and selected kernels.
 
 - GPU workspace inspection through `oidnw_gpu_prepared_get_info` and C++ `workspace::info()`: immutable precision, actual kernels, tile count, workspace/shared-weight bytes and runtime-check state. Queries may overlap submit on the same workspace.
 - `oidnw_filter_set_input_scale` changes CPU filter exposure without rebuilding its workspace.
@@ -28,6 +33,8 @@ The runtime changes below affect the native library only; the npm package and th
 
 ### Changed
 
+- CUDA adapter debug layers default to off. Set `options.debug = true` to enable them; GPU validation still requires debug.
+
 - Native source builds watch the shared core input list and native source directory, so browser-only edits no longer trigger scriptc. Local test selection builds only the artifacts its imports require; contributor checks are scoped to the changed runtime.
 - The macOS ARM64 C shared library is 4.67 MB instead of 6.49 MB before compression, including the new GPU C API.
 - Windows native releases support `x86_64-pc-windows-msvc` only. Windows GNU has no bundled core or precompiled package, and its source builds are not validated.
@@ -36,6 +43,7 @@ The runtime changes below affect the native library only; the npm package and th
 
 - Rebuild C consumers against the 3.0.0 headers and remove assignments to `oidnw_filter_desc.size`. Ship the library from the same release.
 - Initialize descriptors with their default functions, keep `next` NULL and replace zero CPU input scales with `1.0`.
+- Replace Rust `DenoiseParams { input_scale: scale }` literals with `DenoiseParams::default().with_input_scale(scale)`. Add wildcard arms to matches on the newly non-exhaustive enums.
 - Dynamic loaders must check `oidnw_api_version() == OIDNW_API_VERSION` before calling the API.
 
 ## [Native 0.1.1] - 2026-10-25

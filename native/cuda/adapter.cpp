@@ -141,6 +141,7 @@ struct state {
     opts = options;
     require(opts.width && opts.height && opts.width <= 16384 && opts.height <= 16384 &&
         opts.slots >= 1 && opts.slots <= 64, code::invalid_argument, "invalid dimensions/slot count");
+    require(opts.transfer <= OIDNW_TRANSFER_LOG, code::invalid_argument, "unknown transfer");
     require(!opts.gpu_validation || opts.debug, code::invalid_argument, "GPU validation requires debug");
     driver(cuInit(0));
     CUcontext active = nullptr;
@@ -207,14 +208,27 @@ struct state {
     gpu::require(oidnw_gpu_device_info(context.get(), nullptr, 0, nullptr, &enabled), "device info failed");
     fp16 = (enabled & OIDNW_FEATURE_SHADER_F16) != 0;
     require(opts.fp32 || fp16, code::unsupported, "requested FP16 is unavailable");
-    slots.resize(opts.slots);
+    model = gpu::load_model(weights, bytes);
+    auto filter_options = gpu::filter_options();
+    filter_options.hdr = opts.hdr ? 1 : 0;
+    filter_options.transfer = opts.transfer;
+    filter_options.flags = opts.runtime_checks ? OIDNW_FILTER_RUNTIME_CHECKS : 0;
+    filter_options.max_tile_size = opts.max_tile_size;
+    filter_options.binding_cache_capacity = opts.slots;
+    filter = gpu::make_filter(context, model, filter_options);
+    rebuild_images(opts.width, opts.height);
+  }
+  void rebuild_images(uint32_t width, uint32_t height) {
+    std::vector<std::unique_ptr<native_owner::storage>> new_native;
+    std::vector<slot> new_slots(opts.slots);
+    uint64_t allocation_bytes = 0;
     for (uint32_t i = 0; i < opts.slots; ++i) {
-      native->slots.push_back(std::make_unique<native_owner::storage>());
-      auto &storage = *native->slots.back();
-      auto &slot = slots[i];
+      new_native.push_back(std::make_unique<native_owner::storage>());
+      auto &storage = *new_native.back();
+      auto &slot = new_slots[i];
       for (unsigned b = 0; b < 4; ++b) {
-        storage.buffers[b].create(native->host.Get(), uint64_t(opts.width) * opts.height * 16);
-        counters.shared_allocation_bytes += storage.buffers[b].allocation_bytes;
+        storage.buffers[b].create(native->host.Get(), uint64_t(width) * height * 16);
+        allocation_bytes += storage.buffers[b].allocation_bytes;
         slot.buffers[b] = dx12::import_buffer(context, storage.buffers[b].resource.Get());
       }
       storage.ready.create(native->host.Get()); storage.done.create(native->host.Get());
@@ -223,13 +237,15 @@ struct state {
       cu(cudaEventCreateWithFlags(&storage.completed, cudaEventDisableTiming));
       cu(cudaEventCreateWithFlags(&storage.retired, cudaEventDisableTiming));
     }
-    model = gpu::load_model(weights, bytes);
-    auto filter_options = gpu::filter_options();
-    filter_options.flags = opts.runtime_checks ? OIDNW_FILTER_RUNTIME_CHECKS : 0;
-    filter_options.max_tile_size = opts.max_tile_size;
-    filter_options.binding_cache_capacity = opts.slots;
-    filter = gpu::make_filter(context, model, filter_options);
-    workspace = gpu::prepare(filter, opts.width, opts.height, bindings(0));
+    auto &buffers = new_slots[0].buffers;
+    oidnw_gpu_images images = {{buffers[0].get(), 256}, {buffers[1].get(), 256},
+        {buffers[2].get(), 256}, {buffers[3].get(), 256}};
+    auto new_workspace = gpu::prepare(filter, width, height, images);
+    workspace = std::move(new_workspace);
+    slots = std::move(new_slots);
+    native->slots = std::move(new_native);
+    opts.width = width; opts.height = height;
+    counters.shared_allocation_bytes = allocation_bytes;
   }
   void validate(const image &view) const {
     require(view.data && view.width == opts.width && view.height == opts.height &&
@@ -532,6 +548,23 @@ status adapter::release(shared_images &images, cudaStream_t stream) {
     slot.retired_recorded = true; slot.leased = false; images.state_.reset(); return {};
   } catch (...) { return detail::caught(); }
 }
+status adapter::resize(uint32_t width, uint32_t height) {
+  try {
+    require(bool(state_), code::closed, "adapter is empty");
+    auto lock = detail::lock(*state_); state_->current();
+    require(width && height && width <= 16384 && height <= 16384,
+        code::invalid_argument, "invalid image dimensions");
+    require(!state_->poisoned, code::backend_error, "adapter stopped after an enqueue failure");
+    for (uint32_t i = 0; i < state_->slots.size(); ++i) {
+      auto &slot = state_->slots[i];
+      require(!slot.leased && !slot.task_held && (!slot.allocated || state_->complete(i, true)),
+          code::busy, "release tasks/leases and finish consumer retirement before resize");
+    }
+    require(!state_->poisoned, code::backend_error, "adapter stopped after a completion failure");
+    if (width != state_->opts.width || height != state_->opts.height) state_->rebuild_images(width, height);
+    return {};
+  } catch (...) { return detail::caught(); }
+}
 status adapter::drain(uint64_t timeout) {
   try {
     require(bool(state_), code::closed, "adapter is empty");
@@ -557,7 +590,7 @@ runtime_info adapter::info() const {
   require(GetModuleFileNameA(GetModuleHandleA("oidn_webgpu.dll"), path, sizeof(path)) > 0,
       code::backend_error, "loaded core DLL path unavailable");
   detail::driver(cuDeviceGetName(name, sizeof(name), state_->native->device));
-  return {name, path, oidnw_api_version(), state_->opts.agility_sdk_version, _MSC_FULL_VER};
+  return {name, path, oidnw_api_version(), state_->opts.agility_sdk_version, _MSC_FULL_VER, state_->workspace.info()};
 }
 bool adapter::uses_fp16() const {
   require(bool(state_), code::closed, "adapter is empty");

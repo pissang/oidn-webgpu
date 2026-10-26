@@ -10,6 +10,25 @@
 #include <utility>
 
 namespace oidnw::gpu {
+inline const char *status_name(int32_t code) noexcept {
+  switch (code) {
+    case OIDNW_OK: return "OK";
+    case OIDNW_ERROR_INVALID_ARGUMENT: return "INVALID_ARGUMENT";
+    case OIDNW_ERROR_UNAVAILABLE: return "UNAVAILABLE";
+    case OIDNW_ERROR_MODEL: return "MODEL";
+    case OIDNW_ERROR_GPU: return "GPU";
+    case OIDNW_ERROR_BUSY: return "BUSY";
+    case OIDNW_ERROR_DEVICE_LOST: return "DEVICE_LOST";
+    case OIDNW_ERROR_TIMEOUT: return "TIMEOUT";
+    case OIDNW_ERROR_QUEUE_FULL: return "QUEUE_FULL";
+    default: return "UNKNOWN";
+  }
+}
+struct device_info {
+  std::array<char, 256> name{};
+  uint32_t backend = OIDNW_BACKEND_AUTO;
+  uint32_t features = 0;
+};
 struct status {
   int32_t code = OIDNW_OK;
   std::array<char, 1024> message{};
@@ -124,7 +143,12 @@ public:
   }
 };
 }
-using model = detail::owned<oidnw_gpu_model, oidnw_gpu_model_destroy>;
+class model : public detail::owned<oidnw_gpu_model, oidnw_gpu_model_destroy> {
+  using base = detail::owned<oidnw_gpu_model, oidnw_gpu_model_destroy>;
+public:
+  using base::base;
+  uint32_t input_count() const noexcept { return oidnw_gpu_model_input_count(get()); }
+};
 using filter = detail::owned<oidnw_gpu_filter, oidnw_gpu_filter_destroy>;
 using buffer = detail::owned<oidnw_gpu_buffer, oidnw_gpu_buffer_destroy>;
 using sync = detail::owned<oidnw_gpu_sync, oidnw_gpu_sync_destroy>;
@@ -175,6 +199,12 @@ public:
       return result;
     }
     return state_->wait(sequence, timeout);
+  }
+  device_info info() const {
+    device_info result;
+    require(oidnw_gpu_device_info(get(), result.name.data(), result.name.size(),
+        &result.backend, &result.features), "device info failed");
+    return result;
   }
   oidnw_gpu_limits limits() const {
     oidnw_gpu_limits result;

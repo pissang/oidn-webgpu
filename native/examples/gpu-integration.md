@@ -286,9 +286,11 @@ Construction and metadata/view getters throw on failure. Enqueue, acquire, relea
 | `width`, `height` | `uint32_t` | `0` | Required image dimensions, 1..16384; device and workspace limits also apply |
 | `max_tile_size` | `uint32_t` | `0` | Existing GPU filter tiling option |
 | `slots` | `uint32_t` | `3` | Fixed pool capacity, 1..64 image sets |
+| `hdr` | `bool` | `true` | `false` for LDR weights |
+| `transfer` | `uint32_t` | `OIDNW_TRANSFER_PU` | `OIDNW_TRANSFER_LOG` for RTLightmap HDR weights |
 | `fp32` | `bool` | `false` | Force FP32; otherwise require FP16 |
 | `runtime_checks` | `bool` | `true` | Existing backend shader checks |
-| `debug` | `bool` | `true` | Enable the DX12 debug layer on both devices |
+| `debug` | `bool` | `false` | Enable the DX12 debug layer on both devices |
 | `gpu_validation` | `bool` | `false` | Enable DX12 GPU validation on both devices; requires `debug` |
 | `agility_sdk_path` | `std::string` | empty | Absolute UTF-8 SDK directory with trailing separator; empty uses `WGPU_DX12_AGILITY_SDK_PATH` |
 | `agility_sdk_version` | `uint32_t` | `0` | Matching SDK version; zero uses `WGPU_DX12_AGILITY_SDK_VERSION` |
@@ -340,6 +342,8 @@ For a consumer in another stream, call `task.depend(consumer_stream)` before que
 
 ### Completion, backpressure and shutdown
 
+`resize(width, height)` changes dimensions while reusing both DX12 devices, the CUDA context, model and shared weights. It rebuilds the workspace and shared image pool, so it can compile shaders and temporarily hold both pools. Release all task handles (including completed tasks) and shared leases, then finish recorded consumer retirement; otherwise it returns `busy`. Invalid dimensions or allocation/preparation failure preserve the previous pool. Previously copied views and bare pointers become invalid after a successful size change. Filter options stay fixed.
+
 Tasks and image leases are move-only. Tasks expose `accepted()`, `sequence()`, `phase()`, `query(completed)`, `wait(timeout_ns)` and `depend(stream)`. Completion covers the ordinary-pointer output copy. `depend` inserts a CUDA event dependency without a CPU wait. Task phases distinguish `not_accepted`, `accepted`, `accepted_error` and `completed`; `result` retains any enqueue error after completion. `query` can return an error together with `completed=true` for a finished failed task; inspect both outputs.
 
 - Invalid inputs and pool exhaustion return an unaccepted object. `busy` means the caller should retire earlier work and retry; the pool never grows. Keep task handles only as long as needed, because they pin their slot and completion event.
@@ -349,13 +353,13 @@ Tasks and image leases are move-only. Tasks expose `accepted()`, `sequence()`, `
 - `drain(timeout_ns)` waits for accepted work and recorded retirement. It returns `busy` for held shared leases. `close(timeout_ns)` additionally requires released task handles and closes the core context. Nanosecond timeout zero queries once; `UINT64_MAX` waits indefinitely. Timeout or busy preserves all resources, so release/drain and retry close. Successful close is idempotent.
 - Adapter, task and lease owners retain their common context. Destroying the outer adapter does not invalidate surviving children. Last-owner cleanup drains accepted work and can block. Failed cleanup terminates instead of freeing resources whose GPU use is uncertain. Real device-loss recovery is not implemented.
 
-Pool memory includes four shared image allocations per slot, CUDA mappings/events, per-slot fences, backend weights and the prepared tiled workspace. Allocation size can exceed logical image size because of DX12 heap alignment. Ordinary mode also needs the caller's input/output allocations. `stats()` reports shared allocation bytes and bridge copy bytes/enqueues; it excludes model/workspace memory and application copies. `info()` reports the loaded core DLL path, C ABI version, SDK version and compiler. No performance or long-term memory-stability conclusion follows from these counters.
+Pool memory includes four shared image allocations per slot, CUDA mappings/events, per-slot fences, backend weights and the prepared tiled workspace. Allocation size can exceed logical image size because of DX12 heap alignment. Ordinary mode also needs the caller's input/output allocations. `stats()` reports shared allocation bytes and bridge copy bytes/enqueues; it excludes model/workspace memory and application copies. `info()` reports the loaded core DLL path, C ABI version, SDK version, compiler and immutable `workspace` information described in the [filter guide](../README.md#filter-options).
 
 ## Vulkan preflight
 
 The [C++ Vulkan example](../README.md#example) shows the complete preflight: `instance_extensions` before `vkCreateInstance`, `query_requirements` and `merge_requirements` before `vkCreateDevice`, then import with the same create infos. This section covers what the example leaves out.
 
-- `query.flags` must equal the later import's `flags` (for example `OIDNW_GPU_VULKAN_FP32`).
+- `query.flags` must equal the later import's `flags` (for example `OIDNW_GPU_VULKAN_FP32`). Queries include supported cooperative-matrix requirements by default; `OIDNW_GPU_VULKAN_NO_COOPERATIVE_MATRIX` omits them. Import uses the feature only when the host enabled both the extension and feature. For fallback and hardware coverage, see the [Vulkan guide](../README.md#vulkan).
 - The queries create no logical device and no GPU work. Keep the instance declaration, the merged device declaration and your queue declarations alive through import.
 - Without your own extensions or features, `device_create_info(requirements)` returns the library's declaration directly. Its extension array, core features and feature-chain nodes are read-only and owned by `requirements`, so keep `requirements` alive through import in that case.
 - From C, merge by hand: combine extension names and feature bits without duplicating feature structures. The [Vulkan import rules](../README.md#vulkan) apply either way.

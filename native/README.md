@@ -92,13 +92,15 @@ For Rust renderers on wgpu: the denoiser records into your command encoder and r
 
 ### Install
 
+The updated examples below use unreleased `warm_up` and `with_input_scale` methods. Use a local checkout or a Git commit containing them; the published Native 0.1.1 crate does not provide these methods.
+
 ```toml
 [dependencies]
-oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.1" }
+oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
+# Published API, without the new methods:
+# oidn-webgpu = { package = "oidn-webgpu-native", version = "0.1.1" }
 # Git source:
 # oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
-# Local checkout:
-# oidn-webgpu = { package = "oidn-webgpu-native", path = "../oidn-webgpu/native" }
 ```
 
 - The registry crate bundles cores for the four [supported targets](#precompiled-packages); on Windows that is `x86_64-pc-windows-msvc`. It needs only Rust and a platform linker.
@@ -125,7 +127,7 @@ let mut prepared = denoiser.prepare([width, height], DenoiseBuffers {
 // Per frame.
 let mut encoder = device.create_command_encoder(&Default::default());
 // ... your render pass writes color/albedo/normal ...
-prepared.encode(&mut encoder, DenoiseParams { input_scale: exposure })?;
+prepared.encode(&mut encoder, DenoiseParams::default().with_input_scale(exposure))?;
 // ... your display pass reads output ...
 queue.submit([encoder.finish()]);
 ```
@@ -161,7 +163,7 @@ cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- 
 | `transfer` | `Transfer::Pu` | `Transfer::Log` for RTLightmap HDR weights |
 | `max_tile_size` | `0` | `0` = whole image; otherwise 16..=16384, rounded down to a multiple of 16. Reduces workspace memory only |
 
-`DenoiseParams` is passed to every `encode` and may change every frame:
+`DenoiseParams` is non-exhaustive and passed to every `encode`. Use `DenoiseParams::default().with_input_scale(exposure)` to change it every frame:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -278,6 +280,8 @@ if (!submitted.accepted()) {
 //    their scope), then close. Destroy your Vulkan objects only after this.
 context.close();   // Waits for accepted work.
 ```
+
+`context.info()` returns the adapter name, backend and enabled feature bits; `model.input_count()` returns the number of input images; `oidnw::gpu::status_name(code)` returns a status name, or `UNKNOWN` for an unrecognized code.
 
 Startup failures throw `oidnw::gpu::error` (with the C status in `code`). Submit, poll, wait and close never throw; check their returned status. `model`, `filter` and `workspace` can be recreated when the image size changes; the imports and context live as long as the renderer. A fixed-size workspace accepts different imported buffers on every submit.
 
@@ -472,6 +476,8 @@ oidnw::cuda::adapter denoiser(options, tza_bytes, tza_size);
 auto task = denoiser.enqueue_copy({color_view, albedo_view, normal_view, output_view}, stream, exposure);
 if (task.result) consume<<<grid, block, 0, stream>>>(output_pointer);
 ```
+
+`options.hdr` and `options.transfer` select HDR/LDR and PU/log transfer; debug layers default to off. `resize(width, height)` reuses devices and weights after task/lease release and consumer completion.
 
 The shared-image mode (`acquire` / `enqueue_shared` / `release`) renders straight into adapter-owned buffers with no copies. CUDA is needed only when you build the adapter. The [CUDA guide](examples/gpu-integration.md#windows-cuda-adapter) covers both modes, build, deployment and shutdown.
 

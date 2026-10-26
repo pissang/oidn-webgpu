@@ -1,6 +1,7 @@
 #ifndef OIDN_WEBGPU_CUDA_HPP
 #define OIDN_WEBGPU_CUDA_HPP
 #include <cuda_runtime_api.h>
+#include "oidn_webgpu_gpu.h"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -27,7 +28,9 @@ struct images { image color, albedo, normal, output; };
 struct options {
   uint32_t width = 0, height = 0, max_tile_size = 0;
   uint32_t slots = 3;
-  bool fp32 = false, runtime_checks = true, debug = true, gpu_validation = false;
+  bool hdr = true;
+  uint32_t transfer = OIDNW_TRANSFER_PU;
+  bool fp32 = false, runtime_checks = true, debug = false, gpu_validation = false;
   std::string agility_sdk_path;
   uint32_t agility_sdk_version = 0;
 };
@@ -39,6 +42,7 @@ struct statistics {
 struct runtime_info {
   std::string device_name, core_dll_path;
   uint32_t api_version = 0, agility_sdk_version = 0, msvc_version = 0;
+  oidnw_gpu_prepared_info workspace{};
 };
 enum class task_phase { not_accepted, accepted, accepted_error, completed };
 class task {
@@ -92,6 +96,9 @@ public:
   shared_images acquire();
   task enqueue_shared(shared_images &, cudaStream_t, float input_scale = 1);
   status release(shared_images &, cudaStream_t consumer_stream);
+  /* Requires released task handles/leases and completed CUDA consumer retirement.
+   * Reuses devices and weights. Failure preserves the previous image pool. */
+  status resize(uint32_t width, uint32_t height);
   status drain(uint64_t timeout_ns = UINT64_MAX);
   status close(uint64_t timeout_ns = UINT64_MAX);
   statistics stats() const;

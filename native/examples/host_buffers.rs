@@ -128,7 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         pass.set_bind_group(0, &bindings, &[]);
         pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
     }
-    prepared.encode(&mut encoder, DenoiseParams::default())?;
+    prepared.encode(&mut encoder, DenoiseParams::default().with_input_scale(1.0))?;
     encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, bytes);
     let submission = queue.submit([encoder.finish()]);
 

@@ -7,6 +7,7 @@ use std::{
 
 /// Device limit that prevented preparation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Limit {
     ProgramBufferSize,
     BufferSize,
@@ -142,6 +143,7 @@ impl Model {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Transfer {
     #[default]
     Pu,
@@ -168,10 +170,18 @@ impl Default for DenoiserOptions {
 }
 /// Per-execution values. Changing these does not prepare resources again.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct DenoiseParams {
     /// Positive finite scale applied before HDR transfer, undone on output.
     /// Ignored for LDR. Exposure is not estimated automatically.
     pub input_scale: f32,
+}
+impl DenoiseParams {
+    /// Sets the per-execution HDR scale; encode validates that it is positive and finite.
+    pub fn with_input_scale(mut self, input_scale: f32) -> Self {
+        self.input_scale = input_scale;
+        self
+    }
 }
 impl Default for DenoiseParams {
     fn default() -> Self {
@@ -258,6 +268,7 @@ impl DenoiseBuffers<'_> {
 /// Convolution paths actually selected by the planner; a network may use more
 /// than one (for example matrix convolutions and a direct final RGB layer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KernelPath {
     Direct,
     ImplicitGemm,
@@ -267,6 +278,7 @@ pub enum KernelPath {
 }
 /// Resource sizes and selected execution paths for this prepared instance.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct DenoiseInfo {
     pub size: [u32; 2],
     /// Activation/weight storage; image buffers and output remain f32.

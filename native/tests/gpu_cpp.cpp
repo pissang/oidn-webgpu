@@ -29,6 +29,7 @@ int32_t oidnw_gpu_model_create(const void *bytes, size_t, oidnw_gpu_model **out,
   *out = new oidnw_gpu_model;
   return OIDNW_OK;
 }
+uint32_t oidnw_gpu_model_input_count(const oidnw_gpu_model *p) { return p ? 3 : 0; }
 void oidnw_gpu_model_destroy(oidnw_gpu_model *p) { if (p) { ++model_frees; delete p; } }
 int32_t oidnw_gpu_filter_create(oidnw_gpu_device *d, const oidnw_gpu_model *, const oidnw_gpu_filter_desc *, oidnw_gpu_filter **out, char *, size_t) {
   *out = new oidnw_gpu_filter{d}; ++d->children; return OIDNW_OK;
@@ -78,6 +79,11 @@ int32_t oidnw_gpu_device_destroy_quiescent(oidnw_gpu_device *d, char *error, siz
   d->done = d->issued;
   return oidnw_gpu_device_destroy(d, error, size);
 }
+int32_t oidnw_gpu_device_info(const oidnw_gpu_device *d, char *name, size_t capacity, uint32_t *backend, uint32_t *features) {
+  if (!d) return OIDNW_ERROR_INVALID_ARGUMENT;
+  std::snprintf(name, capacity, "%s", "mock GPU"); *backend = OIDNW_BACKEND_METAL; *features = OIDNW_FEATURE_COOPERATIVE_MATRIX;
+  return OIDNW_OK;
+}
 int32_t oidnw_gpu_get_limits(const oidnw_gpu_device *, oidnw_gpu_limits *out, char *, size_t) {
   *out = {256, 1024 * 1024, 1024 * 1024, 8}; return OIDNW_OK;
 }
@@ -89,6 +95,11 @@ int main() {
   static_assert(!std::is_copy_constructible_v<workspace>);
   static_assert(std::is_nothrow_move_constructible_v<workspace>);
   static_assert(std::is_nothrow_move_assignable_v<buffer>);
+  for (int32_t code = OIDNW_OK; code <= OIDNW_ERROR_QUEUE_FULL; ++code)
+    ensure(std::strcmp(status_name(code), "UNKNOWN") != 0);
+  ensure(std::strcmp(status_name(OIDNW_ERROR_DEVICE_LOST), "DEVICE_LOST") == 0);
+  ensure(std::strcmp(status_name(-1), "UNKNOWN") == 0);
+  ensure(model{}.input_count() == 0);
   oidnw_gpu_images images{};
   std::weak_ptr<int> host_lifetime;
   {
@@ -98,7 +109,11 @@ int main() {
     options.host_lifetime = host;
     auto context = device::adopt(new oidnw_gpu_device, std::move(options));
     host.reset();
+    const auto hardware = context.info();
+    ensure(std::strcmp(hardware.name.data(), "mock GPU") == 0 && hardware.backend == OIDNW_BACKEND_METAL);
+    ensure(hardware.features == OIDNW_FEATURE_COOPERATIVE_MATRIX);
     auto weights = load_model("x", 1);
+    ensure(weights.input_count() == 3);
     auto source = make_filter(context, weights);
     auto prepared = prepare(source, 16, 16, images);
     const auto info = prepared.info();

@@ -405,9 +405,7 @@ mod metal {
             let mut encoder = context.device.create_command_encoder(&Default::default());
             prepared.encode(
                 &mut encoder,
-                DenoiseParams {
-                    input_scale: scales[pattern],
-                },
+                DenoiseParams::default().with_input_scale(scales[pattern]),
             )?;
             context.wait(context.queue.submit([encoder.finish()]))?;
             let observed = errors.lock().unwrap();
@@ -513,9 +511,7 @@ mod metal {
                     let mut encoder = context.device.create_command_encoder(&Default::default());
                     prepared.encode(
                         &mut encoder,
-                        DenoiseParams {
-                            input_scale: scales[pattern],
-                        },
+                        DenoiseParams::default().with_input_scale(scales[pattern]),
                     )?;
                     let hal = unsafe { context.queue.as_hal::<wgpu::hal::api::Metal>() }
                         .ok_or("not a Metal queue")?;

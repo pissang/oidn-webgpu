@@ -35,7 +35,8 @@ if(OIDNW_CUDA_BUILD_TESTS)
   endif()
   add_library(oidn_webgpu_cuda_faults STATIC adapter.cpp)
   target_compile_definitions(oidn_webgpu_cuda_faults PRIVATE oidnw_gpu_submit=oidnw_cuda_test_submit
-    oidnw_gpu_poll=oidnw_cuda_test_poll cuDeviceGetLuid=oidnw_cuda_test_luid)
+    oidnw_gpu_poll=oidnw_cuda_test_poll cuDeviceGetLuid=oidnw_cuda_test_luid
+    oidnw_gpu_filter_create=oidnw_cuda_test_filter_create)
   target_compile_features(oidn_webgpu_cuda_faults PRIVATE cxx_std_17)
   target_compile_options(oidn_webgpu_cuda_faults PRIVATE /EHsc)
   set_target_properties(oidn_webgpu_cuda_faults PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreadedDLL)

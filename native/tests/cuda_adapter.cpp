@@ -11,6 +11,12 @@
 #include <vector>
 namespace bridge = oidnw::cuda;
 static unsigned fault = 0;
+static uint32_t filter_hdr = 0, filter_transfer = 0;
+extern "C" int32_t oidnw_cuda_test_filter_create(oidnw_gpu_device *device, const oidnw_gpu_model *model,
+    const oidnw_gpu_filter_desc *desc, oidnw_gpu_filter **filter, char *error, size_t capacity) {
+  filter_hdr = desc->hdr; filter_transfer = desc->transfer;
+  return oidnw_gpu_filter_create(device, model, desc, filter, error, capacity);
+}
 static std::atomic<bool> entered{false}, resume{false};
 extern "C" CUresult CUDAAPI oidnw_cuda_test_luid(char *luid, unsigned *node, CUdevice device) {
   auto status = cuDeviceGetLuid(luid, node, device);
@@ -63,6 +69,37 @@ int main(int argc, char **argv) {
       return bridge::images{image(0), image(1), image(2), image(3)};
     }();
     bridge::options options; options.width = options.height = 16;
+    ensure(!options.debug && options.hdr && options.transfer == OIDNW_TRANSFER_PU, "unexpected option defaults");
+    for (bool hdr : {false, true}) {
+      auto configured = options; configured.hdr = hdr;
+      configured.transfer = hdr ? OIDNW_TRANSFER_LOG : OIDNW_TRANSFER_PU;
+      bridge::adapter adapter(configured, weights.data(), weights.size());
+      ensure(filter_hdr == uint32_t(hdr) && filter_transfer == configured.transfer, "HDR/transfer did not reach GPU filter");
+      ensure(adapter.info().workspace.workspace_bytes > 0, "workspace information unavailable");
+      check(adapter.close());
+    }
+    {
+      bridge::adapter adapter(options, weights.data(), weights.size());
+      const auto before = adapter.info();
+      auto lease = adapter.acquire(); check(lease.result);
+      ensure(adapter.resize(32, 32).value == bridge::code::busy, "resize accepted held lease");
+      check(adapter.release(lease, stream)); cu(cudaStreamSynchronize(stream));
+      auto pending = adapter.enqueue_copy(views, stream); check(pending.result);
+      ensure(adapter.resize(32, 32).value == bridge::code::busy, "resize accepted outstanding task");
+      check(pending.wait());
+      ensure(adapter.resize(32, 32).value == bridge::code::busy, "resize accepted held completed task");
+      pending = bridge::task{};
+      ensure(adapter.resize(0, 32).value == bridge::code::invalid_argument, "resize accepted zero width");
+      check(adapter.resize(32, 32));
+      const auto after = adapter.info();
+      ensure(before.device_name == after.device_name && before.workspace.shared_weight_bytes == after.workspace.shared_weight_bytes, "resize changed device/model");
+      lease = adapter.acquire(); check(lease.result);
+      ensure(lease.views().color.width == 32 && lease.views().color.height == 32, "resize kept old image dimensions");
+      check(adapter.release(lease, stream)); cu(cudaStreamSynchronize(stream));
+      auto rejected = adapter.enqueue_copy(views, stream);
+      ensure(!rejected.accepted() && rejected.result.value == bridge::code::invalid_argument, "resize accepted old image dimensions");
+      check(adapter.close());
+    }
     fault = 5;
     bool unmatched = false;
     try { bridge::adapter rejected(options, weights.data(), weights.size()); }
@@ -108,7 +145,8 @@ int main(int argc, char **argv) {
       while (!entered.load()) std::this_thread::yield();
       auto rejected = adapter.acquire();
       bool busy = !rejected && rejected.result.value == bridge::code::busy &&
-          adapter.close(0).value == bridge::code::busy;
+          adapter.close(0).value == bridge::code::busy &&
+          adapter.resize(32, 32).value == bridge::code::busy;
       resume.store(true); caller.join(); fault = 0;
       ensure(busy, "concurrent call was not rejected");
       check(pending.result); check(pending.wait()); pending = bridge::task{}; check(adapter.close());

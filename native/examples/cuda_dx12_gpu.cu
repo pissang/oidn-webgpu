@@ -140,6 +140,7 @@ int main(int argc, char **argv) {
     options.fp32 = argc > 5 && std::stoi(argv[5]);
     options.runtime_checks = argc <= 7 || std::stoi(argv[7]);
     options.gpu_validation = argc > 8 && std::stoi(argv[8]);
+    options.debug = true;
     ensure(frames >= 4 && frames <= 100000 && size && size <= 1024 &&
         (uint64_t(frames) + 1) * size * size * 4 <= UINT32_MAX, "invalid dimensions/frame count");
     cu(cudaSetDevice(0));

@@ -915,9 +915,7 @@ pub fn run() -> Result<()> {
             let mut encoder = context.device.create_command_encoder(&Default::default());
             prepared.encode(
                 &mut encoder,
-                DenoiseParams {
-                    input_scale: SCALES[pattern],
-                },
+                DenoiseParams::default().with_input_scale(SCALES[pattern]),
             )?;
             context.wait(library_submit(
                 &context,
@@ -938,9 +936,7 @@ pub fn run() -> Result<()> {
             prepared
                 .encode(
                     &mut encoder,
-                    DenoiseParams {
-                        input_scale: f32::NAN
-                    }
+                    DenoiseParams::default().with_input_scale(f32::NAN)
                 )
                 .is_err()
         );
@@ -1141,9 +1137,7 @@ pub fn run() -> Result<()> {
                 let mut encoder = context.device.create_command_encoder(&Default::default());
                 prepared.encode(
                     &mut encoder,
-                    DenoiseParams {
-                        input_scale: SCALES[pattern],
-                    },
+                    DenoiseParams::default().with_input_scale(SCALES[pattern]),
                 )?;
                 last = Some(library_submit(
                     &context,

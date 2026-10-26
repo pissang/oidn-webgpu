@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut execute = || -> Result<f64, Box<dyn std::error::Error>> {
         let started = Instant::now();
         let mut encoder = device.create_command_encoder(&Default::default());
-        prepared.encode(&mut encoder, DenoiseParams::default())?;
+        prepared.encode(&mut encoder, DenoiseParams::default().with_input_scale(1.0))?;
         queue.submit([encoder.finish()]);
         wait()?;
         Ok(started.elapsed().as_secs_f64() * 1000.0)
