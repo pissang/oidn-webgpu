@@ -4,9 +4,11 @@ Changes to the native library: the Rust crate `oidn-webgpu-native` and the C/C++
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-25
+
 ### Added
 
-- Rust `Denoiser::experimental_features(&adapter)` returns the adapter's supported `EXPERIMENTAL_COOPERATIVE_MATRIX`. `recommended_features` does not include it, so Rust hosts that want cooperative-matrix kernels add this result to `required_features` and set `experimental_features` to `wgpu::ExperimentalFeatures::enabled()` (see [Device setup](README.md#device-setup)). Devices that do not opt in keep using implicit GEMM.
+- Rust `Denoiser::experimental_features(&adapter)` lets hosts discover and opt into the adapter's cooperative-matrix feature. See [Device setup](README.md#device-setup).
 
 ## [0.2.1] - 2026-11-25
 
@@ -65,7 +67,9 @@ Native 0.2.0 adds a GPU C API for host-owned Metal, Vulkan and DX12 buffers, C++
 
 First release, published together with oidn-webgpu 0.6.0: experimental native denoising through Rust and C APIs on Metal, Vulkan or Direct3D 12, with precompiled C packages and a Rust crate for Windows x86_64 MSVC, Linux x86_64 GNU, macOS x86_64 and macOS ARM64. The [0.6.0 release notes](https://github.com/pissang/oidn-webgpu/blob/main/CHANGELOG.md#060---2026-10-25) list the native additions, fixes and performance measurements.
 
-[Unreleased]: https://github.com/pissang/oidn-webgpu/compare/native-v0.2.0...HEAD
+[Unreleased]: https://github.com/pissang/oidn-webgpu/compare/native-v0.2.2...HEAD
+[0.2.2]: https://github.com/pissang/oidn-webgpu/compare/native-v0.2.1...native-v0.2.2
+[0.2.1]: https://github.com/pissang/oidn-webgpu/compare/native-v0.2.0...native-v0.2.1
 [0.2.0]: https://github.com/pissang/oidn-webgpu/compare/native-v0.1.1...native-v0.2.0
 [0.1.1]: https://github.com/pissang/oidn-webgpu/compare/native-v0.1.0...native-v0.1.1
 [0.1.0]: https://github.com/pissang/oidn-webgpu/releases/tag/native-v0.1.0

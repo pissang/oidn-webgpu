@@ -4,7 +4,7 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 **Status:** experimental; APIs and results may change between versions. See [Tested configurations](#tested-configurations). CI builds and checks packages but does not run them on a GPU.
 
-**Version:** this guide describes Native 0.2.1 with C ABI 3.0.0 ([changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)). See [Versioning](#versioning) for compatibility with Native 0.1.x.
+**Version:** this guide describes Native 0.2.2 with C ABI 3.0.0 ([changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)). See [Versioning](#versioning) for compatibility with Native 0.1.x.
 
 - [Choose an API](#choose-an-api)
 - [Get the library](#get-the-library)
@@ -96,7 +96,7 @@ For Rust renderers on wgpu: the denoiser records into your command encoder and r
 
 ```toml
 [dependencies]
-oidn-webgpu = { package = "oidn-webgpu-native", version = "0.2.1" }
+oidn-webgpu = { package = "oidn-webgpu-native", version = "0.2.2" }
 # Or a Git source:
 # oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
 ```
@@ -151,17 +151,16 @@ cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- 
 
 ### Device setup
 
-Before requesting the device, add the denoiser's features and limits. The library cannot enable features later.
+Request the denoiser's features and limits when creating the device. Include `experimental_features(&adapter)` to opt into cooperative matrices.
 
 ```rust
 let experimental = Denoiser::experimental_features(&adapter);
 let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
     required_features: Denoiser::required_features()
         | Denoiser::recommended_features(&adapter)
-        | experimental
-        | my_features,
-    required_limits: Denoiser::required_limits(), // or higher; see below
-    // SAFETY: opts into wgpu's experimental feature contract.
+        | experimental,
+    required_limits: Denoiser::required_limits(),
+    // SAFETY: the host accepts wgpu's experimental feature contract.
     experimental_features: if experimental.is_empty() {
         wgpu::ExperimentalFeatures::disabled()
     } else {
@@ -171,17 +170,16 @@ let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
 }).await?;
 ```
 
-| Call | Returns | Needed for |
-| --- | --- | --- |
-| `Denoiser::required_features()` | Empty | Nothing today; request it for forward compatibility |
-| `Denoiser::recommended_features(&adapter)` | Supported `SHADER_F16`, `SUBGROUP` | FP16 precision and subgroup kernels. No experimental features |
-| `Denoiser::experimental_features(&adapter)` | Supported `EXPERIMENTAL_COOPERATIVE_MATRIX` | Cooperative-matrix (tensor core) kernels. Requires `ExperimentalFeatures::enabled()` |
-| `Denoiser::required_limits()` | `wgpu::Limits::default()` | Baseline; large images may need higher buffer limits |
+| Call | Return type | Returned value | Use |
+| --- | --- | --- | --- |
+| `Denoiser::required_features()` | `wgpu::Features` | Empty | Include when requesting the device for compatibility with future releases |
+| `Denoiser::recommended_features(&adapter)` | `wgpu::Features` | Supported `SHADER_F16` and `SUBGROUP` | FP16 precision and subgroup kernels |
+| `Denoiser::experimental_features(&adapter)` | `wgpu::Features` | `EXPERIMENTAL_COOPERATIVE_MATRIX` when supported, otherwise empty | Cooperative-matrix kernels |
+| `Denoiser::required_limits()` | `wgpu::Limits` | `wgpu::Limits::default()` | Baseline limits. Large images may need higher buffer limits |
 
-- Cooperative matrices are opt-in on this API: a device built only from `required_features()` and `recommended_features()` uses implicit GEMM. The C API (`oidnw_device_create`) and the GPU C API import paths enable them by default when supported.
 - Precision is FP16 when the device enables `SHADER_F16`, otherwise FP32. On DX12, `SHADER_F16` also needs DXC (Shader Model 6.2+): ship `dxcompiler.dll` and its matching `dxil.dll`.
-- With `kernel = Kernel::Auto`, cooperative-matrix kernels are selected when the device enables `EXPERIMENTAL_COOPERATIVE_MATRIX`; otherwise AUTO uses implicit GEMM. On Windows and Linux the feature needs the Vulkan backend: wgpu prefers DX12 on Windows, where `experimental_features(&adapter)` is empty, so create the instance with `wgpu::Backends::VULKAN` to use matrices there. Selecting `Kernel::SubgroupMatrix` does not enable the feature; `Denoiser::new` returns `Error::UnsupportedDevice` if it is not enabled.
-- `prepared.info().kernels` reports which kernel paths a prepared instance uses.
+- On Windows and Linux, create the wgpu instance with `wgpu::Backends::VULKAN` to use cooperative matrices.
+- `Kernel::Auto` uses cooperative matrices when the feature is enabled and the matrix configuration fits the device limits. Otherwise it uses the implicit GEMM path. `Denoiser::new` returns `Error::UnsupportedDevice` if you select `Kernel::SubgroupMatrix` and the feature is disabled.
 
 ### Options
 
@@ -620,7 +618,7 @@ Windows GNU, Linux musl and other architectures are not provided, and Windows GN
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `manifest.json`, `SHA256SUMS` | Source commit, target, compiler versions, file hashes |
 
-Release package names contain the crate version and target triple, for example `oidn-webgpu-native-0.2.1-aarch64-apple-darwin.tar.gz`.
+Release package names contain the crate version and target triple, for example `oidn-webgpu-native-0.2.2-aarch64-apple-darwin.tar.gz`.
 
 To use a package's core from Rust, pin the Cargo `rev` to `source.commit` and set `OIDN_WEBGPU_CORE_ARCHIVE` to its core library. Cargo still compiles the Rust layer; precompiled `rlib`s are not provided.
 

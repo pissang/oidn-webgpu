@@ -340,7 +340,7 @@ impl Denoiser {
         adapter.features() & (wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP)
     }
     /// Optional experimental acceleration supported by `adapter`: currently
-    /// `EXPERIMENTAL_COOPERATIVE_MATRIX`, which `Kernel::Auto` uses for
+    /// `EXPERIMENTAL_COOPERATIVE_MATRIX`, which allows `Kernel::Auto` to use
     /// subgroup-matrix kernels. Requesting a non-empty result requires
     /// `DeviceDescriptor::experimental_features` set to
     /// `wgpu::ExperimentalFeatures::enabled()`, which is `unsafe` under wgpu's

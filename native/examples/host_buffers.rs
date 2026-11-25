@@ -32,8 +32,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         required_features: Denoiser::required_features()
             | Denoiser::recommended_features(&adapter)
             | experimental,
-        // SAFETY: cooperative matrices are an experimental wgpu feature, used
-        // only by the denoiser's subgroup-matrix kernels.
+        // SAFETY: this example accepts wgpu's experimental feature contract
+        // for cooperative matrices.
         experimental_features: if experimental.is_empty() {
             wgpu::ExperimentalFeatures::disabled()
         } else {
