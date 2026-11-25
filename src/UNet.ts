@@ -366,29 +366,45 @@ class UNet {
     return tensorData;
   }
 
-  private _readTile(
+  private _processCPUTile(
     data: Float32Array,
     channels: number,
     srcTile: Tile,
-    width: number
+    width: number,
+    height: number,
+    isHDR: boolean
   ) {
-    const tileData = new Float32Array(
-      srcTile.width * srcTile.height * channels
-    );
-    const height = data.length / (width * channels);
-    for (let y = 0; y < srcTile.height; y++) {
-      for (let x = 0; x < srcTile.width; x++) {
-        const sourceX = Math.min(width - 1, x + srcTile.x);
-        const sourceY = Math.min(height - 1, y + srcTile.y);
-        const i2 = (sourceY * width + sourceX) * channels;
-        const i1 = (y * srcTile.width + x) * channels;
-
-        for (let c = 0; c < channels; c++) {
-          tileData[i1 + c] = data[i2 + c];
-        }
-      }
+    // The planner keeps the tile origin in the image and pads on the right or bottom.
+    const validWidth = Math.min(srcTile.width, width - srcTile.x);
+    const validHeight = Math.min(srcTile.height, height - srcTile.y);
+    const rowLength = validWidth * channels;
+    let tileData = new Float32Array(rowLength * validHeight);
+    for (let y = 0; y < validHeight; y++) {
+      const start = ((y + srcTile.y) * width + srcTile.x) * channels;
+      tileData.set(data.subarray(start, start + rowLength), y * rowLength);
     }
-    return tileData;
+
+    let inputScale = 1;
+    if (isHDR) {
+      inputScale = avgLogLum({ data: tileData, channels });
+      tileData = hdrTransferFuncCPU({
+        data: tileData,
+        channels,
+        inputScale,
+        transfer: this._hdrTransfer
+      });
+    }
+
+    if (validWidth !== srcTile.width || validHeight !== srcTile.height) {
+      const stride = srcTile.width * channels;
+      const padded = new Float32Array(stride * srcTile.height);
+      for (let y = 0; y < validHeight; y++) {
+        const start = y * rowLength;
+        padded.set(tileData.subarray(start, start + rowLength), y * stride);
+      }
+      tileData = padded;
+    }
+    return { tileData, inputScale };
   }
 
   private _writeTile(
@@ -463,21 +479,10 @@ class UNet {
     let dataProcessGPU = this._dataProcessGPU;
 
     if (inputData instanceof Float32Array) {
-      let tileData = this._readTile(inputData, channels, srcTile, width);
-      if (isHDR) {
-        inputScale = avgLogLum({
-          data: tileData,
-          channels
-        });
-        tileData = hdrTransferFuncCPU({
-          data: tileData,
-          channels,
-          inputScale,
-          transfer: this._hdrTransfer
-        });
-      }
+      const prepared = this._processCPUTile(inputData, channels, srcTile, width, height, isHDR);
+      inputScale = prepared.inputScale;
       denoisedData = await (this._webNNExecutor ?? this._nativeExecutor!).executeCPU(
-        tileData,
+        prepared.tileData,
         srcTileWidth,
         srcTileHeight
       );

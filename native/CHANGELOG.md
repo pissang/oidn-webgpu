@@ -4,6 +4,10 @@ Changes to the native library: the Rust crate `oidn-webgpu-native` and the C/C++
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced edge striping when an image's width or height needs padding to a multiple of 16.
+
 ## [0.2.0] - 2026-10-26
 
 Native 0.2.0 adds a GPU C API for host-owned Metal, Vulkan and DX12 buffers, C++17 wrappers and an optional Windows CUDA adapter. C ABI 3.0.0 replaces the published 1.0.0 ABI and requires rebuilding C consumers. The Rust crate has breaking changes; see [Migration notes](#migration-notes).

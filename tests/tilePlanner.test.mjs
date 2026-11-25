@@ -83,7 +83,7 @@ test('keeps tiled model input shapes aligned for uneven image dimensions', () =>
   assertExactCoverage(plan, 1300, 721);
 });
 
-test('pads unaligned single-tile inputs by extending the outer image edges', () => {
+test('aligns single-tile inputs while keeping output within the original image', () => {
   for (const [width, height] of [[300, 300], [7, 9]]) {
     const plan = planTileGrid(width, height, 432, 80);
 

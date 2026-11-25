@@ -24,7 +24,7 @@ test('native Cargo inputs cover the entry dependency graph without browser modul
 test('local checks build only the artifacts imported by the selected tests', () => {
   const builds = name => [...testBuilds([path.resolve(root, 'tests', name)], root)].sort();
   assert.deepEqual(builds('tilePlanner.test.mjs'), ['library']);
-  assert.deepEqual(builds('tileExecute.test.mjs'), ['bundle']);
+  assert.deepEqual(builds('tileExecute.test.mjs'), ['bundle', 'library']);
   assert.deepEqual(builds('types.test.mjs'), ['library']);
   assert.deepEqual(builds('nativeMsvc.test.mjs'), []);
   assert.deepEqual(builds('nativeRelease.test.mjs'), []);

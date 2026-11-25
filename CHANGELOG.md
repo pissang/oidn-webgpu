@@ -4,6 +4,12 @@ User-visible changes to the browser library `oidn-webgpu` are documented in this
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced edge striping when an image's width or height needs padding to a multiple of 16.
+- Fixed switching between alpha and RGB denoising on successive GPU runs with the same model.
+- Fixed noisy preview corruption for GPU texture widths that need rounding up to a multiple of 8.
+
 ## [0.6.0] - 2026-10-25
 
 oidn-webgpu 0.6.0 is the first release under the new package name. It adds experimental native Rust and C APIs, sanitizes inputs and outputs like OIDN, and lowers default FP16 latency in Chrome by up to 19% on the measured GPUs. The package name is the only breaking change.

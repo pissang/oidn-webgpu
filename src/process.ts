@@ -26,6 +26,7 @@ export class GPUDataProcess {
   private _copyPass;
 
   private _isInputTexture?: boolean;
+  private _denoiseAlpha?: boolean;
 
   constructor(
     private _device: GPUDevice,
@@ -118,6 +119,9 @@ export class GPUDataProcess {
         }
       ],
       csMain: /*wgsl*/ `
+if (any(globalId.xy >= vec2u(size))) {
+  return;
+}
 let outIdx = i32(globalId.x + globalId.y * u32(size.x));
 out_color[outIdx] = textureLoad(in_color, globalId.xy, 0);
 `
@@ -137,13 +141,14 @@ out_color[outIdx] = textureLoad(in_color, globalId.xy, 0);
 
   private _updatePasses(isInputTexture: boolean, denoiseAlpha = false) {
     if (
-      this._isInputTexture != undefined &&
-      this._isInputTexture === isInputTexture
+      this._isInputTexture === isInputTexture &&
+      this._denoiseAlpha === denoiseAlpha
     ) {
       return;
     }
 
     this._isInputTexture = isInputTexture;
+    this._denoiseAlpha = denoiseAlpha;
     const isHDR = this._isHDR;
     const commonCSDefine = hdrForwardWGSL(this._hdrTransfer) + sanitizeWGSL;
     function readInputCode(inputName: string) {
@@ -151,18 +156,26 @@ out_color[outIdx] = textureLoad(in_color, globalId.xy, 0);
         ? `textureLoad(in_${inputName}, vec2u(inputPosition), 0)`
         : `in_${inputName}[inIdx]`;
     }
-    const commonCSMain = /* wgsl */ `
+    function inputBoundsCode(outputNames: string[]) {
+      const zeroStores = outputNames.map((name) => `out_${name}[outIdx] = vec3f(0.0);`).join('\n  ');
+      return /* wgsl */ `
 let x = i32(globalId.x);
 let y = i32(globalId.y);
-let inputPosition = clamp(
-  vec2i(x, y) + inputOffset,
-  vec2i(0),
-  inputSize - vec2i(1)
-);
+if (x >= outputSize.x || y >= outputSize.y) {
+  return;
+}
+let outIdx = y * outputSize.x + x;
+let inputPosition = vec2i(x, y) + inputOffset;
+// Padding is zero in network space, including when denoising inverted alpha.
+if (any(inputPosition < vec2i(0)) || any(inputPosition >= inputSize)) {
+  ${zeroStores}
+  return;
+}
+`;
+    }
+    const commonCSMain = /* wgsl */ `
 let inIdx = inputPosition.y * inputSize.x + inputPosition.x;
 let col = ${readInputCode('color')};
-
-let outIdx = y * outputSize.x + x;
 
 if (${denoiseAlpha}) {
   // Denoise the inversed alpha. Or the anti aliased edge will be too dark after denoised
@@ -179,6 +192,7 @@ else {
     this._inputPassAux.setCSCode({
       csDefine: commonCSDefine,
       csMain: /* wgsl */ `
+${inputBoundsCode(['color', 'albedo', 'normal'])}
 ${commonCSMain}
 let alb = ${readInputCode('albedo')};
 let nor = ${readInputCode('normal')};
@@ -191,6 +205,7 @@ out_albedo[outIdx] = sanitize(alb.rgb, 0.0, 1.0);
     this._inputPassColor.setCSCode({
       csDefine: commonCSDefine,
       csMain: /* wgsl */ `
+${inputBoundsCode(['color'])}
 ${commonCSMain}
 `
     });

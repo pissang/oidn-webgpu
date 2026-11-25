@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { UNet } from '../dist/oidn.js';
+import { avgLogLum, hdrTransferFuncCPU } from '../lib/hdrTransfer.js';
+import { planTileGrid } from '../lib/tileScheduler.js';
 
 if (typeof globalThis.GPUBuffer === 'undefined') {
   globalThis.GPUBuffer = class GPUBuffer {};
@@ -91,32 +93,71 @@ test('validates sizes of floating-point CPU auxiliary images', () => {
   assert.throws(() => unet._processImageData(image(2, 1), image(2, 1), image(1, 2), true), /Image size mismatch/);
 });
 
-test('replicates the image edge into padded model input tiles', () => {
-  const unet = Object.create(UNet.prototype);
-  const width = 300;
-  const height = 300;
-  const channels = 3;
-  const source = new Float32Array(width * height * channels);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const offset = (y * width + x) * channels;
-      source[offset] = x;
-      source[offset + 1] = y;
-      source[offset + 2] = x + y;
+test('CPU HDR tiles transfer real pixels and zero-pad after estimating exposure', async () => {
+  for (const [width, height] of [[64, 23], [23, 64], [64, 32]]) {
+    const color = { width, height, data: new Float32Array(width * height * 4) };
+    const albedo = { width, height, data: new Float32Array(color.data.length).fill(0.375) };
+    const normal = { width, height, data: new Float32Array(color.data.length).fill(0.75) };
+    for (let pixel = 0; pixel < width * height; pixel++) {
+      color.data.set([0.25 + pixel / 128, 0.75, 2, 0.5], pixel * 4);
+    }
+    for (const wholeImage of [true, false]) {
+      const unet = createUNet();
+      delete unet._executeTile;
+      delete unet._processImageData;
+      unet._hdr = true;
+      unet._aux = true;
+      unet._dynamicTileController.tileSize = 32;
+      const { tiles } = planTileGrid(width, height, wholeImage ? 64 : 32, 16);
+      let tileIndex = 0;
+      unet._nativeExecutor = {
+        async executeCPU(tensor, tensorWidth, tensorHeight) {
+          const tile = tiles[tileIndex++].input;
+          assert.equal(tensorWidth, tile.width);
+          assert.equal(tensorHeight, tile.height);
+          assert.equal(tensor.length, tile.width * tile.height * 9);
+          const validPixels = [];
+          for (let y = tile.y; y < Math.min(tile.y + tile.height, height); y++) {
+            for (let x = tile.x; x < Math.min(tile.x + tile.width, width); x++) {
+              validPixels.push(x + y * width);
+            }
+          }
+          const rgb = Float32Array.from(validPixels.flatMap(
+            (pixel) => Array.from(color.data.subarray(pixel * 4, pixel * 4 + 3))
+          ));
+          const encoded = hdrTransferFuncCPU({
+            data: rgb, channels: 3, inputScale: avgLogLum({ data: rgb, channels: 3 })
+          });
+          const expected = new Float32Array(tensor.length);
+          validPixels.forEach((pixel, index) => {
+            const x = pixel % width - tile.x;
+            const y = Math.floor(pixel / width) - tile.y;
+            const offset = (y * tensorWidth + x) * 9;
+            expected.set(encoded.subarray(index * 3, index * 3 + 3), offset);
+            expected.set([0.375, 0.375, 0.375, 0.75, 0.75, 0.75], offset + 3);
+          });
+          assert.deepEqual(tensor, expected);
+          const output = new Float32Array(tensorWidth * tensorHeight * 3);
+          for (let pixel = 0; pixel < output.length / 3; pixel++) {
+            output.set(tensor.subarray(pixel * 9, pixel * 9 + 3), pixel * 3);
+          }
+          return output;
+        }
+      };
+      const result = await run(unet, { color, albedo, normal, wholeImage, tileOverlap: 16 });
+      if (result.type === 'error') throw result.reason;
+      assert.equal(tileIndex, tiles.length);
+      assert.equal(result.output.width, width);
+      assert.equal(result.output.height, height);
+      for (let i = 0; i < color.data.length; i++) {
+        if (i % 4 === 3) {
+          assert.equal(result.output.data[i], 1);
+        } else {
+          assert.ok(Math.abs(result.output.data[i] - color.data[i]) < 1e-5, `pixel value ${i}`);
+        }
+      }
     }
   }
-
-  const padded = unet._readTile(source, channels,
-    { x: 0, y: 0, width: 304, height: 304 }, width);
-  const pixel = (x, y) => {
-    const offset = (y * 304 + x) * channels;
-    return Array.from(padded.subarray(offset, offset + channels));
-  };
-
-  assert.deepEqual(pixel(299, 299), [299, 299, 598]);
-  assert.deepEqual(pixel(303, 299), [299, 299, 598]);
-  assert.deepEqual(pixel(299, 303), [299, 299, 598]);
-  assert.deepEqual(pixel(303, 303), [299, 299, 598]);
 });
 
 test('profiles every tile and sums matching network nodes for the complete image', async () => {

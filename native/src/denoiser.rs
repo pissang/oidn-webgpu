@@ -782,15 +782,18 @@ mod tests {
                 (0..height)
                     .flat_map(|y| {
                         (0..width).flat_map(move |x| {
-                            let pixel = y.min(16) * 19 + x.min(18);
-                            [
-                                0.1 + (pixel % 13) as f32 / 32.0,
-                                0.2,
-                                0.3,
-                                pixel as f32 / 1024.0,
-                            ]
-                            .into_iter()
-                            .flat_map(f32::to_le_bytes)
+                            let rgba = if x < 19 && y < 17 {
+                                let pixel = y * 19 + x;
+                                [
+                                    0.1 + (pixel % 13) as f32 / 32.0,
+                                    0.2,
+                                    0.3,
+                                    pixel as f32 / 1024.0,
+                                ]
+                            } else {
+                                [0.0; 4]
+                            };
+                            rgba.into_iter().flat_map(f32::to_le_bytes)
                         })
                     })
                     .collect()

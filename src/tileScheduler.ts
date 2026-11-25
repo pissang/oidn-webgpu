@@ -68,9 +68,7 @@ function alignRangeWithinImage(
     alignUp(currentSize, OIDN_TILE_ALIGNMENT)
   );
   let alignedStart = start - Math.floor((alignedSize - currentSize) / 2);
-  // At an image edge, keep the padded portion on the right/bottom. Input
-  // readers replicate the nearest image edge into that portion, while output
-  // tiles remain strictly inside the original image.
+  // Keep alignment padding outside the image on the right or bottom.
   alignedStart = clamp(alignedStart, 0, Math.max(0, imageSize - alignedSize));
   return { start: alignedStart, end: alignedStart + alignedSize };
 }

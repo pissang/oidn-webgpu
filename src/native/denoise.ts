@@ -28,8 +28,8 @@ function alignUp(value: number, alignment: number) {
 }
 
 /**
- * Input processing of one tile for buffer images: clamp-to-edge reads of the
- * tile's input rectangle, HDR transfer, and conversion directly into the
+ * Input processing of one tile for buffer images: zero padding outside the
+ * image, HDR transfer, and conversion directly into the
  * network's packed tensor. Auxiliary RGB channels cross vec4 boundaries;
  * unused lanes must be zero just as in createInputPackShader.
  */
@@ -46,6 +46,8 @@ function inputShader(sourceCount: number, hdr: boolean, transfer: HDRTransfer, p
   const type = precision === 'fp16' ? 'vec4<f16>' : 'vec4<f32>';
   const stores = Array.from({ length: blocks }, (_, block) =>
     `packed[outIdx * ${blocks} + ${block}] = ${type}(vec4f(${[0, 1, 2, 3].map((lane) => channels[block * 4 + lane] ?? '0.0').join(', ')}));`).join('\n  ');
+  const zeroStores = Array.from({ length: blocks }, (_, block) =>
+    `packed[outIdx * ${blocks} + ${block}] = ${type}(0.0);`).join('\n    ');
   return /* wgsl */ `${precision === 'fp16' ? 'enable f16;\n' : ''}${hdrForwardWGSL(transfer)}${sanitizeWGSL}
 struct Params {
   imageSize: vec2i,
@@ -64,9 +66,14 @@ fn main(@builtin(global_invocation_id) globalId: vec3u) {
   if (position.x >= params.tileSize.x || position.y >= params.tileSize.y) {
     return;
   }
-  let inputPosition = clamp(position + params.offset, vec2i(0), params.imageSize - vec2i(1));
-  let inIdx = inputPosition.y * params.imageSize.x + inputPosition.x;
   let outIdx = position.y * params.tileSize.x + position.x;
+  let inputPosition = position + params.offset;
+  // Skip signed-normal conversion for padding so it stays zero in network space.
+  if (any(inputPosition < vec2i(0)) || any(inputPosition >= params.imageSize)) {
+    ${zeroStores}
+    return;
+  }
+  let inIdx = inputPosition.y * params.imageSize.x + inputPosition.x;
   let col = in_color[inIdx];
   ${hdr
     ? `let scaled = sanitize(col.rgb * frame.inputScale, 0.0, FLT_MAX);
