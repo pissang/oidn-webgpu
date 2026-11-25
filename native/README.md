@@ -4,7 +4,7 @@ Native GPU denoising with the Open Image Denoise U-Net. It runs the same WGSL ke
 
 **Status:** experimental; APIs and results may change between versions. See [Tested configurations](#tested-configurations). CI builds and checks packages but does not run them on a GPU.
 
-**Version:** this guide describes Native 0.2.0 with C ABI 3.0.0 ([changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)). Native 0.1.x shipped C ABI 1.0.0 with the Rust API, CPU C filter and core planner only; see [Versioning](#versioning) for compatible library versions.
+**Version:** this guide describes Native 0.2.1 with C ABI 3.0.0 ([changelog](https://github.com/pissang/oidn-webgpu/blob/main/native/CHANGELOG.md)). See [Versioning](#versioning) for compatibility with Native 0.1.x.
 
 - [Choose an API](#choose-an-api)
 - [Get the library](#get-the-library)
@@ -96,7 +96,7 @@ For Rust renderers on wgpu: the denoiser records into your command encoder and r
 
 ```toml
 [dependencies]
-oidn-webgpu = { package = "oidn-webgpu-native", version = "0.2.0" }
+oidn-webgpu = { package = "oidn-webgpu-native", version = "0.2.1" }
 # Or a Git source:
 # oidn-webgpu = { package = "oidn-webgpu-native", git = "https://github.com/pissang/oidn-webgpu.git", rev = "<commit>" }
 ```
@@ -592,7 +592,7 @@ Windows GNU, Linux musl and other architectures are not provided, and Windows GN
 | `bin/oidn-webgpu-bench` | Network benchmark |
 | `manifest.json`, `SHA256SUMS` | Source commit, target, compiler versions, file hashes |
 
-Release package names contain the crate version and target triple, for example `oidn-webgpu-native-0.2.0-aarch64-apple-darwin.tar.gz`; `manifest.json` records the full source commit as `source.commit`. CI and local archive names also include the commit, and archives built from modified sources end in `-dirty`.
+Release package names contain the crate version and target triple, for example `oidn-webgpu-native-0.2.1-aarch64-apple-darwin.tar.gz`.
 
 To use a package's core from Rust, pin the Cargo `rev` to `source.commit` and set `OIDN_WEBGPU_CORE_ARCHIVE` to its core library. Cargo still compiles the Rust layer; precompiled `rlib`s are not provided.
 

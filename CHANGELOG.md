@@ -4,6 +4,8 @@ User-visible changes to the browser library `oidn-webgpu` are documented in this
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-25
+
 ### Fixed
 
 - Reduced edge striping when an image's width or height needs padding to a multiple of 16.

@@ -4,6 +4,8 @@ Changes to the native library: the Rust crate `oidn-webgpu-native` and the C/C++
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-25
+
 ### Fixed
 
 - Reduced edge striping when an image's width or height needs padding to a multiple of 16.
