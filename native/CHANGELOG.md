@@ -4,6 +4,10 @@ Changes to the native library: the Rust crate `oidn-webgpu-native` and the C/C++
 
 ## [Unreleased]
 
+### Added
+
+- Rust `Denoiser::experimental_features(&adapter)` returns the adapter's supported `EXPERIMENTAL_COOPERATIVE_MATRIX`. `recommended_features` does not include it, so Rust hosts that want cooperative-matrix kernels add this result to `required_features` and set `experimental_features` to `wgpu::ExperimentalFeatures::enabled()` (see [Device setup](README.md#device-setup)). Devices that do not opt in keep using implicit GEMM.
+
 ## [0.2.1] - 2026-11-25
 
 ### Fixed

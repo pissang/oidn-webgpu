@@ -334,10 +334,19 @@ impl Denoiser {
     pub fn required_features() -> wgpu::Features {
         wgpu::Features::empty()
     }
-    /// Optional stable acceleration; hosts may additionally opt into wgpu's
-    /// experimental cooperative-matrix feature contract before device creation.
+    /// Optional stable acceleration supported by `adapter`. Does not include
+    /// experimental features; see [`Denoiser::experimental_features`].
     pub fn recommended_features(adapter: &wgpu::Adapter) -> wgpu::Features {
         adapter.features() & (wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP)
+    }
+    /// Optional experimental acceleration supported by `adapter`: currently
+    /// `EXPERIMENTAL_COOPERATIVE_MATRIX`, which `Kernel::Auto` uses for
+    /// subgroup-matrix kernels. Requesting a non-empty result requires
+    /// `DeviceDescriptor::experimental_features` set to
+    /// `wgpu::ExperimentalFeatures::enabled()`, which is `unsafe` under wgpu's
+    /// experimental feature contract.
+    pub fn experimental_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+        adapter.features() & wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX
     }
     /// Baseline; larger images may require higher buffer limits.
     pub fn required_limits() -> wgpu::Limits {

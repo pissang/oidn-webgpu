@@ -151,9 +151,37 @@ cargo run --release --manifest-path native/Cargo.toml --example host_buffers -- 
 
 ### Device setup
 
-- Before requesting the device, add `Denoiser::required_features()`, `Denoiser::recommended_features(&adapter)` and `Denoiser::required_limits()`. Large images may need higher buffer limits. The library cannot enable features later.
+Before requesting the device, add the denoiser's features and limits. The library cannot enable features later.
+
+```rust
+let experimental = Denoiser::experimental_features(&adapter);
+let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
+    required_features: Denoiser::required_features()
+        | Denoiser::recommended_features(&adapter)
+        | experimental
+        | my_features,
+    required_limits: Denoiser::required_limits(), // or higher; see below
+    // SAFETY: opts into wgpu's experimental feature contract.
+    experimental_features: if experimental.is_empty() {
+        wgpu::ExperimentalFeatures::disabled()
+    } else {
+        unsafe { wgpu::ExperimentalFeatures::enabled() }
+    },
+    ..Default::default()
+}).await?;
+```
+
+| Call | Returns | Needed for |
+| --- | --- | --- |
+| `Denoiser::required_features()` | Empty | Nothing today; request it for forward compatibility |
+| `Denoiser::recommended_features(&adapter)` | Supported `SHADER_F16`, `SUBGROUP` | FP16 precision and subgroup kernels. No experimental features |
+| `Denoiser::experimental_features(&adapter)` | Supported `EXPERIMENTAL_COOPERATIVE_MATRIX` | Cooperative-matrix (tensor core) kernels. Requires `ExperimentalFeatures::enabled()` |
+| `Denoiser::required_limits()` | `wgpu::Limits::default()` | Baseline; large images may need higher buffer limits |
+
+- Cooperative matrices are opt-in on this API: a device built only from `required_features()` and `recommended_features()` uses implicit GEMM. The C API (`oidnw_device_create`) and the GPU C API import paths enable them by default when supported.
 - Precision is FP16 when the device enables `SHADER_F16`, otherwise FP32. On DX12, `SHADER_F16` also needs DXC (Shader Model 6.2+): ship `dxcompiler.dll` and its matching `dxil.dll`.
-- With `kernel = Kernel::Auto`, cooperative-matrix kernels are selected when the device enables `EXPERIMENTAL_COOPERATIVE_MATRIX` (wgpu's experimental feature contract applies); on Windows and Linux they need Vulkan. Otherwise AUTO uses implicit GEMM. Selecting `Kernel::SubgroupMatrix` does not enable the feature; `Denoiser::new` returns `Error::UnsupportedDevice` if it is not enabled.
+- With `kernel = Kernel::Auto`, cooperative-matrix kernels are selected when the device enables `EXPERIMENTAL_COOPERATIVE_MATRIX`; otherwise AUTO uses implicit GEMM. On Windows and Linux the feature needs the Vulkan backend: wgpu prefers DX12 on Windows, where `experimental_features(&adapter)` is empty, so create the instance with `wgpu::Backends::VULKAN` to use matrices there. Selecting `Kernel::SubgroupMatrix` does not enable the feature; `Denoiser::new` returns `Error::UnsupportedDevice` if it is not enabled.
+- `prepared.info().kernels` reports which kernel paths a prepared instance uses.
 
 ### Options
 

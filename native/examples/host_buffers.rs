@@ -26,9 +26,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
     }))?;
+    let experimental = Denoiser::experimental_features(&adapter);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("example host"),
-        required_features: Denoiser::required_features() | Denoiser::recommended_features(&adapter),
+        required_features: Denoiser::required_features()
+            | Denoiser::recommended_features(&adapter)
+            | experimental,
+        // SAFETY: cooperative matrices are an experimental wgpu feature, used
+        // only by the denoiser's subgroup-matrix kernels.
+        experimental_features: if experimental.is_empty() {
+            wgpu::ExperimentalFeatures::disabled()
+        } else {
+            unsafe { wgpu::ExperimentalFeatures::enabled() }
+        },
         // Request the adapter's buffer limits for larger images. An application
         // can instead request only the limits its own workloads need.
         required_limits: adapter.limits(),
